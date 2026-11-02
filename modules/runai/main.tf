@@ -1,11 +1,20 @@
 locals {
-  serving = var.config.serving != null
-  ingress_settings = {
+  control         = var.config.role == "control-plane"
+  worker_install  = !local.control && var.config.cluster_uid != ""
+  public_endpoint = coalesce(var.config.public_endpoint, local.control)
+  serving         = !local.control && var.config.serving != null
+  namespace       = local.control ? "runai-backend" : "runai"
+  resource_name   = "runai-${local.control ? "control" : "worker"}-${substr(sha256(var.cluster_id), 0, 10)}"
+  domain          = local.public_endpoint ? "runai-${substr(split("-", nebius_tunnel_v1_tunnel.this[0].id)[1], 3, -1)}.tunnel.applications.${var.region}.nebius.cloud" : var.config.domain
+  ingress_settings = merge({
     "controller.ingressClass"              = var.config.ingress_class
     "controller.ingressClassResource.name" = var.config.ingress_class
-    "controller.service.type"              = "LoadBalancer"
-  }
-  prometheus_settings = {
+    "controller.service.type"              = local.public_endpoint ? "ClusterIP" : "LoadBalancer"
+    }, local.public_endpoint ? {
+    "fullnameOverride"                        = "runai-ingress"
+    "controller.config.use-forwarded-headers" = true
+  } : {})
+  prometheus_settings = merge({
     "stack.prometheus.enabled"       = false
     "stack.grafana.enabled"          = false
     "stack.alertmanager.enabled"     = false
@@ -13,23 +22,30 @@ locals {
     "stack.kubeStateMetrics.enabled" = false
     "stack.defaultRules.create"      = false
     "blackboxExporter.replicaCount"  = 0
-  }
-  worker_settings = {
-    "control-plane.enabled"                                                      = false
-    "runai-cluster.enabled"                                                      = true
-    "runai-cluster.controlPlane.url"                                             = var.config.control_plane_url
-    "runai-cluster.controlPlane.existingSecret"                                  = kubernetes_secret_v1.bootstrap.metadata[0].name
-    "runai-cluster.controlPlane.secretKeys.clientSecret"                         = "bootstrap-token"
-    "runai-cluster.controlPlane.bootstrapToken"                                  = "@/runai/config/client_secret"
-    "runai-cluster.cluster.uid"                                                  = var.config.cluster_uid
-    "runai-cluster.cluster.url"                                                  = "https://${var.config.domain}"
-    "runai-cluster.clusterConfig.global.ingress.ingressClass"                    = var.config.ingress_class
-    "runai-cluster.kai-resource-management.kai-scheduler.global.nvFractions.set" = false
+    }, { for component in ["kubelet", "kubeApiServer", "kubeControllerManager", "kubeScheduler", "kubeEtcd", "kubeProxy", "coreDns"] :
+    "stack.${component}.enabled" => false
+  })
+  worker_values = {
+    controlPlane = {
+      url            = var.config.control_plane_url
+      existingSecret = "runai-bootstrap"
+      secretKeys     = { clientSecret = "bootstrap-token" }
+      bootstrapToken = "@/runai/config/client_secret"
+    }
+    cluster = { uid = var.config.cluster_uid, url = "https://${local.domain}" }
+    clusterConfig = merge({ global = { ingress = { ingressClass = var.config.ingress_class }, inference = { enabled = local.serving } } }, local.public_endpoint ? {
+      "cluster-api" = { ingress = {
+        tlsEnabled  = false
+        annotations = { "nginx.ingress.kubernetes.io/ssl-redirect" = "false" }
+      } }
+    } : {}, local.serving ? { "pod-grouper" = { args = { gangScheduleKnative = false } } } : {})
+    operands                  = { trainingOperator = { enabled = false } }
+    "kai-resource-management" = { "kai-scheduler" = { global = { nvFractions = { set = false } } } }
   }
 }
 
 resource "nebius_applications_v1alpha1_k8s_release" "ingress" {
-  count            = var.config.install_ingress ? 1 : 0
+  count            = var.config.install_ingress && (!local.control || !local.public_endpoint) ? 1 : 0
   parent_id        = var.parent_id
   cluster_id       = var.cluster_id
   application_name = "runai-ingress"
@@ -43,7 +59,7 @@ resource "nebius_applications_v1alpha1_k8s_release" "ingress" {
 }
 
 resource "nebius_applications_v1alpha1_k8s_release" "prometheus_operator" {
-  count            = var.config.install_prometheus_operator ? 1 : 0
+  count            = !local.control && var.config.install_prometheus_operator ? 1 : 0
   parent_id        = var.parent_id
   cluster_id       = var.cluster_id
   application_name = "runai-prometheus-operator"
@@ -57,6 +73,7 @@ resource "nebius_applications_v1alpha1_k8s_release" "prometheus_operator" {
 }
 
 resource "kubernetes_secret_v1" "bootstrap" {
+  count = local.worker_install ? 1 : 0
   metadata {
     name      = "runai-bootstrap"
     namespace = "runai"
@@ -65,38 +82,21 @@ resource "kubernetes_secret_v1" "bootstrap" {
   data_wo_revision = var.config.bootstrap_token_revision
 }
 
-resource "nebius_applications_v1alpha1_k8s_release" "this" {
-  parent_id        = var.parent_id
-  cluster_id       = var.cluster_id
-  application_name = "runai-cluster"
-  namespace        = "runai"
-  product_slug     = "nebius/nvidia-run-ai"
-  sensitive = {
-    set = merge(local.worker_settings, local.serving ? {
-      "runai-cluster.clusterConfig.pod-grouper.args.gangScheduleKnative" = false
-    } : {})
-    values  = var.config.values
-    version = sha256(jsonencode([local.worker_settings, var.config]))
-  }
-  depends_on = [nebius_applications_v1alpha1_k8s_release.ingress, nebius_applications_v1alpha1_k8s_release.prometheus_operator, kubectl_manifest.serving, kubectl_manifest.serving_ingress]
+resource "helm_release" "worker" {
+  count         = local.worker_install ? 1 : 0
+  name          = "runai-cluster"
+  namespace     = "runai"
+  repository    = "https://helm.ngc.nvidia.com/nvidia/runai-oss"
+  chart         = "runai-cluster"
+  version       = "3.0.17"
+  atomic        = true
+  wait_for_jobs = true
+  timeout       = 1200
+  values        = concat(var.config.values == null ? [] : [var.config.values], [yamlencode(local.worker_values)])
+  depends_on    = [kubernetes_secret_v1.bootstrap, nebius_applications_v1alpha1_k8s_release.ingress, nebius_applications_v1alpha1_k8s_release.prometheus_operator, helm_release.tunnel_agent, kubectl_manifest.serving, kubectl_manifest.serving_ingress]
 }
 
-data "kubernetes_resources" "worker" {
-  api_version    = "apps/v1"
-  kind           = "Deployment"
-  namespace      = "runai"
-  field_selector = "metadata.name=runai-operator"
-  depends_on     = [nebius_applications_v1alpha1_k8s_release.this]
-
-  lifecycle {
-    postcondition {
-      condition = anytrue([for deployment in self.objects : try(
-        deployment.spec.selector.matchLabels.name == "runai" &&
-        deployment.spec.template.metadata.labels.app == "runai-operator" &&
-        contains([for container in deployment.spec.template.spec.containers : container.name], "runai-go-operator"),
-        false
-      )])
-      error_message = "The stock Run:ai worker Deployment was not installed. Publish/use Marketplace wrapper 0.3.2 or later; application DEPLOYED alone does not verify a worker."
-    }
-  }
+output "url" {
+  description = "Control-plane or regional worker HTTPS URL; register this exact worker URL through Run:ai."
+  value       = "https://${local.domain}"
 }

@@ -153,7 +153,7 @@ resource "nebius_mk8s_v1_node_group" "cpu-only" {
 # GPU NODE GROUPS
 #################
 data "nebius_billing_v1_pricing_policy" "gpu_spot" {
-  count = var.gpu_node_groups > 0 && var.gpu_nodes_preemptible && var.gpu_nodes_spot_pricing_policy_id != null && !local.gb300_enabled ? 1 : 0
+  count = var.gpu_node_groups > 0 && anytrue([for pool in local.gpu_groups : pool.preemptible]) && var.gpu_nodes_spot_pricing_policy_id != null && !local.gb300_enabled ? 1 : 0
 
   id = var.gpu_nodes_spot_pricing_policy_id
 }
@@ -164,25 +164,24 @@ resource "terraform_data" "gpu_spot_pricing_validation" {
 
   lifecycle {
     precondition {
-      condition     = var.gpu_nodes_preemptible
-      error_message = "gpu_nodes_spot_pricing_policy_id requires gpu_nodes_preemptible = true."
+      condition     = anytrue([for pool in local.gpu_groups : pool.preemptible])
+      error_message = "gpu_nodes_spot_pricing_policy_id requires at least one preemptible GPU pool."
     }
 
     precondition {
-      condition = var.gpu_nodes_preemptible ? (
+      condition = anytrue([for pool in local.gpu_groups : pool.preemptible]) ? (
         data.nebius_billing_v1_pricing_policy.gpu_spot[0].parent_id == var.parent_id
       ) : true
       error_message = "gpu_nodes_spot_pricing_policy_id must reference a pricing policy in parent_id."
     }
 
     precondition {
-      condition = var.gpu_nodes_preemptible ? (
-        try(
-          data.nebius_billing_v1_pricing_policy.gpu_spot[0].compute_instance_spec.v1.platform == local.gpu_nodes_platform,
-          false
-        )
-      ) : true
-      error_message = "gpu_nodes_spot_pricing_policy_id must reference a pricing policy for the selected GPU platform."
+      condition = anytrue([for pool in local.gpu_groups : pool.preemptible]) ? alltrue([
+        for pool in local.gpu_groups : try(
+          data.nebius_billing_v1_pricing_policy.gpu_spot[0].compute_instance_spec.v1.platform == pool.platform, false
+        ) if pool.preemptible
+      ]) : true
+      error_message = "gpu_nodes_spot_pricing_policy_id must match every preemptible GPU pool's platform."
     }
   }
 }

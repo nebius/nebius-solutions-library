@@ -1,5 +1,5 @@
 # CPU-only control cluster/state; supply tenant_id, parent_id, subnet_id
-# and iam_token externally. The complete Marketplace app is a separate step.
+# and iam_token externally. Credential files remain outside Git and state.
 cluster_name               = "runai-control"
 region                     = "eu-north1"
 k8s_version                = "1.35"
@@ -28,6 +28,14 @@ network_operator_values    = <<-YAML
   maintenanceOperator:
     enabled: false
 YAML
-# Install the complete Run:ai application separately through Marketplace Console/API.
-# That graph owns PostgreSQL, credentials, TLS and its generated public URL.
-enable_runai = false
+enable_runai               = true
+runai = {
+  role                    = "control-plane"
+  public_endpoint         = true
+  admin_email             = "admin@run.ai"
+  admin_password_file     = "/secure/runai-admin-password"
+  database_password_file  = "/secure/runai-database-password"
+  tunnel_public_key_file  = "/secure/runai-tunnel.pub"
+  tunnel_private_key_file = "/secure/runai-tunnel.pem"
+  postgresql              = { platform = "cpu-d3", preset = "4vcpu-16gb" }
+}

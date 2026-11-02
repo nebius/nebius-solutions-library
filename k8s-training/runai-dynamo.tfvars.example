@@ -27,13 +27,7 @@ node_group_strategy = {
   max_surge       = { count = 1 }
   max_unavailable = { count = 0 }
 }
-custom_driver       = false
-gpu_operator_values = <<-YAML
-  gfd:
-    enabled: false
-  nfd:
-    enabled: true
-YAML
+custom_driver = false
 # Marketplace operators; Cilium keeps ownership of primary networking.
 network_operator_values = <<-YAML
   nfd:
@@ -56,24 +50,21 @@ enable_runai        = true
 enable_dynamo       = true
 enable_nim_operator = true
 runai = {
-  role                 = "worker"
-  domain               = "cluster.eu2.example.com"
-  control_plane_url    = "https://runai.example.com"
-  cluster_uid          = "REPLACE_WITH_REGISTERED_CLUSTER_UUID"
-  bootstrap_token_file = "/secure/runai-eu2-bootstrap-token"
-  values               = <<-YAML
-    runai-cluster:
-      clusterConfig:
-        cluster-api:
-          ingress:
-            tlsEnabled: true
-            tls-secret: runai-cluster-domain-tls
-        global:
-          subdomainSupport: false
-          nvidiaDcgmExporter:
-            installedFromGpuOperator: false
-            namespace: dcgm-exporter
-            serviceMonitor: {enabled: true}
+  role                    = "worker"
+  public_endpoint         = true
+  tunnel_public_key_file  = "/secure/runai-eu2-tunnel.pub"
+  tunnel_private_key_file = "/secure/runai-eu2-tunnel.pem"
+  control_plane_url       = "https://runai.example.com"
+  cluster_uid             = "REPLACE_WITH_REGISTERED_CLUSTER_UUID"
+  bootstrap_token_file    = "/secure/runai-eu2-bootstrap-token"
+  values                  = <<-YAML
+    clusterConfig:
+      global:
+        subdomainSupport: false
+        nvidiaDcgmExporter:
+          installedFromGpuOperator: false
+          namespace: dcgm-exporter
+          serviceMonitor: {enabled: true}
   YAML
   serving = {
     inference_domain = "*.models.eu2.example.com"
@@ -127,15 +118,6 @@ loki                     = { enabled = false }
 # Terraform creates the prerequisite Secrets from protected files, using write-only data.
 platform_namespaces = ["runai", "knative-serving", "dcgm-exporter"]
 platform_secrets = {
-  worker_tls = {
-    name       = "runai-cluster-domain-tls", namespace = "runai", type = "kubernetes.io/tls"
-    data_files = { "tls.crt" = "/secure/cluster-eu2.crt", "tls.key" = "/secure/cluster-eu2.key" }
-  }
-  ca = {
-    name       = "runai-ca-cert", namespace = "runai"
-    labels     = { "run.ai/cluster-wide" = "true", "run.ai/name" = "runai-ca-cert" }
-    data_files = { "runai-ca.pem" = "/secure/ca-chain.pem" }
-  }
   serving_tls = {
     name       = "runai-cluster-inference-tls", namespace = "knative-serving", type = "kubernetes.io/tls"
     data_files = { "tls.crt" = "/secure/models-eu2.crt", "tls.key" = "/secure/models-eu2.key" }
@@ -144,7 +126,7 @@ platform_secrets = {
 # Customer onboarding, buckets, notebooks, model/cache manifests and workloads
 # belong to the external application.
 
-# Stock NVIDIA telemetry/discovery; the managed image retains its GPU stack.
+# Stock NVIDIA telemetry; Nebius supplies GPU drivers and discovery.
 platform_releases = {
   nebius-dcgm-exporter = {
     namespace    = "dcgm-exporter"
@@ -153,13 +135,5 @@ platform_releases = {
     version      = "4.8.3"
     values_files = ["/secure/dcgm-exporter-values.yaml"]
   }
-  gpu-feature-discovery = {
-    namespace    = "gpu-operator"
-    repository   = "https://nvidia.github.io/k8s-device-plugin"
-    chart        = "nvidia-device-plugin"
-    version      = "0.20.1"
-    values_files = ["/secure/gfd-values.yaml"]
-  }
 }
-# Native GFD affinity and exporter values: ../modules/runai/README.md.
-# GPU Operator driver/DCGM ownership stays disabled.
+# Native exporter values: ../modules/runai/README.md.

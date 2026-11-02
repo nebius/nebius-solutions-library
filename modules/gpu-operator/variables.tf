@@ -43,12 +43,6 @@ variable "cdi_enabled" {
   default     = null
 }
 
-variable "managed_image" {
-  description = "The node image owns drivers, runtime, device plugin and DCGM; prevent the operator from reinstalling them."
-  type        = bool
-  default     = false
-}
-
 variable "values" {
   description = "Optional native Helm values YAML content for the Marketplace application."
   type        = string

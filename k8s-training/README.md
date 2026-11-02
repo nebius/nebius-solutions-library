@@ -4,40 +4,31 @@
 
 New integrations are disabled by default:
 
-- `enable_runai`: a registered Marketplace Run:ai worker, with native Marketplace
-  ingress/Prometheus prerequisites and optional upstream Knative/Kourier.
-- `enable_dynamo`: Dynamo/Grove, reusing Run:ai's KAI scheduler on Run:ai workers.
-- `enable_nim_operator`, `enable_mpi_operator`, `enable_opencost`: the native
-  NIM Operator, stock Kubeflow MPI Operator and OpenCost.
+- `enable_runai`: a Marketplace control plane or standard NVIDIA worker, with
+  native PostgreSQL/Tunnel resources, Marketplace prerequisites and optional Knative.
+- `enable_dynamo`: Marketplace Dynamo/Grove, reusing Run:ai's KAI on workers.
+- `enable_nim_operator`, `enable_mpi_operator`, `enable_opencost`: native NIM
+  Operator, stock Kubeflow MPI Operator and OpenCost.
 
-The [Run:ai module](../modules/runai/README.md) documents the separate complete
-Marketplace control-plane step, worker registration, TLS and prerequisites.
+The [Run:ai module](../modules/runai/README.md) documents installation stages,
+public endpoints, registration, protected credentials and prerequisites.
 Use [Dynamo's module](../modules/dynamo/README.md) for scheduler ownership.
 Customer identities, buckets, notebooks, model workloads and warm-reserve jobs
 belong to the external application, using native APIs.
 
-Copy an example to `terraform.tfvars` and supply its project, subnet, IAM and
+Copy an example to `terraform.tfvars` and supply project, subnet, IAM and
 protected file inputs:
 
 - `training.tfvars.example`: ordinary training.
 - `inference.tfvars.example`: standalone Dynamo inference.
 - `runai-control-plane.tfvars.example`: a separate CPU control cluster.
-- `runai-dynamo.tfvars.example`: a worker with the current platform extensions.
+- `runai-dynamo.tfvars.example`: a worker with the platform extensions.
 
-Run:ai profiles select Nebius managed driver images, disable duplicate
-observability installations, and supply prerequisite TLS Secrets.
-GPU/Network Operators use the existing Marketplace installers. Optional
-`gpu_operator_values` and `network_operator_values` accept YAML strings.
-Use inline YAML in `.tfvars`, or load a file with `file(...)` in Terraform or
-Terragrunt configuration. Explicit module settings override YAML; managed-image
-protections remain enforced.
-Run:ai workers using managed GPU images disable operator-owned drivers, runtime,
-device plugin and DCGM, including the Marketplace driver CRs. Marketplace owns
-operator chart versions; check installed versions against NVIDIA support matrices.
-Stock GPU discovery uses `platform_releases`; disable its device plugin and NFD.
-
-Worker bootstrap credentials use a write-only Kubernetes Secret, referenced by
-the stock chart rather than embedded in Helm values.
+Run:ai examples use Nebius preinstalled-driver images and the existing native
+Marketplace discovery package. GPU Operator is not installed on those images.
+GPU/Network Operator YAML settings remain available through `gpu_operator_values`
+and `network_operator_values`; use inline YAML or `file(...)` in Terraform or
+Terragrunt. Explicit module settings take precedence.
 
 ### Independently configured regional pools
 
@@ -52,11 +43,10 @@ strings for regions outside the inherited defaults. Check the project's native
 platform catalog and MK8s compatibility matrix before selecting a shape.
 
 Provision infrastructure before installing controllers that require its API.
-For a new Run:ai fleet, provision the CPU control cluster and install the complete
-control-plane application through Marketplace Console/API. Register real worker
-URLs through the native API/UI, then supply each UUID/bootstrap token and enable
-its Terraform worker module. Supply TLS Secrets and verify optional Knative
-Serving Ready before installing workers that use inference.
+For a new Run:ai fleet, apply the control profile, prepare each worker's real URL
+with an empty cluster UUID, and register it through the native API/UI. Supply the
+returned UUID/bootstrap token to install the standard worker. Verify optional
+Knative Serving Ready before installing workers that enable inference.
 MPI uses its stock versioned manifest, including its own namespace.
 
 Keep existing resources in their original backends. Existing Helm-owned operators

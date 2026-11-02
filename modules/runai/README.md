@@ -1,67 +1,65 @@
 # Run:ai
 
-Installs a registered regional worker through the canonical **Nebius Marketplace
-Run:ai** application. It requires wrapper **0.3.2 or later**, containing the stock
-Run:ai OSS **3.0.17** worker. Verify that version is published in your catalog
-before applying; the current Nebius resource cannot select a product version.
-The module also verifies the stock `runai-operator` Deployment through the
-Kubernetes provider, so a release that installs no worker fails verification.
+Creates a separate control plane or a regional worker on existing Kubernetes.
+The control plane uses the published Nebius Marketplace Run:ai package
+(wrapper 0.3.1 / Run:ai OSS 3.0.17), private managed PostgreSQL and an optional
+Nebius Tunnel public HTTPS URL. Public Terraform resources own PostgreSQL, IAM
+and Tunnel separately from the Marketplace Helm release; deleting that release
+alone does not delete the database. No Marketplace modification is required.
 
-The complete control-plane application includes managed PostgreSQL and a generated
-public HTTPS URL. Install it separately through Marketplace Console/API; this
-worker module does not create or adopt that deployment graph. Start with the
-CPU-only `k8s-training/runai-control-plane.tfvars.example` for its compute.
+Workers use NVIDIA's unchanged `runai-cluster` 3.0.17 chart and the documented
+registration flow. Keep it aligned with the published control-plane version.
+This standard worker step is separate from the Marketplace control-plane package.
+The Terraform resource cannot pin the Marketplace product version; check the
+published catalog before applying.
 
-```hcl
-module "runai" {
-  source     = "../modules/runai"
-  parent_id  = var.parent_id
-  cluster_id = var.cluster_id
-  config = {
-    domain              = "worker.example.com"
-    control_plane_url   = "https://runai.example.com"
-    cluster_uid         = "<registered native cluster UUID>"
-    bootstrap_token_revision = 1
-  }
-  bootstrap_token = file("/private/runai-bootstrap.token")
-}
-```
+## Installation
 
-Register the real worker URL using the native UI/API, then supply its UUID and a
-fresh bootstrap token. A private worker domain is supported when the intended
-callers and control plane can reach its DNS/ingress over trusted TLS. The module
-creates `runai-bootstrap` with write-only data and projects the token through the
-stock chart's `existingSecret` / `@file` mechanism. The token is not embedded in
-Helm values/history or Terraform state. Increment its revision for each rotation.
-The caller creates namespace `runai`; `k8s-training` does this automatically.
+1. Apply `k8s-training/runai-control-plane.tfvars.example`, supplying protected
+   admin/database passwords and an RSA Tunnel key pair. The control plane's
+   private network is derived from its cluster subnet. PostgreSQL shape remains
+   configurable for the target region.
+2. Apply each worker with `public_endpoint = true`, its own Tunnel key pair,
+   `cluster_uid = ""` and Dynamo disabled. This creates the real public URL,
+   ingress and Prometheus Operator prerequisites without installing a worker.
+3. Register that URL through the control plane's native UI/API. Supply the real
+   UUID, control-plane URL and fresh bootstrap token, then apply the worker.
+4. Verify Connected and a native workload before enabling Dynamo and dependent
+   extensions. Enable optional Knative separately after its Ready condition passes.
 
-Prerequisites use existing Marketplace products:
+Use the `runai_url` output for the actual endpoint. Public URLs use Nebius Tunnel
+TLS; Run:ai still authenticates and authorizes its API. Tunnel is currently a
+Preview service. Each agent receives only the `applicationtunnel.agent` role
+scoped to its Tunnel. Agent transport uses port 8443; public HTTPS uses 443.
 
-- `nebius/nginx-ingress-controller`, with ingress class `nginx` by default.
-- `bitnami/kube-prometheus` wrapper **11.0.0 or later**, using its `stack.*`
-  settings to install the Prometheus Operator without a second Prometheus server.
+The root reads credentials from protected files. Ephemeral module inputs and
+provider write-only fields keep them out of Terraform state. Tunnel keys and
+worker bootstrap tokens are mounted from write-only Kubernetes Secrets, outside
+Helm values/history. Initial admin/database credentials use the stock chart's
+intended Secret creation. Increment the corresponding revision when rotating
+credentials. Keep state and deployment-system access restricted.
 
-Set `install_ingress` or `install_prometheus_operator` to false to reuse an
-existing compatible owner. Run:ai creates its own Prometheus instance. Prepare
-worker DNS and `runai-cluster-domain-tls` in `runai` before the worker starts.
-`values`, `ingress_values` and `prometheus_values` accept raw native YAML strings;
-worker values use the Marketplace root `runai-cluster`. Fixed ownership settings
-take precedence. Keep credentials in separately managed Secrets.
+For custom worker DNS, set `public_endpoint = false`, supply `domain`, and
+prepare trusted TLS at ingress before registration. `values`, `ingress_values`
+and `prometheus_values` accept native YAML strings. Worker `values` use the
+upstream chart root, without a `runai-cluster` wrapper. Explicit ownership
+settings take precedence.
 
-One worker owns Run:ai's KAI scheduler; fractions stay disabled. Dynamo must reuse
-that scheduler after its API/controllers are available. Do not install a second
-KAI or admit the same workload through competing schedulers. Native GPU-image
-ownership remains with Nebius; this module does not install drivers.
+## Prerequisites and GPU ownership
 
-## Managed-image telemetry and discovery
+Ingress and Prometheus Operator use the existing Marketplace products
+`nebius/nginx-ingress-controller` and `bitnami/kube-prometheus` (wrapper 11.0.0
+or later, containing kube-prometheus-stack 92.3.0). Only the Operator is installed;
+Run:ai owns its Prometheus server. Set the respective `install_*` flag false to
+reuse a compatible existing installation.
 
-The supplied example retains separate upstream DCGM-exporter and GFD owners.
-In worker values use `runai-cluster.clusterConfig.global.nvidiaDcgmExporter` with
-`installedFromGpuOperator: false`, `namespace: dcgm-exporter` and
-`serviceMonitor.enabled: true`. Keep GPU Operator's driver/runtime/device-plugin
-and DCGM ownership disabled.
+Nebius preinstalled-driver images retain their drivers, runtime and device
+plugin. The existing Marketplace device-plugin package supplies GFD with native
+image affinity; do not add duplicate GFD or GPU Operator installations. Run:ai
+owns KAI, Dynamo reuses it, and GPU fractions stay disabled.
 
-DCGM exporter values for Nebius's existing host engine:
+For telemetry against Nebius's existing DCGM host engine, the example uses the
+stock NVIDIA exporter. Its values are:
 
 ```yaml
 image:
@@ -74,42 +72,20 @@ tolerations: [{key: nvidia.com/gpu, operator: Exists, effect: NoSchedule}]
 serviceMonitor: {enabled: false}
 ```
 
-GFD uses native-node affinity because Marketplace NFD excludes driverful nodes:
-
-```yaml
-devicePlugin: {enabled: false}
-gfd: {enabled: true}
-nfd: {enabled: false}
-affinity:
-  nodeAffinity:
-    requiredDuringSchedulingIgnoredDuringExecution:
-      nodeSelectorTerms:
-      - matchExpressions: [{key: nebius.com/driverful, operator: In, values: ["true"]}]
-```
-
 ## Optional Knative inference
 
-No standalone Knative Operator product exists in the checked published
-Marketplace catalog. This optional prerequisite keeps the official upstream
-Operator chart. `serving`
-accepts its raw `operator_values` and a complete native `KnativeServing.spec` YAML
-string in `spec`; the regional example shows the required domain/features.
-There is no local wrapper chart or custom values-merging implementation.
+No Knative Operator product exists in the checked Marketplace catalog, so this
+optional prerequisite uses its unchanged official chart. `serving` accepts raw
+`operator_values` and a complete native `KnativeServing.spec` YAML string.
+Create its wildcard TLS Secret and route its inference domain to ingress.
+The generated management Tunnel URL does not supply wildcard model DNS/TLS.
+The kubectl provider does not wait for custom-resource Ready conditions: apply
+Serving prerequisites and verify Ready before installing inference-enabled
+workers. No custom wait hook or vendor image patch is included.
 
-Create the wildcard TLS Secret named by `serving.tls_secret_name` in
-`knative-serving`, and route `serving.inference_domain` to the selected ingress.
-The caller creates that namespace; `k8s-training` handles it automatically.
-Native manifests create KnativeServing/Kourier and its Ingress. The existing
-kubectl provider does not wait for custom-resource Ready conditions: install the
-Operator/Serving prerequisites first and verify `KnativeServing` Ready before
-installing the worker. No custom wait hook or provisioner is used. Endpoint
-prediction, authentication and scale-from-zero still require live qualification.
-No vendor-image/readiness patch is included for this Marketplace version.
+Customer users, buckets, notebooks and model endpoints remain external through
+native APIs. Existing Helm releases require a reviewed ownership transition.
 
-This is a new-installation path; existing Helm releases require a separately
-reviewed ownership transition. Customer identities, buckets, notebooks and model
-workloads remain owned by the external application through native APIs.
-
-Sources: [Run:ai installation](https://docs.nvidia.com/run-ai/self-hosted/v3.0/documentation/installation-and-configuration/install/manual-helm/install-the-cluster),
-[networking](https://docs.nvidia.com/run-ai/self-hosted/v3.0/documentation/installation-and-configuration/system-requirements/networking-setup),
+Sources: [NVIDIA worker installation](https://docs.nvidia.com/run-ai/self-hosted/v3.0/documentation/installation-and-configuration/install/manual-helm/install-the-cluster),
+[Nebius Tunnels](https://docs.nebius.com/tunnels/connect),
 [Knative Operator](https://knative.dev/docs/install/operator/knative-with-operators/).

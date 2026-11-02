@@ -1,5 +1,5 @@
 # Infrastructure plans use the real Nebius schema without credentials or preflights.
-# Native-worker apply checks explicitly use only mocked providers.
+# Run:ai module checks explicitly use only mocked providers.
 provider "nebius" {
   no_credentials           = true
   disable_preflight_checks = true
@@ -151,24 +151,23 @@ run "native_runai_driver_ownership" {
   }
   plan_options { target = [module.gpu-operator, module.device-plugin, module.runai, nebius_mk8s_v1_node_group.gpu] }
   assert {
-    condition     = local.use_driverfull_gpu && length(module.gpu-operator) == 1 && length(module.device-plugin) == 0 && alltrue([for pool in nebius_mk8s_v1_node_group.gpu : pool.template.gpu_settings.drivers_preset == "cuda13.0"])
-    error_message = "Native Run:ai workers must select the managed image and one discovery operator without a separate device-plugin installation."
+    condition     = local.use_driverfull_gpu && length(module.gpu-operator) == 0 && length(module.device-plugin) == 1 && alltrue([for pool in nebius_mk8s_v1_node_group.gpu : pool.template.gpu_settings.drivers_preset == "cuda13.0"])
+    error_message = "Native Run:ai workers must retain Nebius GPU ownership and the existing Marketplace discovery package, without GPU Operator."
   }
 }
 
-run "native_gpu_marketplace_ownership_revision" {
+run "gpu_marketplace_values_revision" {
   command = plan
   module { source = "../modules/gpu-operator" }
   variables {
     cluster_id           = "mk8scluster-test-only"
     parent_id            = "project-test-only"
-    managed_image        = true
     enable_dcgm_exporter = true
     values               = file("tests/gpu-operator-native-values.yaml")
   }
   assert {
     condition     = nebius_applications_v1alpha1_k8s_release.this.product_slug == "nebius/nvidia-gpu-operator" && nebius_applications_v1alpha1_k8s_release.this.application_name == "gpu-operator" && nebius_applications_v1alpha1_k8s_release.this.namespace == "gpu-operator"
-    error_message = "Managed-image configuration must retain the original Marketplace application and namespace."
+    error_message = "Custom values must retain the original Marketplace application and namespace."
   }
   assert {
     condition     = nebius_applications_v1alpha1_k8s_release.this.sensitive.version != null && length(nebius_applications_v1alpha1_k8s_release.this.sensitive.version) == 64 && nebius_applications_v1alpha1_k8s_release.this.sensitive.set == null && nebius_applications_v1alpha1_k8s_release.this.sensitive.values == null
@@ -224,22 +223,26 @@ run "unknown_region_uses_explicit_shapes" {
   }
 }
 
-run "control_plane_keeps_marketplace_step_separate" {
+run "runai_control_plane_composition" {
   command = plan
+  module { source = "../modules/runai" }
   variables {
-    gpu_node_groups            = 0
-    gpu_nodes_driverfull_image = true
-    enable_runai               = false
+    parent_id         = "project-test-only"
+    cluster_id        = "mk8scluster-test-only"
+    region            = "test-region"
+    network_id        = "vpcnetwork-test-only"
+    admin_password    = "test-only-admin-password"
+    database_password = "test-only-database-password"
+    config            = { role = "control-plane", public_endpoint = false, domain = "runai.example.com" }
   }
-  plan_options { target = [module.gpu-operator, module.device-plugin, module.network-operator, module.runai] }
   assert {
-    condition     = length(module.gpu-operator) == 0 && length(module.runai) == 0
-    error_message = "The CPU control profile must leave the complete Run:ai application to its separate Marketplace deployment."
+    condition     = nebius_applications_v1alpha1_k8s_release.control_plane[0].product_slug == "nebius/nvidia-run-ai" && nebius_msp_postgresql_v1alpha1_cluster.this[0].network_id == "vpcnetwork-test-only" && !nebius_msp_postgresql_v1alpha1_cluster.this[0].config.public_access && length(helm_release.worker) == 0
+    error_message = "The control plane must compose the published Marketplace package with private PostgreSQL, without a worker."
   }
 }
 
-run "runai_native_marketplace_worker" {
-  command = apply
+run "runai_official_worker" {
+  command = plan
   providers = {
     nebius     = nebius.native
     helm       = helm
@@ -247,23 +250,10 @@ run "runai_native_marketplace_worker" {
     kubectl    = kubectl
   }
   module { source = "../modules/runai" }
-  override_data {
-    target = data.kubernetes_resources.worker
-    values = {
-      objects = [{
-        spec = {
-          selector = { matchLabels = { name = "runai" } }
-          template = {
-            metadata = { labels = { app = "runai-operator" } }
-            spec     = { containers = [{ name = "runai-go-operator" }] }
-          }
-        }
-      }]
-    }
-  }
   variables {
     parent_id       = "project-test-only"
     cluster_id      = "mk8scluster-test-only"
+    region          = "test-region"
     bootstrap_token = "test-only-bootstrap"
     config = {
       domain            = "worker.example.com"
@@ -280,41 +270,73 @@ run "runai_native_marketplace_worker" {
     }
   }
   assert {
-    condition     = nebius_applications_v1alpha1_k8s_release.this.product_slug == "nebius/nvidia-run-ai" && nebius_applications_v1alpha1_k8s_release.this.namespace == "runai" && nebius_applications_v1alpha1_k8s_release.ingress[0].product_slug == "nebius/nginx-ingress-controller" && nebius_applications_v1alpha1_k8s_release.prometheus_operator[0].product_slug == "bitnami/kube-prometheus"
-    error_message = "Run:ai workers and available prerequisites must use the canonical native Marketplace products."
+    condition     = helm_release.worker[0].repository == "https://helm.ngc.nvidia.com/nvidia/runai-oss" && helm_release.worker[0].version == "3.0.17" && nebius_applications_v1alpha1_k8s_release.ingress[0].product_slug == "nebius/nginx-ingress-controller" && nebius_applications_v1alpha1_k8s_release.prometheus_operator[0].product_slug == "bitnami/kube-prometheus"
+    error_message = "Workers must use the unchanged official chart and native Marketplace prerequisites."
   }
   assert {
-    condition     = kubernetes_secret_v1.bootstrap.data_wo == null && kubernetes_secret_v1.bootstrap.data_wo_revision == 1 && local.worker_settings["runai-cluster.controlPlane.bootstrapToken"] == "@/runai/config/client_secret" && length(nebius_applications_v1alpha1_k8s_release.this.sensitive.version) == 64
-    error_message = "Bootstrap credentials must remain write-only and use the stock Secret-file contract with a tracked revision."
+    condition     = kubernetes_secret_v1.bootstrap[0].data_wo == null && kubernetes_secret_v1.bootstrap[0].data_wo_revision == 1 && local.worker_values.controlPlane.bootstrapToken == "@/runai/config/client_secret"
+    error_message = "Bootstrap credentials must remain write-only and use the stock Secret-file contract."
   }
   assert {
     condition     = yamldecode(kubectl_manifest.serving[0].yaml_body).kind == "KnativeServing" && yamldecode(kubectl_manifest.serving_ingress[0].yaml_body).spec.ingressClassName == "nginx" && yamldecode(kubectl_manifest.serving_ingress[0].yaml_body).spec.tls[0].hosts[0] == "*.models.example.com"
-    error_message = "Optional serving must use native manifests and the configured TLS ingress, without a local wrapper chart."
+    error_message = "Optional serving must retain native manifests and its separately configured TLS ingress."
   }
 }
 
-run "reject_empty_marketplace_worker" {
-  command = apply
-  providers = {
-    nebius     = nebius.native
-    helm       = helm
-    kubernetes = kubernetes
-    kubectl    = kubectl
-  }
+run "unregistered_worker_prerequisites_only" {
+  command = plan
   module { source = "../modules/runai" }
   variables {
-    parent_id       = "project-test-only"
-    cluster_id      = "mk8scluster-test-only"
-    bootstrap_token = "test-only-bootstrap"
-    config = {
-      domain            = "worker.example.com"
-      control_plane_url = "https://runai.example.com"
-      cluster_uid       = "test-cluster"
-    }
+    parent_id  = "project-test-only"
+    cluster_id = "mk8scluster-test-only"
+    region     = "test-region"
+    config     = { domain = "worker.example.com", cluster_uid = "" }
+  }
+  assert {
+    condition     = length(helm_release.worker) == 0 && length(kubernetes_secret_v1.bootstrap) == 0 && length(nebius_applications_v1alpha1_k8s_release.ingress) == 1 && length(nebius_applications_v1alpha1_k8s_release.prometheus_operator) == 1
+    error_message = "Worker registration must be staged after its real endpoint and prerequisites exist."
+  }
+}
+
+run "override_only_spot_cap" {
+  command = plan
+  variables {
+    gpu_node_groups                  = 2
+    gpu_nodes_spot_pricing_policy_id = "pricingpolicy-gpu-test"
+    gpu_node_group_overrides = [
+      {},
+      { platform = "gpu-l40s-a", preset = "1gpu-24vcpu-96gb", preemptible = true },
+    ]
   }
   override_data {
-    target = data.kubernetes_resources.worker
-    values = { objects = [] }
+    target = data.nebius_billing_v1_pricing_policy.gpu_spot[0]
+    values = {
+      parent_id             = "project-test-only"
+      compute_instance_spec = { v1 = { platform = "gpu-l40s-a" } }
+    }
   }
-  expect_failures = [data.kubernetes_resources.worker]
+  plan_options { target = [nebius_mk8s_v1_node_group.gpu] }
+  assert {
+    condition     = nebius_mk8s_v1_node_group.gpu[0].template.spot_pricing_policy == null && nebius_mk8s_v1_node_group.gpu[1].template.spot_pricing_policy.id == "pricingpolicy-gpu-test"
+    error_message = "A cap must apply to an override-only Spot pool without constraining the regular pool's GPU type."
+  }
+}
+
+run "reject_mixed_spot_skus_with_one_cap" {
+  command = plan
+  variables {
+    gpu_node_groups                  = 2
+    gpu_nodes_preemptible            = true
+    gpu_nodes_spot_pricing_policy_id = "pricingpolicy-gpu-test"
+    gpu_node_group_overrides         = [{}, { platform = "gpu-l40s-a", preset = "1gpu-24vcpu-96gb" }]
+  }
+  override_data {
+    target = data.nebius_billing_v1_pricing_policy.gpu_spot[0]
+    values = {
+      parent_id             = "project-test-only"
+      compute_instance_spec = { v1 = { platform = "gpu-h100-sxm" } }
+    }
+  }
+  plan_options { target = [nebius_mk8s_v1_node_group.gpu] }
+  expect_failures = [terraform_data.gpu_spot_pricing_validation]
 }

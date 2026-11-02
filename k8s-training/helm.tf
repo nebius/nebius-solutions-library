@@ -11,18 +11,17 @@ module "network-operator" {
 }
 
 module "gpu-operator" {
-  count = (!local.use_driverfull_gpu || local.runai_worker) && !var.custom_driver ? 1 : 0
+  count = (!local.use_driverfull_gpu && !var.custom_driver) ? 1 : 0
 
   depends_on = [
-    module.network-operator,
+    module.network-operator
   ]
   source               = "../modules/gpu-operator"
   parent_id            = var.parent_id
   cluster_id           = nebius_mk8s_v1_cluster.k8s-cluster.id
-  managed_image        = local.use_driverfull_gpu
   values               = var.gpu_operator_values
   mig_strategy         = var.mig_strategy
-  cdi_enabled          = local.use_driverfull_gpu ? false : local.gpu_operator_cdi_enabled
+  cdi_enabled          = local.gpu_operator_cdi_enabled
   enable_dcgm_exporter = local.runai_worker && !local.use_driverfull_gpu
 }
 
@@ -38,8 +37,8 @@ module "gpu-operator-custom" {
 
 
 module "device-plugin" {
-  # MK8s disables its built-in plugin for DRA. Run:ai uses the managed image plugin.
-  count = local.use_driverfull_gpu && !local.gb300_dra_enabled && !var.enable_runai ? 1 : 0
+  # MK8s disables its built-in plugin for DRA. Skip this separate installation too.
+  count = local.use_driverfull_gpu && !local.gb300_dra_enabled ? 1 : 0
 
   source     = "../modules/device-plugin"
   parent_id  = var.parent_id
@@ -88,17 +87,30 @@ module "nccl-test" {
 
 # Optional upstream controllers. Application workloads and APIs are separate.
 locals {
-  runai_worker = var.enable_runai
+  runai_worker     = var.enable_runai && try(var.runai.role, "worker") == "worker"
+  runai_control    = var.enable_runai && !local.runai_worker
+  runai_registered = local.runai_worker && try(trimspace(var.runai.cluster_uid) != "", false)
+  runai_tunnel     = var.enable_runai && coalesce(try(var.runai.public_endpoint, null), local.runai_control)
+}
+
+data "nebius_vpc_v1_subnet" "runai" {
+  count = local.runai_control ? 1 : 0
+  id    = var.subnet_id
 }
 
 module "runai" {
-  count           = var.enable_runai ? 1 : 0
-  source          = "../modules/runai"
-  parent_id       = var.parent_id
-  cluster_id      = nebius_mk8s_v1_cluster.k8s-cluster.id
-  config          = var.runai
-  bootstrap_token = local.runai_worker ? sensitive(file(var.runai.bootstrap_token_file)) : null
-  depends_on      = [module.network-operator, module.gpu-operator, module.gpu-operator-custom, kubernetes_namespace_v1.platform, kubernetes_secret_v1.platform]
+  count                  = var.enable_runai ? 1 : 0
+  source                 = "../modules/runai"
+  parent_id              = var.parent_id
+  cluster_id             = nebius_mk8s_v1_cluster.k8s-cluster.id
+  region                 = var.region
+  network_id             = local.runai_control ? data.nebius_vpc_v1_subnet.runai[0].network_id : null
+  config                 = var.runai
+  bootstrap_token        = local.runai_registered ? sensitive(file(var.runai.bootstrap_token_file)) : null
+  admin_password         = local.runai_control ? sensitive(file(var.runai.admin_password_file)) : null
+  database_password      = local.runai_control ? sensitive(file(var.runai.database_password_file)) : null
+  tunnel_private_key_pem = local.runai_tunnel ? sensitive(file(var.runai.tunnel_private_key_file)) : null
+  depends_on             = [module.network-operator, module.gpu-operator, module.gpu-operator-custom, kubernetes_namespace_v1.platform, kubernetes_secret_v1.platform]
 }
 
 module "dynamo" {
@@ -140,6 +152,7 @@ module "nim_operator" {
 resource "kubernetes_namespace_v1" "platform" {
   for_each = setunion(
     var.platform_namespaces,
+    local.runai_control ? toset(["runai-backend"]) : toset([]),
     local.runai_worker ? toset(["runai"]) : toset([]),
     local.runai_worker && try(var.runai.serving, null) != null ? toset(["knative-serving"]) : toset([])
   )

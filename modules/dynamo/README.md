@@ -35,5 +35,5 @@ Run:ai component-affinity-to-node-pool integration require a separate Marketplac
 upgrade and runtime qualification. Verify workload ownership, queues and actual
 Pod placement before claiming a working integration.
 
-Run:ai's public URL and cloud resources require its complete Marketplace
-application deployment graph; this Dynamo module does not create them.
+The separate Run:ai module owns its control plane, database and optional native
+public URLs; this Dynamo module does not create them.

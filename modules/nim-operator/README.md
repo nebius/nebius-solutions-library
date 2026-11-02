@@ -17,7 +17,8 @@ can select CPU nodes and mirrored/pinned images using `operator.nodeSelector`,
 `operator.image.repository` and `operator.image.tag`. Credentials are existing
 Secret references; keep secret values out of these ordinary Terraform inputs.
 
-GPU Operator and its NFD/device-plugin ownership must already be established.
+GPU drivers, discovery and device-plugin ownership must already be established,
+through Nebius preinstalled-driver images or a compatible GPU Operator installation.
 This module always disables NIM Operator's bundled older Dynamo dependency;
 install Dynamo/Grove separately through their existing owner. The upstream
 chart retains its CRDs and native CRD upgrade Job. Its admission webhook remains
