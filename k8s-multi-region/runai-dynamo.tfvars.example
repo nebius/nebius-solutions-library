@@ -17,12 +17,6 @@ defaults = {
   gpu_node_groups               = 2
   gpu_disk_size                 = 512
   custom_driver                 = false
-  gpu_operator_values           = <<-YAML
-    gfd:
-      enabled: false
-    nfd:
-      enabled: true
-  YAML
   network_operator_values       = <<-YAML
     nfd:
       enabled: false
@@ -54,17 +48,12 @@ defaults = {
     values_files   = ["/secure/opencost-values.yaml"]
   }
   platform_namespaces = ["runai", "knative-serving", "dcgm-exporter"]
-  # GFD values disable devicePlugin and NFD; their existing owners stay unchanged.
+  # Stock NVIDIA telemetry; native-image discovery has one Marketplace owner.
   platform_releases = {
     nebius-dcgm-exporter = {
       namespace = "dcgm-exporter", repository = "https://nvidia.github.io/dcgm-exporter/helm-charts", chart = "dcgm-exporter"
       version   = "4.8.3", values_files = ["/secure/dcgm-exporter-values.yaml"]
     }
-    gpu-feature-discovery = {
-      namespace = "gpu-operator", repository = "https://nvidia.github.io/k8s-device-plugin", chart = "nvidia-device-plugin"
-      version   = "0.20.1", values_files = ["/secure/gfd-values.yaml"]
-    }
-
   }
 }
 
@@ -82,24 +71,21 @@ clusters = {
       { labels = { "runai.nebius/pool" = "batch" }, preemptible = true },
     ]
     runai = {
-      role                 = "worker"
-      domain               = "cluster.eu.example.com"
-      control_plane_url    = "https://runai.example.com"
-      cluster_uid          = "REPLACE_WITH_REGISTERED_EU_CLUSTER_UUID"
-      bootstrap_token_file = "/secure/runai-eu-bootstrap-token"
-      values               = <<-YAML
-        runai-cluster:
-          clusterConfig:
-            cluster-api:
-              ingress:
-                tlsEnabled: true
-                tls-secret: runai-cluster-domain-tls
-            global:
-              subdomainSupport: false
-              nvidiaDcgmExporter:
-                installedFromGpuOperator: false
-                namespace: dcgm-exporter
-                serviceMonitor: {enabled: true}
+      role                    = "worker"
+      public_endpoint         = true
+      tunnel_public_key_file  = "/secure/runai-eu-tunnel.pub"
+      tunnel_private_key_file = "/secure/runai-eu-tunnel.pem"
+      control_plane_url       = "https://runai.example.com"
+      cluster_uid             = "REPLACE_WITH_REGISTERED_EU_CLUSTER_UUID"
+      bootstrap_token_file    = "/secure/runai-eu-bootstrap-token"
+      values                  = <<-YAML
+        clusterConfig:
+          global:
+            subdomainSupport: false
+            nvidiaDcgmExporter:
+              installedFromGpuOperator: false
+              namespace: dcgm-exporter
+              serviceMonitor: {enabled: true}
       YAML
       serving = {
         inference_domain = "*.models.eu.example.com"
@@ -150,24 +136,21 @@ clusters = {
       { labels = { "runai.nebius/pool" = "batch" }, preemptible = true },
     ]
     runai = {
-      role                 = "worker"
-      domain               = "cluster.eu2.example.com"
-      control_plane_url    = "https://runai.example.com"
-      cluster_uid          = "REPLACE_WITH_REGISTERED_EU2_CLUSTER_UUID"
-      bootstrap_token_file = "/secure/runai-eu2-bootstrap-token"
-      values               = <<-YAML
-        runai-cluster:
-          clusterConfig:
-            cluster-api:
-              ingress:
-                tlsEnabled: true
-                tls-secret: runai-cluster-domain-tls
-            global:
-              subdomainSupport: false
-              nvidiaDcgmExporter:
-                installedFromGpuOperator: false
-                namespace: dcgm-exporter
-                serviceMonitor: {enabled: true}
+      role                    = "worker"
+      public_endpoint         = true
+      tunnel_public_key_file  = "/secure/runai-eu2-tunnel.pub"
+      tunnel_private_key_file = "/secure/runai-eu2-tunnel.pem"
+      control_plane_url       = "https://runai.example.com"
+      cluster_uid             = "REPLACE_WITH_REGISTERED_EU2_CLUSTER_UUID"
+      bootstrap_token_file    = "/secure/runai-eu2-bootstrap-token"
+      values                  = <<-YAML
+        clusterConfig:
+          global:
+            subdomainSupport: false
+            nvidiaDcgmExporter:
+              installedFromGpuOperator: false
+              namespace: dcgm-exporter
+              serviceMonitor: {enabled: true}
       YAML
       serving = {
         inference_domain = "*.models.eu2.example.com"
@@ -218,24 +201,21 @@ clusters = {
       { labels = { "runai.nebius/pool" = "batch" }, preemptible = true },
     ]
     runai = {
-      role                 = "worker"
-      domain               = "cluster.west.example.com"
-      control_plane_url    = "https://runai.example.com"
-      cluster_uid          = "REPLACE_WITH_REGISTERED_WEST_CLUSTER_UUID"
-      bootstrap_token_file = "/secure/runai-west-bootstrap-token"
-      values               = <<-YAML
-        runai-cluster:
-          clusterConfig:
-            cluster-api:
-              ingress:
-                tlsEnabled: true
-                tls-secret: runai-cluster-domain-tls
-            global:
-              subdomainSupport: false
-              nvidiaDcgmExporter:
-                installedFromGpuOperator: false
-                namespace: dcgm-exporter
-                serviceMonitor: {enabled: true}
+      role                    = "worker"
+      public_endpoint         = true
+      tunnel_public_key_file  = "/secure/runai-west-tunnel.pub"
+      tunnel_private_key_file = "/secure/runai-west-tunnel.pem"
+      control_plane_url       = "https://runai.example.com"
+      cluster_uid             = "REPLACE_WITH_REGISTERED_WEST_CLUSTER_UUID"
+      bootstrap_token_file    = "/secure/runai-west-bootstrap-token"
+      values                  = <<-YAML
+        clusterConfig:
+          global:
+            subdomainSupport: false
+            nvidiaDcgmExporter:
+              installedFromGpuOperator: false
+              namespace: dcgm-exporter
+              serviceMonitor: {enabled: true}
       YAML
       serving = {
         inference_domain = "*.models.west.example.com"
@@ -276,7 +256,7 @@ clusters = {
 }
 
 
-# Supply each region's platform_namespaces/platform_secrets for TLS/CA,
+# Supply each region's platform_secrets for wildcard inference TLS,
 # as in the single-region worker profile. Values maps are replaced, not deep-merged.
 # Install shared optional add-ons through platform_releases, never model endpoints.
 # Customer onboarding, buckets, notebooks and model deployments belong to the
@@ -284,4 +264,4 @@ clusters = {
 
 # Use this file as K8S_FLEET_CONFIG; Terragrunt selects every configured cluster.
 
-# Use the managed-driver exporter and Run:ai values in modules/runai/README.md.
+# Native exporter and registration values: modules/runai/README.md.

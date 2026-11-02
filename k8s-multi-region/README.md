@@ -70,23 +70,24 @@ Check the regional catalog, quotas and managed-image compatibility before deploy
 
 GPU and Network Operators use Nebius Marketplace, which selects their chart
 versions. Supply custom YAML strings through `gpu_operator_values` and
-`network_operator_values`. Keep `gpu_nodes_driverfull_image=true` to use
-Nebius's preinstalled drivers. Managed-image guards use typed Marketplace `set`
-overrides, which take precedence over the YAML and disable operator-installed
-GPU drivers and duplicate GPU components.
+`network_operator_values`. Keep `gpu_nodes_driverfull_image=true` to retain
+Nebius's drivers, runtime and device plugin. GPU Operator is used only for
+driverless nodes; the existing Marketplace device-plugin package supplies discovery.
 
 ## Run:ai workers
 
 The Run:ai/Dynamo profile connects three example worker clusters to one existing
 control plane. First provision that separate CPU cluster using
 [`runai-control-plane.tfvars.example`](../k8s-training/runai-control-plane.tfvars.example).
-That example provisions compute; use the complete Marketplace installer for the
-control plane's database and public URL. Workers require publication of the
-Marketplace package's optional worker component.
-Register every worker through the native API, then supply its distinct UUID,
-fresh bootstrap token, DNS/TLS and regional operator/chart/storage inputs.
-Terragrunt handles fleet execution; Terraform installs the shared components.
-Dynamo reuses Run:ai's KAI owner.
+That profile creates the published Marketplace control plane, managed PostgreSQL
+and a generated public URL. Workers use NVIDIA's unchanged 3.0.17 Helm chart.
+First create each worker's `public_endpoint` and prerequisites with its own
+protected Tunnel key files, `cluster_uid = ""` and dependent extensions disabled.
+Register its actual `runai_url` through the native UI/API, then supply the UUID
+and fresh bootstrap token file. Verify Connected before enabling Dynamo, which
+reuses Run:ai's KAI owner. Wildcard model DNS/TLS remains a separate prerequisite;
+the management Tunnel URL does not supply it. Terragrunt handles fleet execution
+and Terraform installs the shared components.
 
 References: [native stack expansion](https://docs.terragrunt.com/reference/hcl/blocks/#expansion),
 [Terragrunt state backends](https://docs.terragrunt.com/features/units/state-backend/),
