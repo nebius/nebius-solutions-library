@@ -916,7 +916,7 @@ variable "slurm_nodeset_system" {
     }
     boot_disk = {
       type                 = "NETWORK_SSD"
-      size_gibibytes       = 128
+      size_gibibytes       = 192
       block_size_kibibytes = 4
     }
   }
@@ -1008,7 +1008,7 @@ variable "slurm_nodeset_controller" {
     }
     boot_disk = {
       type                 = "NETWORK_SSD"
-      size_gibibytes       = 128
+      size_gibibytes       = 256
       block_size_kibibytes = 4
     }
   }
