@@ -79,6 +79,10 @@ optional prerequisite uses its unchanged official chart. `serving` accepts raw
 `operator_values` and a complete native `KnativeServing.spec` YAML string.
 Create its wildcard TLS Secret and route its inference domain to ingress.
 The generated management Tunnel URL does not supply wildcard model DNS/TLS.
+With public Serving and module-owned ingress, `runai-inference` in `ingress-nginx`
+provides a separate HTTPS-only LoadBalancer using the same controller. Query that
+Service's external address for wildcard DNS; port 80 stays behind the Tunnel.
+When reusing an external ingress owner, that owner supplies model exposure.
 The kubectl provider does not wait for custom-resource Ready conditions: apply
 Serving prerequisites and verify Ready before installing inference-enabled
 workers. No custom wait hook or vendor image patch is included.

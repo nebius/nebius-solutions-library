@@ -48,3 +48,30 @@ resource "kubectl_manifest" "serving_ingress" {
   })
   depends_on = [kubectl_manifest.serving, nebius_applications_v1alpha1_k8s_release.ingress]
 }
+
+data "kubernetes_service_v1" "ingress" {
+  count = local.public_endpoint && local.serving && var.config.install_ingress ? 1 : 0
+  metadata {
+    name      = "runai-ingress-controller"
+    namespace = "ingress-nginx"
+  }
+  depends_on = [nebius_applications_v1alpha1_k8s_release.ingress]
+}
+
+resource "kubernetes_service_v1" "inference" {
+  count = local.public_endpoint && local.serving && var.config.install_ingress ? 1 : 0
+  metadata {
+    name      = "runai-inference"
+    namespace = data.kubernetes_service_v1.ingress[0].metadata[0].namespace
+  }
+  spec {
+    type     = "LoadBalancer"
+    selector = data.kubernetes_service_v1.ingress[0].spec[0].selector
+    port {
+      name        = "https"
+      port        = 443
+      target_port = "https"
+      protocol    = "TCP"
+    }
+  }
+}
