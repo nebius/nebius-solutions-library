@@ -16,10 +16,10 @@ published catalog before applying.
 ## Installation
 
 1. Apply `k8s-training/runai-control-plane.tfvars.example`, supplying protected
-   admin/database passwords and an RSA Tunnel key pair. The control plane's
+   admin/database passwords and a 4096-bit RSA Tunnel key pair. The control plane's
    private network is derived from its cluster subnet. PostgreSQL shape remains
    configurable for the target region.
-2. Apply each worker with `public_endpoint = true`, its own Tunnel key pair,
+2. Apply each worker with `public_endpoint = true`, its own 4096-bit RSA Tunnel key pair,
    `cluster_uid = ""` and Dynamo disabled. This creates the real public URL,
    ingress and Prometheus Operator prerequisites without installing a worker.
 3. Register that URL through the control plane's native UI/API. Supply the real

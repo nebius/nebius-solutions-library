@@ -21,7 +21,7 @@ locals {
     "stack.nodeExporter.enabled"     = false
     "stack.kubeStateMetrics.enabled" = false
     "stack.defaultRules.create"      = false
-    "blackboxExporter.replicaCount"  = 0
+    "blackboxExporter.replicas"      = 0
     }, { for component in ["kubelet", "kubeApiServer", "kubeControllerManager", "kubeScheduler", "kubeEtcd", "kubeProxy", "coreDns"] :
     "stack.${component}.enabled" => false
   })

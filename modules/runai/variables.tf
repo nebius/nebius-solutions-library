@@ -79,7 +79,7 @@ variable "config" {
     condition = coalesce(var.config.public_endpoint, var.config.role == "control-plane") ? (
       var.config.tunnel_public_key_file == null ? false : fileexists(var.config.tunnel_public_key_file)
     ) : true
-    error_message = "A public endpoint needs tunnel_public_key_file containing the authorized RSA public key."
+    error_message = "A public endpoint needs tunnel_public_key_file containing the authorized 4096-bit RSA public key."
   }
 
   validation {
@@ -140,7 +140,7 @@ variable "database_password" {
 }
 
 variable "tunnel_private_key_pem" {
-  description = "RSA private key matching config.tunnel_public_key_file, written only to a Kubernetes Secret."
+  description = "4096-bit RSA private key matching config.tunnel_public_key_file, written only to a Kubernetes Secret."
   type        = string
   default     = ""
   nullable    = false

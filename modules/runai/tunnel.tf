@@ -1,7 +1,6 @@
 resource "nebius_tunnel_v1_tunnel" "this" {
   count     = local.public_endpoint ? 1 : 0
   parent_id = var.parent_id
-  name      = local.resource_name
   title     = local.resource_name
 }
 
