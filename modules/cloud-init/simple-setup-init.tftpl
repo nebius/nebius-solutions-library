@@ -10,9 +10,18 @@ users:
 %{ endfor}
 
 
+# Hold NVIDIA driver and CUDA packages so the upgrade below never changes them.
+# Runs before package_upgrade; a no-op on images without these packages.
+bootcmd:
+- |
+  dpkg-query -W -f='$${db:Status-Abbrev} $${binary:Package}\n' 'nvidia-*' 'libnvidia-*' 'cuda-*' 'libcudnn*' 2>/dev/null | awk '$1 ~ /^.i$/ {print $2}' | xargs -r apt-mark hold
+
+package_update: true
+package_upgrade: true
+
+%{ if extra_disk_id != "" || shared_filesystem_id != "" || aws_access_key_id != "" }
 runcmd:
-- apt-get update
-- DEBIAN_FRONTEND=noninteractive apt-get -y -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold upgrade
+%{ endif }
 
 
 # mount disk if provided

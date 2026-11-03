@@ -11,7 +11,7 @@ variables {
   users             = []
 }
 
-run "instance_upgrades_without_prompts" {
+run "instance_upgrades_via_cloud_init" {
   command = plan
 
   module {
@@ -19,7 +19,23 @@ run "instance_upgrades_without_prompts" {
   }
 
   assert {
-    condition     = yamldecode(nebius_compute_v1_instance.instance.cloud_init_user_data).runcmd[1] == "DEBIAN_FRONTEND=noninteractive apt-get -y -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold upgrade"
-    error_message = "Package upgrades must accept confirmation and resolve package configuration prompts without user input."
+    condition     = yamldecode(nebius_compute_v1_instance.instance.cloud_init_user_data).package_upgrade == true
+    error_message = "Package upgrades must use cloud-init's package_upgrade so they run unattended."
+  }
+}
+
+run "instance_holds_nvidia_and_cuda_packages" {
+  command = plan
+
+  module {
+    source = "../modules/instance"
+  }
+
+  assert {
+    condition = anytrue([
+      for c in yamldecode(nebius_compute_v1_instance.instance.cloud_init_user_data).bootcmd :
+      strcontains(c, "apt-mark hold") && strcontains(c, "nvidia-*") && strcontains(c, "cuda-*")
+    ])
+    error_message = "NVIDIA driver and CUDA packages must be held before the upgrade runs."
   }
 }
