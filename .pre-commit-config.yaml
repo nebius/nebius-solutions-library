@@ -1,0 +1,11 @@
+# Local Git hooks, see https://pre-commit.com
+# Install once per clone: pre-commit install
+repos:
+  - repo: local
+    hooks:
+      # Uses the locally installed Terraform CLI, same check as CI.
+      - id: terraform-fmt
+        name: terraform fmt
+        entry: terraform fmt
+        language: system
+        files: \.(tf|tfvars|tftest\.hcl)$

@@ -82,3 +82,5 @@ These samples mainly use [Terraform](https://www.terraform.io/) to deploy archit
 These solutions will also require you to install the [Nebius AI CLI](https://docs.nebius.ai/cli/).
 
 More general documentation about Nebius AI can be found [here](https://docs.nebius.ai/).
+
+If you change Terraform code in this repository, install [pre-commit](https://pre-commit.com/) (for example `brew install pre-commit` or `pipx install pre-commit`) and run `pre-commit install --allow-missing-config` once in your clone (the option skips the hook on branches created before it was added). It runs `terraform fmt` on changed Terraform files before each commit, using your local Terraform CLI.
