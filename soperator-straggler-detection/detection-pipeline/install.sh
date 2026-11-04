@@ -85,9 +85,11 @@ start_dcgm_hostengine() {
     for svc in nvidia-dcgm dcgm; do
       if systemctl list-unit-files 2>/dev/null | grep -q "^${svc}\.service"; then
         if [ "$(id -u)" -eq 0 ]; then
-          systemctl start "$svc" && return 0
+          # Verify the daemon actually answers: in chroot/jail images systemctl is a stub that
+          # prints "ignoring command" and returns 0, which previously skipped the nv-hostengine fallback.
+          systemctl start "$svc" && sleep 2 && dcgmi discovery -l >/dev/null 2>&1 && return 0
         elif sudo -n true 2>/dev/null; then
-          sudo systemctl start "$svc" && return 0
+          sudo systemctl start "$svc" && sleep 2 && dcgmi discovery -l >/dev/null 2>&1 && return 0
         fi
       fi
     done
@@ -635,6 +637,30 @@ GRAFANA_AUTH_CONFIG_FILE="$GRAFANA_AUTH_CONFIG_FILE"
 EOF
 info "Wrote $PKG_ROOT/cluster.env:"
 sed 's/^/  /' "$PKG_ROOT/cluster.env"
+
+# =========================================================================
+# Step 6 -- CPU-pinning readiness (OPTIONAL; never fails the install). NEW, UNVALIDATED pinning code.
+# Builds the interposer once (so ranks never need gcc at launch) and reports what PIN_MODE=auto would do on this host's NCCL.
+# BUILD_NCCL_232=1 additionally fetches+builds NCCL v2.32.3-1 (needed to pin NCCL's profiler thread); the build must sit on a
+# filesystem every compute node can read (the default, under pinning/nccl/, is inside this package).
+# =========================================================================
+if [ -x "$PKG_ROOT/pinning/build.sh" ]; then
+  info "Step 6: CPU-pinning readiness (optional)"
+  if _pin_so="$(bash "$PKG_ROOT/pinning/build.sh" --if-needed 2>/dev/null)"; then
+    info "  pinning interposer ready: $_pin_so"
+  else
+    warn "  could not build pinning/libthread_pin_new.so here (needs gcc); PIN_MODE=auto will run unpinned until it is built (run pinning/build.sh on a host with gcc)"
+  fi
+  if [ "${BUILD_NCCL_232:-0}" = "1" ]; then
+    info "  BUILD_NCCL_232=1 -> fetching/building NCCL v2.32.3-1 (long: tens of minutes; set NVCC_GENCODE for your GPU arch to speed up)"
+    bash "$PKG_ROOT/pinning/nccl/fetch_build_nccl.sh" || warn "  NCCL 2.32.3 build failed; see output above -- pinning will fall back to dump-thread-only"
+  fi
+  if _pin_r="$(PIN_MODE=auto python3 -I "$PKG_ROOT/pinning/pin_resolve.py" 2>/dev/null)"; then
+    eval "$_pin_r"
+    info "  PIN_MODE=auto on this host -> $PIN_MODE_RESOLVED (NCCL ${PIN_NCCL_VERSION:-unknown}): $PIN_REASON"
+    [ "$PIN_MODE_RESOLVED" = "dump" ] && info "  (for full dedication incl. NCCL's profiler thread: BUILD_NCCL_232=1 ./install.sh, or pinning/nccl/fetch_build_nccl.sh)"
+  fi
+fi
 
 if [ "$FAIL" -eq 1 ]; then
   echo "[install.sh] Completed WITH real, specific failures above -- this environment is NOT fully ready. See FATAL lines." >&2

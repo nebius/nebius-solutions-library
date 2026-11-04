@@ -598,6 +598,27 @@ confirmed via live testing, not just code review):
 
 ---
 
+## `pinning/` (NEW 2026-11, UNVALIDATED beyond 16 GPUs)
+
+Dedicated-core pinning of Inspector's dump thread and NCCL's profiler thread. `pin_env.sh` (sourced; `pin_prepare`)
+→ `pin_resolve.py` (find real NCCL, probe `ncclProfilerThreadCreate`, resolve `auto`/`full` to `full`|`dump`)
+→ `build.sh --if-needed` (interposer, flock-serialized) → per-rank `rank_launch.sh` + `rank_setup.py` (NUMA-aware core
+plan, `LD_PRELOAD` + `taskset`) → `thread_pin_new.c` (pins on `pthread_create`) → `verify_pinning.py` (real `/proc`
+affinity, NCCL-mapped cross-check, optional per-thread drift sampling). `nccl/fetch_build_nccl.sh` builds NCCL
+`v2.32.3-1` reproducibly. `ab/` holds the interleaved A/B, fault-trial and scoring method scripts; `ab/helpers/` the
+audit-host drivers. See `pinning/README.md`.
+
+## `tools/readable_alerts.py`, `tools/test_dcgm_persist_gate.py` (NEW 2026-11)
+
+`readable_alerts.py`: presentation-only regrouping of an engine log (no detection logic; labels `rank=` as a pid).
+`test_dcgm_persist_gate.py`: extracts the persistence/re-sample blocks from `alert_engine.py` and replays sequences
+(10 offline cases).
+
+**alert_engine.py change (2026-11):** the DCGM clock-suppression fallback (`_dcgm_fallback_evaluate`) no longer emits
+`CONFIRMED`/`PAGE` from a single snapshot — standalone sweep needs 3 consecutive sweeps, the cascade path 2 re-samples
+5 s apart (env-tunable; see `README.md` 7.3). The older "0 false positives at CONFIRMED" figure in this file predates
+this and was contradicted on the 16-GPU PP shape before the fix.
+
 ## Dynamic/generic guarantees
 
 A P27-maintenance-session audit specifically hunted for cluster-topology

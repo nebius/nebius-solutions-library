@@ -163,6 +163,7 @@ VM's own new-series visibility lag), then deployed to the real production
 | Dependency | Pinned version | Where pinned |
 |---|---|---|
 | NCCL | `2.28.9` / apt `2.28.9-1+cuda13.0` | `environment.sh:60-61` (`NCCL_VERSION_DOTS`, `NCCL_APT_VERSION`) |
+| NCCL for **full CPU pinning** (optional) | `>= 2.32.3`, git tag `v2.32.3-1`, built unstripped | `pinning/nccl/fetch_build_nccl.sh` (`NCCL_TAG`), `BUILD_NCCL_232=1 ./install.sh`; **not** in git (255 MB) |
 | CUDA | `13.0` | `environment.sh:78` (`CUDA_VERSION_WANT`) |
 | VictoriaMetrics | `v1.150.0` | `vm-setup.sh:49` |
 | Grafana | `11.5.1` | `grafana-setup.sh:58` |
@@ -1167,3 +1168,21 @@ validated on — expect these to differ on a new cluster:
 carefully rather than copying a working `cluster.env` from another cluster —
 every item above is a live probe specifically because it's been observed to
 vary.
+
+## CPU pinning operations (NEW, UNVALIDATED beyond 16 GPUs)
+
+- **What runs where:** `workloads/megatron/train_node_megatron.sh` sources `pinning/pin_env.sh` (default `PIN_MODE=auto`
+  with Inspector on). It resolves the mode from the NCCL really in use, builds `libthread_pin_new.so` on first use,
+  prints one `[PIN-PREFLIGHT]` line and starts `verify_pinning.py`. Read that line first when debugging.
+- **Upgrade/rebuild NCCL 2.32.x:** `pinning/nccl/fetch_build_nccl.sh [--dest DIR] [--gencode ...]` (verifies version +
+  pinnable symbol, records the dir in `pinning/.nccl_override_dir`); `--check` only reports. Keep `--dest` on a
+  filesystem all compute nodes can read. Do not `strip` the library.
+- **Rebuild the interposer:** `pinning/build.sh` (always) or `--if-needed`; compiled `.so` is git-ignored.
+- **Health:** each run writes `pin_verify_<host>.log` (`FULLY_DEDICATED` expected with NCCL ≥ 2.32.3, `DUMP_ONLY_DEDICATED` on older NCCL) and
+  `pinlogs/launch_<host>.log`. `[PIN][WARN] ... UNPINNED` means that rank ran without dedication.
+- **Disable:** `PIN_MODE=off`. **Helper confinement:** `PIN_HOUSEKEEPING=1 ./run.sh` (off by default).
+- **Alert-engine knobs added by the 2026-11 audit** (env on `alert_engine.py`):
+  `DCGM_FALLBACK_STANDALONE_PERSIST_REQUIRED` (default 3), `DCGM_FALLBACK_CASCADE_RESAMPLES` (2),
+  `DCGM_FALLBACK_CASCADE_RESAMPLE_INTERVAL_S` (5). Setting the first to 1 and the second to 0 restores the old
+  single-snapshot behavior (which false-pages on pipeline-parallel jobs). See README.md 7.3.
+- **Known operational risk:** aggregator RSS grows across jobs (soak-measured about +5 to +7 MB/hour per aggregator, about +4 MB/hour alert engine, cause not identified); see README.md 7.0.

@@ -98,6 +98,27 @@ NVLINK_CHECK_INTERVAL_S = 60.0
 # checks, so it reuses that cadence rather than the slower one.
 DCGM_FALLBACK_CHECK_INTERVAL_S = 20.0
 
+# Persistence gate for the STANDALONE DCGM Path-B fallback (added in the
+# 2026-11 POC-readiness audit; see docs). The standalone sweep used to
+# emit CONFIRMED/PAGE from ONE instantaneous dcgmi snapshot (target
+# sm_clock < 0.6x node-peer median). On a healthy pipeline-parallel shape
+# an idle/bubbled GPU legitimately drops to ~645 MHz for a moment, which
+# produced 4 PAGE-severity false alarms in one healthy 10-min run. A real
+# clock throttle is sustained, so require the SAME single member to be the
+# sole CONFIRMED on this many consecutive sweeps (sweeps are
+# DCGM_FALLBACK_CHECK_INTERVAL_S apart) before emitting. 1 = old behavior.
+# The cascade-triggered path (_emit) is unchanged: it only runs while a
+# larger related communicator is already firing a real anomaly.
+DCGM_FALLBACK_STANDALONE_PERSIST_REQUIRED = int(os.environ.get("DCGM_FALLBACK_STANDALONE_PERSIST_REQUIRED", "3"))
+# Cascade-path counterpart: the cascade call is one-shot (no later sweep to
+# count), so after a first positive reading it re-queries DCGM this many
+# extra times, DCGM_FALLBACK_CASCADE_RESAMPLE_INTERVAL_S apart, and only
+# emits if the SAME single member is still the sole CONFIRMED on every
+# re-sample (default 2 x 5 s = ~10 s). 0 = old single-snapshot behavior.
+# A re-sample that fails/returns None counts as "not sustained".
+DCGM_FALLBACK_CASCADE_RESAMPLES = int(os.environ.get("DCGM_FALLBACK_CASCADE_RESAMPLES", "2"))
+DCGM_FALLBACK_CASCADE_RESAMPLE_INTERVAL_S = float(os.environ.get("DCGM_FALLBACK_CASCADE_RESAMPLE_INTERVAL_S", "5"))
+
 # P27-multibucket-followup -- real, confirmed-live gap found during PP
 # validation (this session): _member_exec_time_current and
 # _cross_comm_peer_median both smooth via avg_over_time(...[DCGM_FALLBACK_
@@ -1588,6 +1609,7 @@ class AlertEngine:
         # P21.6.1 -- standalone 2-member-communicator DCGM fallback state.
         self._last_dcgm_fallback_check_at = 0.0
         self._dcgm_fallback_thread = None
+        self._dcgm_fallback_streak = {}  # key -> (member, consecutive sweeps)
         # P27-hotfix2 -- nv-hostengine liveness, same dead-man's-switch
         # discipline as pipeline_down/n_pipeline_down_cycles above: found
         # this session that nv-hostengine (the persistent DCGM daemon every
@@ -3914,7 +3936,14 @@ class AlertEngine:
                     continue
                 result = self._dcgm_fallback_evaluate(hostname, comm, dcgm_cache=dcgm_cache)
                 key = ("dcgm_fallback_standalone", hostname, comm)
-                fired = result is not None
+                if result is None:
+                    self._dcgm_fallback_streak.pop(key, None)
+                    streak = 0
+                else:
+                    prev_member, prev_n = self._dcgm_fallback_streak.get(key, (None, 0))
+                    streak = prev_n + 1 if prev_member == result[0] else 1
+                    self._dcgm_fallback_streak[key] = (result[0], streak)
+                fired = result is not None and streak >= DCGM_FALLBACK_STANDALONE_PERSIST_REQUIRED
                 if fired and not self.was_firing[key]:
                     member, slot, per_member = result
                     self._emit_dcgm_fallback(hostname, comm, member, slot, per_member, "standalone")
@@ -4394,6 +4423,15 @@ class AlertEngine:
             for (h, dep_comm) in dependents:
                 key = ("dcgm_fallback_cascade", h, dep_comm)
                 result = self._dcgm_fallback_evaluate(h, dep_comm)
+                if result is not None and not self.was_firing[key]:
+                    # only pay the re-sample delay when this would newly emit
+                    for _ in range(DCGM_FALLBACK_CASCADE_RESAMPLES):
+                        time.sleep(DCGM_FALLBACK_CASCADE_RESAMPLE_INTERVAL_S)
+                        again = self._dcgm_fallback_evaluate(h, dep_comm)
+                        if again is None or again[0] != result[0]:
+                            result = None  # transient dip, not a sustained clock suppression
+                            break
+                        result = again
                 fired = result is not None
                 if fired and not self.was_firing[key]:
                     dep_member, dep_slot, dep_per_member = result

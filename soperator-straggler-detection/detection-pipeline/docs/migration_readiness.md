@@ -1,5 +1,7 @@
 # Migration Readiness Inventory
 
+> **2026-11 audit pointer:** Historical readiness assessment. For the 2026-11 POC-readiness audit (pinning, NCCL >= 2.32.3, DCGM false-page fix, known gaps) see `README.md` 5.2, 7.0, 7.3.
+
 Real, verified inventory of what needs to move to run this GPU
 straggler-detection pipeline on a different cluster, what won't transfer
 automatically, and a step-by-step setup sequence. Every path below was

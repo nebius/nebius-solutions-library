@@ -25,8 +25,11 @@ mkdir -p "$DUMPDIR" "$OUTDIR"
 # the other 17 launch scripts in this repo -- verbose=1 at this cluster's
 # scale (48 ranks) fills a shared disk volume in well under an hour.
 _PKG_ROOT_FOR_PLUGIN_FIX="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# INSPECTOR=off (A/B control arm): no profiler plugin loaded at all. Default on.
+if [ "${INSPECTOR:-on}" = "on" ]; then
 export NCCL_PROFILER_PLUGIN="$_PKG_ROOT_FOR_PLUGIN_FIX/inspector-plugin/libnccl-profiler-inspector.so"
 export NCCL_INSPECTOR_ENABLE=1
+fi
 export NCCL_INSPECTOR_DUMP_VERBOSE="${NCCL_INSPECTOR_DUMP_VERBOSE:-0}"
 export NCCL_INSPECTOR_DUMP_THREAD_INTERVAL_MICROSECONDS=500
 export NCCL_INSPECTOR_DUMP_DIR="$DUMPDIR"
@@ -78,13 +81,27 @@ cd "$MEGATRON_DIR"
 # /usr/lib/x86_64-linux-gnu into the container) shadows the container's
 # own libcublasLt.so, breaking TE's cublasLtGetVersion symbol lookup --
 # the bundled nanoGPT workloads never hit this since they don't use TE.
+# Shape/pinning knobs -- defaults reproduce the original TP4/PP4/DP3 tiny config.
+# MEGA_TP/PP/LAYERS/HIDDEN/HEADS/SEQ/MBS/GBS override it (e.g. 16-GPU 8B-class run).
+# CPU pinning of Inspector's threads (NEW, UNVALIDATED) via the shared wrapper pinning/pin_env.sh.
+#   PIN_MODE=auto|full|dump|off   default: auto when INSPECTOR is on, off when INSPECTOR=off.
+#   auto = pin NCCL's profiler thread too iff the NCCL actually in use supports it (>= 2.32.x), else dump thread only.
+#   NCCL_OVERRIDE_DIR (or the dir recorded by pinning/nccl/fetch_build_nccl.sh) selects a newer NCCL.
+# Any problem degrades to an unpinned run with a [PIN][WARN] line -- see pinning/README.md.
+if [ "${INSPECTOR:-on}" = "off" ]; then PIN_MODE="${PIN_MODE:-off}"; else PIN_MODE="${PIN_MODE:-auto}"; fi
+export PIN_MODE
+export PIN_LOG_DIR="${PIN_LOG_DIR:-$OUTDIR/pinlogs}"
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")/../../pinning" && pwd)/pin_env.sh"
+pin_prepare            # sets PIN_WRAP (empty when pinning is off/unavailable); also starts the background verifier
+# NCCL_VERSION_PROBE=1: each rank prints ncclGetVersion() of the NCCL actually loaded (runtime proof).
 torchrun --nnodes="$NUM_NODES" --nproc_per_node="$GPUS_PER_NODE" --node_rank=$RANK \
-  --rdzv_id=megatron_tp4pp4dp3 --rdzv_backend=c10d --rdzv_endpoint=$RDZV_HOST:$PORT \
+  --rdzv_id=megatron_run --rdzv_backend=c10d --rdzv_endpoint=$RDZV_HOST:$PORT \
+  "${PIN_WRAP[@]}" \
   pretrain_gpt_straggler.py \
-  --tensor-model-parallel-size=4 --pipeline-model-parallel-size=4 --use-tp-pp-dp-mapping \
-  --num-layers=8 --hidden-size=512 --num-attention-heads=8 \
-  --seq-length=512 --max-position-embeddings=512 \
-  --micro-batch-size=1 --global-batch-size=12 \
+  --tensor-model-parallel-size=${MEGA_TP:-4} --pipeline-model-parallel-size=${MEGA_PP:-4} --use-tp-pp-dp-mapping \
+  --num-layers=${MEGA_LAYERS:-8} --hidden-size=${MEGA_HIDDEN:-512} --num-attention-heads=${MEGA_HEADS:-8} \
+  --seq-length=${MEGA_SEQ:-512} --max-position-embeddings=${MEGA_SEQ:-512} \
+  --micro-batch-size=${MEGA_MBS:-1} --global-batch-size=${MEGA_GBS:-12} \
   --train-iters=$TRAIN_ITERS --lr-decay-iters=$TRAIN_ITERS --lr-warmup-fraction=.01 \
   --lr=0.00015 --lr-decay-style=cosine --min-lr=1.0e-5 --weight-decay=1e-2 --clip-grad=1.0 \
   --tokenizer-type=NullTokenizer --vocab-size=4095 --mock-data --split=100,0,0 \

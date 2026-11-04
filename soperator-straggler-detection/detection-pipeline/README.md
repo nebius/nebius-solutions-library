@@ -190,6 +190,9 @@ grafana-standalone/ The real, enforced-auth Grafana launch recipe
                     (anonymous access disabled, real generated admin
                     password) — same "plain binary, no Kubernetes"
                     pattern as vm-standalone/
+tools/readable_alerts.py and tools/test_dcgm_persist_gate.py:
+                    plain-language alert reader (presentation only) and the
+                    offline test of the DCGM false-page fix (sections 6.15/7.3)
 tools/              Standalone validation utilities (pre-flight test-
                     duration check, offline persistence replay, PromQL
                     cross-check, dashboard-JSON portability validation)
@@ -197,6 +200,13 @@ tools/              Standalone validation utilities (pre-flight test-
 workloads/          All 15 validated fault-injection workload shapes —
                     see "Testing/validation reference" (Step 6) below
                     for every one, by name, individually
+pinning/            NEW, UNVALIDATED (beyond 16 GPUs): dedicated-core pinning
+                    of Inspector's dump thread and NCCL's profiler thread
+                    -- pin_env.sh (shared wrapper), pin_resolve.py (auto
+                    mode from the real NCCL), build.sh, rank_launch.sh,
+                    rank_setup.py, verify_pinning.py, nccl/fetch_build_
+                    nccl.sh (reproducible NCCL v2.32.3-1 build), ab/ (A/B
+                    + fault-trial method scripts) -- see section 5.2
 moe-two-stage-detector/ A standalone diagnostic pipeline for localizing
                     a MoE straggler once job-wide detection has already
                     flagged one — not part of the always-on alert loop
@@ -268,6 +278,18 @@ VERSIONS.md          Every pinned/confirmed real version (NCCL, CUDA,
   CUBLAS library too, not just NCCL — worked around with
   `--transformer-impl=local`. Worth knowing before running any future
   Transformer-Engine-based workload on this repo's own mount convention.
+- **NCCL ≥ 2.32.3 — required only for *full* CPU pinning of Inspector's
+  threads** (see [section 5.2](#52-cpu-pinning-of-inspectors-threads-new-unvalidated-beyond-16-gpus)).
+  NCCL's own profiler thread can be pinned only if the NCCL actually
+  loaded exposes `ncclProfilerThreadCreate`, which first appears in
+  2.32.x and is absent from the 2.30.1 the validation hosts ship. On an
+  older NCCL the pipeline still works and the Inspector *dump* thread can
+  still be pinned (`PIN_MODE=auto` picks automatically). A 2.32.3 build is
+  **not** in git (255 MB); reproduce it with
+  `pinning/nccl/fetch_build_nccl.sh` (pinned tag `v2.32.3-1`, verified
+  after build) or `BUILD_NCCL_232=1 ./install.sh`. The build must be on a
+  filesystem every compute node can read. Details and caveats:
+  [pinning/README.md](pinning/README.md).
 
 ## 4. Installing — `environment.sh` + `vm-setup.sh` + `grafana-setup.sh` (all optional) + `install.sh`
 
@@ -495,6 +517,11 @@ does, in order:
 10. **Writes `cluster.env`** — the single source of real, discovered
     truth every launch script reads (via `lib/cluster_topology.sh`)
     instead of hardcoding.
+11. **CPU-pinning readiness (optional, never fails the install):**
+    builds the pinning interposer once and prints what `PIN_MODE=auto`
+    will do on this host's NCCL (`full` vs `dump`). `BUILD_NCCL_232=1
+    ./install.sh` additionally fetches and builds NCCL v2.32.3-1 (long;
+    see section 5.2 and `pinning/README.md`).
 
 Re-running `install.sh` is safe and idempotent — it reuses an already-
 generated real Grafana admin password rather than invalidating an
@@ -590,6 +617,28 @@ the same way:
   FATAL right after a from-scratch install, re-run `run.sh` after
   launching any real workload rather than assuming the pipeline is down.
 
+**Found during the 2026-11 audit (check these first):**
+
+- **`run.sh` "already running -- leaving it alone" but nothing works.** A
+  stale supervisor from an earlier checkout (orphaned, polling a dead
+  VictoriaMetrics) makes `run.sh` skip launching a fresh stack. Confirm
+  the supervisor is genuinely orphaned (PPID 1, no live backend) *and not
+  another user's* before stopping it, then re-run.
+- **DCGM checks silently degraded.** If `dcgmi discovery -l` fails on a
+  node, `nv-hostengine` is not running. `install.sh` now detects and fixes
+  the jail's stub `systemctl` (prints "Running in chroot, ignoring
+  command", returns 0); on an older checkout start `nv-hostengine` by hand.
+- **Ranks share a 2-CPU mask.** Default `srun` here gives each task 2 CPUs
+  even with `--exclusive`; pass `--cpus-per-task=<all> --cpu-bind=none`
+  (`SRUN_EXTRA` in the Megatron launcher). Affects every timing number.
+- **Timing/alerts look contaminated.** `soperatorchecks` health-check jobs
+  (all-reduce perf tests) run periodically on the workers. Check `sacct`
+  for overlap before trusting a run; the launcher refuses to start if the
+  queue is not empty.
+- **`[PIN][WARN] ... running UNPINNED`** or `[PIN-PREFLIGHT] ... resolved=dump`
+  when you expected `full`: see `pinning/README.md` (needs NCCL ≥ 2.32.3
+  unstripped; `pinning/nccl/fetch_build_nccl.sh --check` tells you why).
+
 ## 5. Running it — `run.sh` + the self-test
 
 ```bash
@@ -669,6 +718,38 @@ enough, rather than just declaring failure) or an alert appeared but
 named the wrong rank/host — a real detection or attribution problem
 worth investigating before trusting this install with production
 monitoring.
+
+### 5.2 CPU pinning of Inspector's threads (NEW, UNVALIDATED beyond 16 GPUs)
+
+Inspector's dump thread and NCCL's profiler thread compete with training
+for CPU. The Megatron launcher can give each its own dedicated physical
+core per rank and remove those cores from training. **This is new code
+written for this audit, validated on one 16-GPU cluster only** — read
+[pinning/README.md](pinning/README.md) before relying on it.
+
+- **It needs no manual step in the Megatron launcher.**
+  `workloads/megatron/train_node_megatron.sh` defaults to `PIN_MODE=auto`
+  (when `INSPECTOR=on`): it detects the NCCL really in use, pins the dump
+  thread everywhere and NCCL's profiler thread too when NCCL ≥ 2.32.3,
+  builds its small interposer on first use, prints one `[PIN-PREFLIGHT]`
+  line saying what it chose and why, and starts a verifier. `PIN_MODE=off`
+  disables it. Any failure degrades to an **unpinned** run with a
+  `[PIN][WARN]` line; it never aborts a job.
+- **Footprint:** 1 physical core per role per rank → 16 physical cores
+  (32 logical CPUs) reserved on an 8-GPU node, NUMA-aware, never core 0.
+- **Measured overhead** (16 GPUs, TP4/PP2/DP2, 8B-class Megatron shape,
+  150 iterations after warm-up, interleaved A/B, Welch t-test) —
+  **not comparable to the 48-GPU historical baseline**:
+  Inspector ON, unpinned **+11.5%** (p=0.001); dump thread pinned
+  **+6.4%** (p=0.007); **both threads pinned (NCCL 2.32.3): +0.64%
+  (p=0.58, not statistically distinguishable from zero), n=4 rounds.**
+  On the host's NCCL 2.30.1 the best achievable was dump-only pinning:
+  +1.35% (p=0.19, n.s., n=3).
+- **Other workloads** (the nanoGPT-family self-test, etc.) do **not** use
+  pinning yet; `pinning/pin_env.sh` is the shared wrapper to adopt it
+  (usage in pinning/README.md).
+- `PIN_HOUSEKEEPING=1 ./run.sh` additionally confines the aggregators,
+  iowait logger and bpftrace to the non-reserved CPUs (off by default).
 
 ## 6. Grafana access
 
@@ -1072,6 +1153,29 @@ its two still-open gaps are tracked in section 7 below.
 
 `tools/self_test.sh`: clean PASS throughout.
 
+### 6.15 Reading alerts: PAGE vs LOG-ONLY, and `rank=` is a PID
+
+- **Only `CONFIRMED` / `severity=PAGE` is meant to be actionable.**
+  `PROBABLE` and `UNCONFIRMED` are `LOG-ONLY`: recorded, never paged, and
+  **not suppressed**. They are background noise by design — but at a
+  higher rate than the documented one on the PP-shaped Megatron job (see
+  7.1, "LOG-ONLY volume"). Do not treat a count of LOG-ONLY findings as a
+  count of faults.
+- **`rank=` in an alert line is an OS PID, not the training rank.** Map it
+  with the `node=` and `gpu_slot=` fields.
+- **`tools/readable_alerts.py --log <alert log>`** (presentation only, no
+  detection logic) regroups an engine log by communicator, labels the pid,
+  shows units, and ends with a one-line verdict ("no straggler culprit
+  identified" / "N probable straggler culprit(s): worker-1 GPU 0 (pid …)").
+  It also says when an alert's *latest* sample is not itself slower than
+  its peers (the windowed statistic reflects earlier readings).
+- **`[WAIT-INDUCED-ALERT]` is the most reliable attribution signal
+  observed on the 16-GPU PP shape** (named the true rank in 9 of 9
+  sleep-fault trials, 0 in 7 healthy runs) but is capped at `PROBABLE` /
+  `LOG-ONLY` by a deliberate repo stopgap, so it does not page. In 2 of
+  those 9 trials it also named the mirror position in the other
+  data-parallel replica (also LOG-ONLY).
+
 ## 7. Known limitations (read this before relying on any alert)
 
 This section has two parts: which fault classes this pipeline is
@@ -1096,6 +1200,72 @@ and the mean-path/outlier_count checks (previously could fire off one).
 If your own alerting/dashboards depend on a mean-path finding firing the
 instant a single window crosses threshold, this is a real behavior
 change to account for.
+
+### 7.0 Findings from the 2026-11 POC-readiness audit (16-GPU Megatron TP4/PP2/DP2, 8B-class)
+
+Measured on one 2-node × 8×H200 cluster, NCCL 2.32.3 + full pinning. Read
+these before sizing a larger POC; none is hidden elsewhere.
+
+- **Scale of evidence: 16 GPUs only.** Nothing here is validated above
+  that, and the overhead figures are not comparable to the 48-GPU baseline.
+- **How this audit relates to the project's validation history.** The detector
+  was validated over many phases before this audit (P19–P27.x: a 3-hour blind
+  end-to-end test, 15 workload shapes with multiple fault variants, 6
+  parallelism strategies — see section 8 and
+  [docs/straggler_dectection_history.md](docs/straggler_dectection_history.md)).
+  This audit **did not re-run that matrix**; it re-tested one additional shape
+  (a larger 16-GPU PP2 Megatron job) plus the new pinning code, and found the
+  issues listed below on that shape. Treat the older validation as established
+  and this section as the delta.
+- **LOG-ONLY volume is ~8× the documented rate on this shape — a DECISION POINT
+  for the detector's owners, not an open bug to "eventually fix".** Healthy
+  runs produced **167–204 `LOG-ONLY` findings per hour** (4 runs, ~10 min each;
+  190 findings across 7 healthy runs); the engine documents 22–25/hour. It does
+  not page and is not suppressed. Root cause, from the data:
+  - **Not the reliability-reference file.** `observability/workload_reliability_
+    reference.yaml` only labels `[ROLE-BASELINE-ALERT]` findings as UNVALIDATED
+    and feeds `tools/incident_correlator.py`; it never gates or suppresses a
+    main-path alert. Role-baseline findings are 34 of 190 (18%). Adding
+    reference entries for this shape (about an hour of work) would relabel that
+    18%, not reduce the noise.
+  - **It is the main-path `mean` check.** 122 of 190 (64%) are `[ALERT]`
+    compute/PROBABLE from the `mean` statistic, spread evenly across all TP
+    positions (role_rank 0–3 of 4), mostly the 16 MiB bucket. The 96 parsed
+    ones have a median of **8.3× their peers** (max 20.5×) and median z=48
+    (p90 154, max 657) against `MEAN_Z_THRESH=30` / `MEAN_MM_THRESH=2.0`.
+    `alerting/thresholds.py` records that this check was "never observed to fire
+    on healthy data" on the shapes it was calibrated on; on this TP4/PP2/DP2
+    shape it fires constantly (healthy TP groups spread ~1.7–2.5× in exec time).
+  - **It adds little attribution value here.** In 9 of 9 sleep-fault trials the
+    main mean path never named the faulted rank; attribution came from the
+    2-member timing-asymmetry fallback and the wait-induced check.
+  - **The decision (not made here):** disable or re-weight the mean-path check on
+    TP-heavy / pipeline-parallel shapes (shape-aware thresholds or gating), or
+    accept the volume. Either is a detection-logic change and was deliberately
+    **not** made in this audit. Recommendation: decide before the large POC.
+- **Unresolved secondary observation — fault runs show *fewer* main-path alerts
+  than healthy runs.** Healthy runs averaged ~14 main-path mean alerts per
+  10-minute run (96 over 7 runs); the 9 fault runs (17–18 min each) showed
+  1–10, typically 2. Not explained: one untested hypothesis is that the large
+  injected waits dominate exec times and shrink the structural ratios. It is
+  recorded so it is not lost; it could also mean the check's behavior depends on
+  job state in a way worth understanding before tuning it. Worth investigating
+  later, **before** anyone changes the mean-path thresholds.
+- **Mirror-position attribution.** `[WAIT-INDUCED-ALERT]` named the true
+  faulted rank in 9 of 9 sleep-fault trials (100 ms and 25 ms; ranks 2, 8
+  and 13), 0 times in 7 healthy runs, but in 2 of the 9 it also named the
+  same position in the *other* data-parallel replica. Both are
+  `PROBABLE`/`LOG-ONLY`. The tier cap on this check is a deliberate repo
+  stopgap and was **not** changed.
+- **Aggregator memory grows across jobs.** Measured over the 107-minute healthy soak (60 s samples, linear fit): aggregators +7.2 and +4.6 MB/hour (about 85 -> 106-109 MB), alert engine +4.3 MB/hour (about 101 -> 111 MB). VictoriaMetrics is noisy (about 470 MB, fit slope not meaningful, end below start). One soak on one cluster; the cause is not identified and the growth is not proven to be bounded. Restart the aggregators between very long campaigns until it is.
+- **Pinning is new, unvalidated code**, and full dedication depends on a
+  locally built NCCL ≥ 2.32.3 that must be reproduced per cluster
+  (section 3, [pinning/README.md](pinning/README.md)).
+- **The DCGM clock-suppression check (`CONFIRMED`/`PAGE`) can false-fire on
+  pipeline-parallel jobs** because an idle GPU in a pipeline bubble
+  momentarily runs at ~645–855 MHz against peers at 1980 MHz. Before the
+  fix below this paged 4 times in one healthy 10-minute run, and once more
+  after only the standalone path had been patched; see 7.3.
 
 ### 7.1 Genuinely open — detection-path gaps and blind spots
 
@@ -1410,6 +1580,30 @@ change to account for.
   memory caps already shipped, and more).
 
 ### 7.3 Closed — real findings, investigated and fixed
+
+**2026-11 audit — standalone and cascade DCGM clock-check false pages.**
+`alerting/alert_engine.py` judged "GPU clock < 0.6× node peers" from **one
+instantaneous `dcgmi` snapshot** and emitted `CONFIRMED`/`PAGE`. Fix
+(narrow, DCGM fallback only): the *standalone* sweep now requires the same
+single GPU to be the sole CONFIRMED on **3 consecutive 20 s sweeps**
+(`DCGM_FALLBACK_STANDALONE_PERSIST_REQUIRED`, default 3; 1 = old
+behavior); the *cascade* path re-queries DCGM **twice, 5 s apart**
+(`DCGM_FALLBACK_CASCADE_RESAMPLES`=2, `…_INTERVAL_S`=5; 0 = old behavior)
+and pages only if the same GPU stays suppressed. Tests:
+`tools/test_dcgm_persist_gate.py` (10 cases, offline); **real fault:**
+locking worker-1 GPU 0 to 600 MHz for 240 s mid-run still produced
+`CONFIRMED`/`PAGE` on both the cascade and standalone paths, all on the
+correct GPU, none on any other GPU; **healthy:** a 107-minute (4500-iteration) healthy soak produced 0 CONFIRMED and 0 PAGE alerts (2 of 2 real clock-lock trials paged on the true GPU only; trial 2: 4 PAGE, all on the true GPU). Cost: a
+real sustained clock fault now pages ~10 s (cascade) to ~40–60 s
+(standalone) later than before.
+
+**2026-11 audit — `install.sh` never started the DCGM hostengine.** The
+jail's `systemctl` is a stub that prints "Running in chroot, ignoring
+command" and returns 0, so the `nv-hostengine` fallback was never reached
+and every DCGM-sourced check silently degraded. `start_dcgm_hostengine()`
+now requires `dcgmi discovery -l` to succeed after `systemctl start`
+before returning success.
+
 
 Every item below was a real, confirmed gap at the time it was found.
 Each is now fixed and validated; the full investigation (root cause,

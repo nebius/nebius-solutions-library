@@ -87,3 +87,15 @@ metric drift) under real, unmodified, hours-long training, not testing
 fault injection. `train_node_nanogpt_longrun.sh` itself `cd`s into a
 fourth hardcoded absolute path not seen elsewhere in this package
 (`/root/P3_real_workload/nanoGPT`) — added to `../STAGE2_HANDOFF.md`.
+
+## Megatron (`workloads/megatron/`) — shape and pinning knobs (2026-11 audit)
+
+`train_node_megatron.sh` defaults still reproduce the original tiny TP4/PP4 config. Environment overrides:
+`MEGA_TP`, `MEGA_PP`, `MEGA_LAYERS`, `MEGA_HIDDEN`, `MEGA_HEADS`, `MEGA_SEQ`, `MEGA_MBS`, `MEGA_GBS`
+(e.g. the 16-GPU 8B-class shape used for validation: TP4/PP2, 40 layers, hidden 4096, 32 heads, seq 2048, mbs 1, gbs 32).
+`INSPECTOR=off` runs the control arm with no profiler plugin. `SRUN_EXTRA` is appended to the `srun` line
+(use `--exclusive --cpus-per-task=<all> --cpu-bind=none`). `STRAGGLER_SLEEP_MS` / `STRAGGLER_TARGET_RANKS` inject a
+per-microbatch sleep on the listed global ranks (100 ms ≈ +1.6 s/iteration at gbs 32 / DP 2).
+CPU pinning is on by default (`PIN_MODE=auto`) when Inspector is on — see `pinning/README.md`. Other workloads in this
+directory do **not** use pinning; adopt it via `pinning/pin_env.sh`.
+

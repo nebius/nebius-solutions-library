@@ -54,8 +54,18 @@ SUMMARY_LOG="$VAR_DIR/alert_summary.log"
 
 info "=== Step 1: launching the pipeline (real nodes: $NODE_LIST) ==="
 
+# Optional (PIN_HOUSEKEEPING=1): confine the aggregator/iowait-logger/bpftrace helpers on each worker to the
+# CPUs NOT reserved for pinned Inspector threads (pinning/README.md). Without this the scheduler happily runs
+# them on the idle dedicated cores and breaks the dedication. Off by default; PIN_CORES_PER_ROLE must match training.
+node_hk_prefix() {
+  [ "${PIN_HOUSEKEEPING:-0}" = "1" ] || return 0
+  local hk; hk="$(ssh -o BatchMode=yes -o ConnectTimeout=10 "$1" "PIN_ROLES=${PIN_ROLES:-dump,profiler} PIN_CORES_PER_ROLE=${PIN_CORES_PER_ROLE:-1} python3 -I '$PKG_ROOT/pinning/rank_setup.py' --local-world '${GPUS_PER_NODE:-8}' --housekeeping" 2>/dev/null)"
+  if [ -n "$hk" ]; then echo "taskset -c $hk"; else warn "  $1: could not compute housekeeping CPUs -- helpers left UNCONFINED (dedicated cores NOT protected from them)."; fi
+}
+
 for node in "${NODES[@]}"; do
   dd="$DUMP_DIR_BASE/$node"
+  HKP="$(node_hk_prefix "$node")"
   log="$VAR_DIR/aggregator_logs/$node.log"
   if ssh -o BatchMode=yes -o ConnectTimeout=10 "$node" "pgrep -f 'node_aggregator_ref.py .*$dd'" >/dev/null 2>&1; then
     info "  $node: aggregator already running against $dd -- leaving it alone."
@@ -73,7 +83,7 @@ for node in "${NODES[@]}"; do
     #    only the final simple command fixed it (confirmed: 8.5s -> 0.5s in
     #    the same minimal reproduction).
     ssh -n -o BatchMode=yes -o ConnectTimeout=10 "$node" \
-      "mkdir -p '$dd' || exit 1; setsid nohup bash '$PKG_ROOT/observability/run_aggregator_supervised.sh' '$dd' '$node' '$VM_URL' '$log' >/dev/null 2>&1 </dev/null &" \
+      "mkdir -p '$dd' || exit 1; $HKP setsid nohup bash '$PKG_ROOT/observability/run_aggregator_supervised.sh' '$dd' '$node' '$VM_URL' '$log' >/dev/null 2>&1 </dev/null &" \
       && info "  $node: aggregator supervisor launched (dump_dir=$dd, log=$log)." \
       || fail "  $node: failed to launch aggregator supervisor via ssh."
   fi
@@ -89,7 +99,7 @@ for node in "${NODES[@]}"; do
     info "  $node: iowait_logger supervisor already running -- leaving it alone."
   else
     ssh -n -o BatchMode=yes -o ConnectTimeout=10 "$node" \
-      "mkdir -p '$(dirname "$iowait_log")' || exit 1; setsid nohup bash '$PKG_ROOT/observability/run_iowait_logger_supervised.sh' '$node' '' '$iowait_log' >/dev/null 2>&1 </dev/null &" \
+      "mkdir -p '$(dirname "$iowait_log")' || exit 1; $HKP setsid nohup bash '$PKG_ROOT/observability/run_iowait_logger_supervised.sh' '$node' '' '$iowait_log' >/dev/null 2>&1 </dev/null &" \
       && info "  $node: iowait_logger supervisor launched (log=$iowait_log)." \
       || fail "  $node: failed to launch iowait_logger supervisor via ssh."
   fi

@@ -1,5 +1,7 @@
 # Stage 2 handoff — every hardcoded-cluster-shape assumption, in one list
 
+> **2026-11 audit pointer:** Historical record. NCCL version facts here predate the 2026-11 audit: the runtime NCCL is the host's 2.30.1, and full CPU pinning needs >= 2.32.3 — see `VERSIONS.md` and `pinning/README.md`.
+
 **STATUS: 11 of 11 items are now fully FIXED** — using real, live
 discovery (`lib/cluster_topology.sh` + `install.sh`-generated
 `cluster.env`, and, for item 11's 5th finding, `classifier/detection.py`'s

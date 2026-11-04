@@ -1,5 +1,7 @@
 # Exhaustive, code-verified inventory (V1 Beta packaging)
 
+> **2026-11 audit pointer:** Stage-1 audit, kept as history. New since: `pinning/` (CPU pinning, NEW/UNVALIDATED), `tools/readable_alerts.py`, `tools/test_dcgm_persist_gate.py`, and new env vars `PIN_*`, `NCCL_OVERRIDE_DIR`, `DCGM_FALLBACK_STANDALONE_PERSIST_REQUIRED`, `DCGM_FALLBACK_CASCADE_RESAMPLES[_INTERVAL_S]` — see `README.md` 5.2/7.3 and `pinning/README.md`.
+
 Every claim below was verified against the actual, live, currently-running
 code on disk (primarily `/root/P20c_alerting/` and `/root/P18k_classifier/`
 on the original development host) — not from memory, not from this

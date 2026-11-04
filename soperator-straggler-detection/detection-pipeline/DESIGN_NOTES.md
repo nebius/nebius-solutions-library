@@ -1,5 +1,7 @@
 # Design notes — investigation history, mechanism design, and closed findings
 
+> **2026-11 audit pointer:** Design history, not rewritten. Note: the "CONFIRMED has a 0-false-positive track record" and "22-25/hour" figures below were measured on other shapes; on the 2026-11 16-GPU PP shape the DCGM clock check false-paged before the fix and LOG-ONLY volume ran ~167-204/hour — see `README.md` 7.0 and 7.3.
+
 This file holds the "how it was found, and why it was built this way"
 narratives that used to live inside `README.md`. `README.md` itself keeps
 only what you need to install, run, and operate the pipeline today,

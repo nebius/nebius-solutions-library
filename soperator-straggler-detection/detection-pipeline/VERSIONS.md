@@ -74,3 +74,13 @@ rather than assuming these carry over.
 
 - **bpftrace**: confirmed working at `0.20.2-1ubuntu4.3` (live: `bpftrace
   --version` → `v0.20.2`) — see README.md's Requirements section.
+
+## Update (2026-11-04 audit, 16x H200, worker-0/1)
+- Runtime NCCL as shipped (host mount) is **2.30.1**, not the 2.28.9 above (verified via `ncclGetVersion()`).
+- Latest upstream stable NCCL tag: **v2.32.3-1**; it is the first checked here with `ncclProfilerThreadCreate`
+  (required to pin NCCL's profiler thread). Built at `/root/nccl-2.32.3-src/build`; select with `NCCL_OVERRIDE_DIR`.
+- The Inspector plugin (v5 API) loads and dumps correctly on 2.32.3. See `pinning/README.md`.
+- Reproducible build: `pinning/nccl/fetch_build_nccl.sh` (tag `v2.32.3-1`; verifies `ncclGetVersion()` = 2.32.3 and
+  the readable profiler symbol; records `pinning/.nccl_override_dir`). `BUILD_NCCL_232=1 ./install.sh` calls it.
+  The binary itself is not in git (255 MB).
+

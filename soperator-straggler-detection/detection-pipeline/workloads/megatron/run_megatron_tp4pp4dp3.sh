@@ -91,7 +91,7 @@ srun --nodes=1 --ntasks=1 -w "$_PREBUILD_NODE" \
   || { echo "FATAL: megatron pre-build (helpers_cpp and/or bytecode precompile) failed -- see output above." >&2; exit 1; }
 echo "--- megatron pre-build confirmed (helpers_cpp + bytecode cache, or already up to date) ---"
 
-srun --nodes="$NUM_NODES" --ntasks="$NUM_NODES" --ntasks-per-node=1 --gpus-per-node="$GPUS_PER_NODE" -w "$NODE_LIST" \
+srun --nodes="$NUM_NODES" --ntasks="$NUM_NODES" --ntasks-per-node=1 --gpus-per-node="$GPUS_PER_NODE" ${SRUN_EXTRA:-} -w "$NODE_LIST" \
   --container-image="$IMAGE" \
   --container-mounts="$MOUNTS" \
   --export=ALL,STRAGGLER_SLEEP_MS="$SLEEP_MS",STRAGGLER_TARGET_RANKS="$TARGET_RANKS",STORAGE_FAULT_FILE_MB="$STORAGE_FAULT_FILE_MB",STORAGE_FAULT_TARGET_RANKS="$STORAGE_FAULT_TARGET_RANKS" \

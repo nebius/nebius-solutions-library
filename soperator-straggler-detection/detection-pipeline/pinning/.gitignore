@@ -1,0 +1,4 @@
+# compiled artifact; build with ./build.sh
+*.so
+.nccl_override_dir
+nccl/build-*/
