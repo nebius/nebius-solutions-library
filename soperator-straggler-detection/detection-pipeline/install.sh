@@ -564,7 +564,7 @@ fi
 # instance already happened to be running). Generates a real config
 # fragment (never launches Grafana itself, matching Step 4.5's/vm-
 # standalone's own established scope boundary -- see grafana-standalone/
-# README.md for the real, confirmed launch command that uses this) with
+# docs/DETAILED_REFERENCE.md for the real, confirmed launch command that uses this) with
 # anonymous access explicitly disabled and a real, random admin password
 # -- never a hardcoded default. Idempotent: re-running install.sh reuses
 # an already-generated real password instead of silently invalidating an

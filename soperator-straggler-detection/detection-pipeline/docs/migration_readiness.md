@@ -1,6 +1,6 @@
 # Migration Readiness Inventory
 
-> **2026-11 audit pointer:** Historical readiness assessment. For the 2026-11 POC-readiness audit (pinning, NCCL >= 2.32.3, DCGM false-page fix, known gaps) see `README.md` 5.2, 7.0, 7.3.
+> **2026-11 audit pointer:** Historical readiness assessment. For the 2026-11 POC-readiness audit (pinning, NCCL >= 2.32.3, DCGM false-page fix, known gaps) see `DETAILED_REFERENCE.md` 5.2, 7.0, 7.3.
 
 Real, verified inventory of what needs to move to run this GPU
 straggler-detection pipeline on a different cluster, what won't transfer
@@ -97,7 +97,7 @@ project's tooling has been validated on more than 2 physical nodes.
 
 | Path | What it is |
 |---|---|
-| `/root/nccl-2.28-src/ext-profiler/inspector/` (source, not just the built `.so`) | The patched NCCL Inspector plugin — `inspector.cc`, `inspector.h`, `inspector_plugin.cc`, `json.cc/h`, `version.cc/h`, `Makefile`, `README.md`. Built artifact `libnccl-profiler-inspector.so` included too (184KB, small enough to ship prebuilt; still ship source since the target cluster's own NCCL/CUDA version may require a rebuild — see build instructions below). |
+| `/root/nccl-2.28-src/ext-profiler/inspector/` (source, not just the built `.so`) | The patched NCCL Inspector plugin — `inspector.cc`, `inspector.h`, `inspector_plugin.cc`, `json.cc/h`, `version.cc/h`, `Makefile`, `DETAILED_REFERENCE.md`. Built artifact `libnccl-profiler-inspector.so` included too (184KB, small enough to ship prebuilt; still ship source since the target cluster's own NCCL/CUDA version may require a rebuild — see build instructions below). |
 | `/root/P20c_alerting/*.py` (every script) | The live alerting pipeline — `node_aggregator_ref.py`, `alert_engine.py`, `coverage_guard.py`, `pipeline_health.py`, `thresholds.py`, `persistence.py`, `health_exclusions.py`, `ras_alert.py`, `iowait_logger.py`, `node_aggregator_with_shim.py` (P27-era: thin wrapper adding `AGGREGATOR_LOCAL_LOG`-driven redundant local JSONL logging of every push, used throughout this session's validation for full-resolution data verification independent of VM itself). |
 | `/root/P18k_classifier/*.py` | The offline/cause-evidence classifier — `classifier.py`, `cause_metrics.py`, `detection.py`, `calibration.py`, `rolling_buffer.py`, `report.py`, `storage_evidence.py`, `persistence.py`, `cv_fixed.py`, `decay_counter.py`, `transient_latency.py`. |
 | `/root/P20d_e2e_validation/storage_ebpf/iowait_agent.bt` | The eBPF storage-fault agent script (bpftrace). |
@@ -127,7 +127,7 @@ project uses):
 - `NCCL_INSPECTOR_DUMP_VERBOSE=0` (lean mode, the real default across
   every validated shape as of this session's A/B-validated fix —
   `=1` is an opt-in override, only needed by a small set of offline
-  tools; see README.md's overhead note for why)
+  tools; see DETAILED_REFERENCE.md's overhead note for why)
 - `NCCL_INSPECTOR_DUMP_THREAD_INTERVAL_MICROSECONDS` — dump-write cadence
   (this project has used 500 throughout).
 - `NCCL_INSPECTOR_DUMP_DIR` — per-rank dump directory,
@@ -219,7 +219,7 @@ do not extrapolate from one node to the rest of the fleet.**
 ## 3. VMSingle Helm chart — pointing the aggregator at a fresh instance
 
 Chart: `/root/P26_5_vmsingle_chart/straggler-vmsingle/` (see its own
-README.md for full install/validate steps, dedup rationale, and real
+DETAILED_REFERENCE.md for full install/validate steps, dedup rationale, and real
 sizing basis). Install:
 
 ```

@@ -593,7 +593,7 @@ confirmed via live testing, not just code review):
    (21,600/21,600 recovered); MoE/DLRM's own higher AllToAll frequency
    does exceed 256 capacity at points (real, counted drops up to
    15,506/7,924 on a short run) — disclosed honestly as a real, open
-   sizing question, not hidden. See README.md section 6.9 for full
+   sizing question, not hidden. See DETAILED_REFERENCE.md section 6.9 for full
    validation detail (overhead, self_test.sh, cross-shape sweep).
 
 ---
@@ -616,7 +616,7 @@ audit-host drivers. See `pinning/README.md`.
 
 **alert_engine.py change (2026-11):** the DCGM clock-suppression fallback (`_dcgm_fallback_evaluate`) no longer emits
 `CONFIRMED`/`PAGE` from a single snapshot — standalone sweep needs 3 consecutive sweeps, the cascade path 2 re-samples
-5 s apart (env-tunable; see `README.md` 7.3). The older "0 false positives at CONFIRMED" figure in this file predates
+5 s apart (env-tunable; see `DETAILED_REFERENCE.md` 7.3). The older "0 false positives at CONFIRMED" figure in this file predates
 this and was contradicted on the 16-GPU PP shape before the fix.
 
 ## Dynamic/generic guarantees

@@ -109,6 +109,12 @@ DCGM_FALLBACK_CHECK_INTERVAL_S = 20.0
 # DCGM_FALLBACK_CHECK_INTERVAL_S apart) before emitting. 1 = old behavior.
 # The cascade-triggered path (_emit) is unchanged: it only runs while a
 # larger related communicator is already firing a real anomaly.
+# Main-path MEAN check gate (approved decision, 2026-11 audit): on TP-heavy shapes the mean check on
+# 4-member (TP4) communicators fired constantly on healthy runs (median ~8x peers, ~64% of healthy-run alerts)
+# and never named the true faulted rank in 9 fault trials. Comma-separated role_n values for which the mean
+# check is OBSERVED (tracker state kept) but NOT EMITTED. Default "4" = the one measured shape. Set to "" to
+# restore the old behaviour. Every other detection path (wait-induced, CV, role-baseline, DCGM) is unchanged.
+MEAN_CHECK_GATED_ROLE_N = frozenset(x.strip() for x in os.environ.get("MEAN_CHECK_GATED_ROLE_N", "4").split(",") if x.strip())
 DCGM_FALLBACK_STANDALONE_PERSIST_REQUIRED = int(os.environ.get("DCGM_FALLBACK_STANDALONE_PERSIST_REQUIRED", "3"))
 # Cascade-path counterpart: the cascade call is one-shot (no later sweep to
 # count), so after a first positive reading it re-queries DCGM this many
@@ -1610,6 +1616,7 @@ class AlertEngine:
         self._last_dcgm_fallback_check_at = 0.0
         self._dcgm_fallback_thread = None
         self._dcgm_fallback_streak = {}  # key -> (member, consecutive sweeps)
+        self._mean_gate_logged = set()
         # P27-hotfix2 -- nv-hostengine liveness, same dead-man's-switch
         # discipline as pipeline_down/n_pipeline_down_cycles above: found
         # this session that nv-hostengine (the persistent DCGM daemon every
@@ -5481,6 +5488,13 @@ class AlertEngine:
             latest_ts_ms = shared_ts[-1]
             key = ("mean", hostname, comm, member, bucket, coll)
             persisted, duration_s = self.mean_tracker.observe(key, new_fired_val, latest_ts_ms / 1000.0)
+            if persisted and str(z_row["metric"].get("role_n", "na")) in MEAN_CHECK_GATED_ROLE_N:
+                # Approved gate: observed, not emitted (see MEAN_CHECK_GATED_ROLE_N). One log line per key.
+                if key not in self._mean_gate_logged:
+                    self._mean_gate_logged.add(key)
+                    print(f"[MEAN-GATED] member={member} comm={comm} role_n={z_row['metric'].get('role_n')} "
+                          f"bucket={bucket} coll={row_coll}: mean check suppressed by MEAN_CHECK_GATED_ROLE_N", flush=True)
+                persisted = False
             if persisted:
                 # Display the real (z, mm) pair that actually qualified --
                 # the most recent one if several did, else (persistence

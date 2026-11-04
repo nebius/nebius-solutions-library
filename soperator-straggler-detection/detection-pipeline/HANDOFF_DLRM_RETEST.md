@@ -81,7 +81,7 @@ scenario. Strengthen confidence with genuinely independent repeats:
 
 2. **One more independent regression check**, reusing nanoGPT or
    picking a different already-working shape (e.g., FSDP, TP4, RL — see
-   `README.md`'s "Testing/validation reference" section for exact
+   `docs/DETAILED_REFERENCE.md`'s "Testing/validation reference" section for exact
    launch commands). Confirm real, correctly-attributed per-rank
    detection still fires, and confirm no new false `uniform_slowdown`
    alert appears during a genuinely healthy portion of that run.
@@ -121,7 +121,7 @@ chase it further. It's a real, precisely-scoped, separate proposal
 (rescoping `comm_calib`/`comm_bucket_members` to a real job boundary —
 used extensively throughout `node_aggregator_ref.py` for calibration
 and bucket-discovery, so real, wider-reaching, riskier design work) for
-a future session, already written up in `README.md`.
+a future session, already written up in `docs/DETAILED_REFERENCE.md`.
 
 ## Shared-process safety rule (read before touching any live process)
 

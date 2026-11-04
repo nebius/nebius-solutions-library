@@ -1,6 +1,6 @@
 # Handoff: PP (Plain Pipeline-Parallel) fault-detection fix
 
-> **2026-11 audit pointer:** Historical. 2026-11 audit data on the same PP shape (wait-induced check named the true rank 9/9, 2/9 also named the mirror replica position) is in `README.md` 7.0.
+> **2026-11 audit pointer:** Historical. 2026-11 audit data on the same PP shape (wait-induced check named the true rank 9/9, 2/9 also named the mirror replica position) is in `docs/DETAILED_REFERENCE.md` 7.0.
 
 You are starting fresh. This document is the complete context you need —
 do not re-derive anything below from scratch; confirm/extend, don't

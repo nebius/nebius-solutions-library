@@ -157,7 +157,7 @@ fi
 # in its own git log). This ONLY builds the NCCL_HOME the Inspector
 # plugin compiles its headers against -- the NCCL version actually
 # linked at runtime for real training is a SEPARATE, host-shadowed
-# concern install.sh's own NCCL note already documents (see README.md's
+# concern install.sh's own NCCL note already documents (see docs/DETAILED_REFERENCE.md's
 # Requirements section) and this script does not touch.
 #
 # Real investigation finding (confirmed, not assumed): the Inspector

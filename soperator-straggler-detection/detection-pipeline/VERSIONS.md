@@ -22,7 +22,7 @@ rather than assuming these carry over.
   NCCL_MINOR=28 NCCL_PATCH=9`) — this is the source tree the Inspector
   plugin (`NCCL_PROFILER_PLUGIN`) is built against and the version every
   launch script's `NCCL_LIB_PATH` points at.
-- **Read README.md's own Requirements section before assuming this is
+- **Read docs/DETAILED_REFERENCE.md's own Requirements section before assuming this is
   what actually runs**: the container mount convention most launch
   scripts use shadows the container's own bundled NCCL with whatever
   version is host-installed at `/usr/lib/x86_64-linux-gnu` — `install.sh`
@@ -31,7 +31,7 @@ rather than assuming these carry over.
   necessarily the training runtime's own NCCL version. Two shapes
   (`long-context`, `rl`) additionally force `LD_LIBRARY_PATH` to this
   exact 2.28.9 build regardless of the host, a real, disclosed
-  inconsistency (see README.md's own NCCL note).
+  inconsistency (see docs/DETAILED_REFERENCE.md's own NCCL note).
 
 ## Inspector plugin (NCCL profiler)
 
@@ -55,7 +55,7 @@ rather than assuming these carry over.
 - `nvcr.io#nvidia/pytorch:25.01-py3` — the one real, pinned image every
   launch script's `IMAGE`/`--container-image` uses. This image's own
   bundled PyTorch/torchvision/NumPy versions are the real Python
-  dependency pins for every workload (see README.md's Requirements
+  dependency pins for every workload (see docs/DETAILED_REFERENCE.md's Requirements
   section) — this project does not separately pin Python package
   versions on top of this image, and this session did not independently
   re-extract the image's exact bundled package versions (a real gap;
@@ -73,7 +73,7 @@ rather than assuming these carry over.
 ## External tools
 
 - **bpftrace**: confirmed working at `0.20.2-1ubuntu4.3` (live: `bpftrace
-  --version` → `v0.20.2`) — see README.md's Requirements section.
+  --version` → `v0.20.2`) — see docs/DETAILED_REFERENCE.md's Requirements section.
 
 ## Update (2026-11-04 audit, 16x H200, worker-0/1)
 - Runtime NCCL as shipped (host mount) is **2.30.1**, not the 2.28.9 above (verified via `ncclGetVersion()`).

@@ -1,9 +1,9 @@
 # Design notes — investigation history, mechanism design, and closed findings
 
-> **2026-11 audit pointer:** Design history, not rewritten. Note: the "CONFIRMED has a 0-false-positive track record" and "22-25/hour" figures below were measured on other shapes; on the 2026-11 16-GPU PP shape the DCGM clock check false-paged before the fix and LOG-ONLY volume ran ~167-204/hour — see `README.md` 7.0 and 7.3.
+> **2026-11 audit pointer:** Design history, not rewritten. Note: the "CONFIRMED has a 0-false-positive track record" and "22-25/hour" figures below were measured on other shapes; on the 2026-11 16-GPU PP shape the DCGM clock check false-paged before the fix and LOG-ONLY volume ran ~167-204/hour — see `docs/DETAILED_REFERENCE.md` 7.0 and 7.3.
 
 This file holds the "how it was found, and why it was built this way"
-narratives that used to live inside `README.md`. `README.md` itself keeps
+narratives that used to live inside `docs/DETAILED_REFERENCE.md`. `docs/DETAILED_REFERENCE.md` itself keeps
 only what you need to install, run, and operate the pipeline today,
 plus the limitations that are still genuinely open. Everything here is
 historical/design-rationale detail for anyone going deeper on a specific
@@ -11,9 +11,9 @@ mechanism — real numbers, real validation runs, real root causes, not
 paraphrased.
 
 Nothing in this file was deleted or shortened from its original
-README.md text — it was moved and regrouped by topic (not by the order
+docs/DETAILED_REFERENCE.md text — it was moved and regrouped by topic (not by the order
 it was originally discovered/written), with only cross-reference section
-numbers corrected to match the new layout. See `README.md`'s own
+numbers corrected to match the new layout. See `docs/DETAILED_REFERENCE.md`'s own
 `## 7. Known limitations` for the current, trimmed, still-open items;
 each one that has a fuller history here is pointed at directly.
 

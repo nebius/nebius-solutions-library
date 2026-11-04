@@ -62,7 +62,7 @@ workload_shapes:
           wait-induced check existed. NOT characterized this session for an
           ordinary (non-wait-induced-shaped) compute fault on this workload --
           do not assume it "behaves normally" here without real evidence.
-        evidence_ref: "README.md section 7, 'CLOSED -- wait-induced stragglers'"
+        evidence_ref: "docs/DETAILED_REFERENCE.md section 7, 'CLOSED -- wait-induced stragglers'"
       wait_induced:
         status: KNOWN_RELIABLE
         note: >
@@ -71,7 +71,7 @@ workload_shapes:
           in one PEER's own baseline availability early in the run,
           self-resolved by poll 6 onward, never a miss on the target itself),
           always correctly naming the true injected rank.
-        evidence_ref: "README.md section 7, 'CLOSED -- wait-induced stragglers'"
+        evidence_ref: "docs/DETAILED_REFERENCE.md section 7, 'CLOSED -- wait-induced stragglers'"
       role_baseline:
         status: KNOWN_RELIABLE
         note: >
@@ -130,7 +130,7 @@ workload_shapes:
           a further 42+ minutes of continuous clean production polling,
           zero false positives either time, including the exact
           previously-affected role position.
-        evidence_ref: "README.md section 7, 'CLOSED -- wait-induced stragglers'"
+        evidence_ref: "docs/DETAILED_REFERENCE.md section 7, 'CLOSED -- wait-induced stragglers'"
       role_baseline:
         status: KNOWN_RELIABLE
         note: >

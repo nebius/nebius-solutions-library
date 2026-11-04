@@ -5,7 +5,7 @@
 **STATUS: 11 of 11 items are now fully FIXED** — using real, live
 discovery (`lib/cluster_topology.sh` + `install.sh`-generated
 `cluster.env`, and, for item 11's 5th finding, `classifier/detection.py`'s
-new `discover_rank_gpu_slots()`). See `README.md`'s new "Stage 2:
+new `discover_rank_gpu_slots()`). See `docs/DETAILED_REFERENCE.md`'s new "Stage 2:
 install.sh" section for the real, live validation run (including 2
 genuine, live-caught bugs the validation run itself found and this
 session fixed: `scontrol` not being present inside the training
@@ -288,7 +288,7 @@ design decision.
 (`nanogpt-base/`, `nanogpt/`, `tp2/`, `fsdp/`) — real Stage 2 cleanup
 work, not a mistake
 
-**RESOLVED (this session):** Fixed: `nanogpt/`, `tp2/`, `fsdp/`, and `rl/` all now import `model`/load `configurator.py`/reference the dataset via paths resolved relative to `../nanogpt-base/` and `../shared-data/`, computed from each script's own real `__file__` location rather than assuming a particular CWD -- confirmed working end-to-end via a real, live 2-node training run in this session (see README.md's Stage 2 section).
+**RESOLVED (this session):** Fixed: `nanogpt/`, `tp2/`, `fsdp/`, and `rl/` all now import `model`/load `configurator.py`/reference the dataset via paths resolved relative to `../nanogpt-base/` and `../shared-data/`, computed from each script's own real `__file__` location rather than assuming a particular CWD -- confirmed working end-to-end via a real, live 2-node training run in this session (see docs/DETAILED_REFERENCE.md's Stage 2 section).
 
 See `workloads/README.md` for the full story: `nanogpt/train.py`,
 `tp2/train.py`, and `fsdp/train_fsdp.py` each do a bare `from model

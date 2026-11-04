@@ -128,7 +128,7 @@ if [ "$_code" = "401" ] || [ "$_code" = "302" ]; then
     fi
   fi
 elif [ "$_code" = "200" ]; then
-  warn "Something is already answering at $GRAFANA_URL, but WITHOUT requiring credentials (HTTP 200 -- anonymous access enabled). Not managed by this script -- see README.md section 6.2 for why this matters and how to check/fix an existing instance's own config."
+  warn "Something is already answering at $GRAFANA_URL, but WITHOUT requiring credentials (HTTP 200 -- anonymous access enabled). Not managed by this script -- see docs/DETAILED_REFERENCE.md section 6.2 for why this matters and how to check/fix an existing instance's own config."
   exit 0
 fi
 [ "$FAIL" -eq 1 ] && { echo "[grafana-setup.sh] Aborting -- a Grafana instance occupies $GRAFANA_URL that isn't confirmed as this package's own -- see FATAL line(s) above." >&2; exit 1; }
@@ -322,4 +322,4 @@ fi
 
 [ "$FAIL" -eq 1 ] && { echo "[grafana-setup.sh] Aborting -- see FATAL lines above." >&2; exit 1; }
 
-info "Real, auth-enforced Grafana ready at $GRAFANA_URL (HTTP $code confirmed, not 200). install.sh will detect and finalize this (real access host/instructions land in cluster.env's own GRAFANA_ACCESS_HOST after it runs -- see README.md section 6.1 for the exact SSH-tunnel command using that value). Credentials: cat $GRAFANA_ADMIN_CREDENTIALS_FILE"
+info "Real, auth-enforced Grafana ready at $GRAFANA_URL (HTTP $code confirmed, not 200). install.sh will detect and finalize this (real access host/instructions land in cluster.env's own GRAFANA_ACCESS_HOST after it runs -- see docs/DETAILED_REFERENCE.md section 6.1 for the exact SSH-tunnel command using that value). Credentials: cat $GRAFANA_ADMIN_CREDENTIALS_FILE"

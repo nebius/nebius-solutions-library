@@ -4,7 +4,7 @@ This file answers one question: **what do you need to continuously watch,
 update, and re-validate to keep this pipeline working end-to-end, especially
 as new versions ship?**
 
-It is the maintenance *lens* on top of `README.md` — where a topic is already
+It is the maintenance *lens* on top of `docs/DETAILED_REFERENCE.md` — where a topic is already
 fully documented there (architecture, install steps, troubleshooting), this
 file summarizes and points at the section rather than repeating it. Every
 claim below was verified directly against the current code/README at the time
@@ -32,7 +32,7 @@ this project's own history of things that actually broke:
    before assuming it's the only place that needed the change.
 3. **Relative `DUMPDIR_BASE` silently breaks dump output** — no crash, no
    error, just silent non-detection, because self-dispatching workload
-   launchers `cd` before the relative path resolves (README.md §8, line
+   launchers `cd` before the relative path resolves (docs/DETAILED_REFERENCE.md §8, line
    1333). Always pass an absolute path.
 4. **Overhead is not one number.** Seven different measurements exist
    (4.5x / ~6.5% / ~12.3% / ~13.1% / ~12.0% / ~12.14% / ~6.20%) across
@@ -172,11 +172,11 @@ VM's own new-series visibility lag), then deployed to the real production
 
 **Known version-sensitive gotchas (both from a real launch-script bind-mount
 of the host's `/usr/lib/x86_64-linux-gnu` into the container):**
-- **Host-NCCL-shadowing** (README.md §3, line 251): the mount silently
+- **Host-NCCL-shadowing** (docs/DETAILED_REFERENCE.md §3, line 251): the mount silently
   shadows the container's bundled NCCL with whatever's host-installed. Some
   shapes force `LD_LIBRARY_PATH` to the pinned 2.28.9 build to compensate —
   a disclosed inconsistency, not a universal fix.
-- **TE/CUBLAS shadowing** (README.md §3, line 263, same bullet as above):
+- **TE/CUBLAS shadowing** (docs/DETAILED_REFERENCE.md §3, line 263, same bullet as above):
   the same mount also shadows CUBLAS; a real Megatron TP4/PP4/DP3 run
   crashed with a `cublasLtGetVersion` symbol error under
   `--transformer-impl=transformer_engine`, worked around with
@@ -189,9 +189,9 @@ invalidates an old overhead number.
 
 ## 5. Known limitations / disclosed gaps — current status
 
-Pulled from README §7 ("Known limitations," README.md:1075) and verified
-against its current text, not memory. **README.md was split into a tight
-README.md + a new DESIGN_NOTES.md during the V1 Beta doc-consolidation
+Pulled from README §7 ("Known limitations," docs/DETAILED_REFERENCE.md:1075) and verified
+against its current text, not memory. **docs/DETAILED_REFERENCE.md was split into a tight
+docs/DETAILED_REFERENCE.md + a new DESIGN_NOTES.md during the V1 Beta doc-consolidation
 pass** — every investigation narrative previously cited here by README
 line number now lives in DESIGN_NOTES.md instead; the table below was
 re-pointed accordingly, re-verified directly against both current files,
@@ -199,11 +199,11 @@ not carried forward from memory:
 
 | Item | Status | Note |
 |---|---|---|
-| NVLink never validated against a real fault | **GENUINELY STILL OPEN** | Three different real injection approaches tried, none could produce one (README.md §7.1, line 1136) |
-| ECC/PCIe not validated as independent cause | **ACCEPTED-AS-IS by design** | Explicitly never used alone to drive a CONFIRMED tier (README.md §7.1, line 1145) |
+| NVLink never validated against a real fault | **GENUINELY STILL OPEN** | Three different real injection approaches tried, none could produce one (docs/DETAILED_REFERENCE.md §7.1, line 1136) |
+| ECC/PCIe not validated as independent cause | **ACCEPTED-AS-IS by design** | Explicitly never used alone to drive a CONFIRMED tier (docs/DETAILED_REFERENCE.md §7.1, line 1145) |
 | `rolling_buffer.py` sampler "not deployed" | **FIXED (precision correction in README)** | The sampler genuinely isn't launched, but the query functions ARE live, reachable code gated behind one `buffer=None` call site — see §3 |
-| "Rank-12-style" structural role-position bias | **PARTIALLY ADDRESSED** | Original TP-group-local role_rank=0 finding still tracked as open (README.md §7.1, line 1102), with a pointer to the full origin story and the two distinct false-positive fixes (contamination, volatility) built on top of it (DESIGN_NOTES.md §1.6, line 388) |
-| MoE/DLRM ring-buffer capacity overflow | **GENUINELY STILL OPEN** | 4 real runs showed drop counts spanning ~1000x for identical code/config; root cause undetermined, no capacity change made (README.md §6.9, line 942; full investigation DESIGN_NOTES.md §5.1) |
+| "Rank-12-style" structural role-position bias | **PARTIALLY ADDRESSED** | Original TP-group-local role_rank=0 finding still tracked as open (docs/DETAILED_REFERENCE.md §7.1, line 1102), with a pointer to the full origin story and the two distinct false-positive fixes (contamination, volatility) built on top of it (DESIGN_NOTES.md §1.6, line 388) |
+| MoE/DLRM ring-buffer capacity overflow | **GENUINELY STILL OPEN** | 4 real runs showed drop counts spanning ~1000x for identical code/config; root cause undetermined, no capacity change made (docs/DETAILED_REFERENCE.md §6.9, line 942; full investigation DESIGN_NOTES.md §5.1) |
 | Cross-node PP-link `baseline_source` gap (Hybrid) | **ACCEPTED, permanent topology limitation** — but see caveat | Hybrid's 2-ranks/node layout has no independent same-shape peer comm on the SAME host for the below-floor fallback to use (DESIGN_NOTES.md §2.3, line 627) — the underlying topology limitation is real and permanent, but P27.5 (same section) works around it for any real multi-worker Hybrid deployment by pooling job-wide instead of same-host; only a truly single-worker-equivalent isolated test still hits the raw gap |
 | First-seed replay cost after dump-backlog checkpoint fix | **ACCEPTED-AS-IS, disclosed** | The very first checkpoint-seeding replay still pays the full from-scratch cost (DESIGN_NOTES.md §3.1, line 1045) |
 | `workload_signature()` can lock permanently incomplete under a severe-enough fault | **MITIGATED (severity bar raised), NOT eliminated; see full writeup below** | `SIG_LOCK_MIN_ELAPSED_S=300.0` fix, confirmed live on FSDP |
@@ -217,7 +217,7 @@ not carried forward from memory:
 
 **Maintenance note, found live during the original version of this
 table's own staleness, and again confirmed during the doc-consolidation
-pass**: any future large edit to either README.md or DESIGN_NOTES.md can
+pass**: any future large edit to either docs/DETAILED_REFERENCE.md or DESIGN_NOTES.md can
 silently re-stale every line number in this table again — there is no
 automated check tying these together. Re-grep each real quoted phrase
 above (not just trust the number) whenever this table is next consulted
@@ -962,7 +962,7 @@ the reference table or the lookup logic is broken.
 race, confirmed live, for the same structural reason.** This gate
 promotes `_cross_comm_peer_median` (same-Slurm-job comparison) ahead of
 cross-job role-baseline for a role shape whose per-job-median spread
-exceeds 0.7 (see README.md §7.1's TP4-standalone entry, and the full
+exceeds 0.7 (see docs/DETAILED_REFERENCE.md §7.1's TP4-standalone entry, and the full
 mechanism in DESIGN_NOTES.md §1.8). `_cross_comm_peer_median` needs this
 job's OTHER same-shape comms to have posted fresh data; the role-
 baseline elevated gate's own 3-consecutive-sample persistence
@@ -1048,7 +1048,7 @@ reading it would be actively misled rather than honestly told
 - **`DUMPDIR_BASE` must be absolute.** Every `workloads/*/run_*.sh` launcher
   (14 files) takes it as a plain positional arg with no normalization.
   Self-dispatching shapes `cd` into their own workload directory before a
-  relative path resolves — **silent non-detection, no error** (README.md
+  relative path resolves — **silent non-detection, no error** (docs/DETAILED_REFERENCE.md
   §8, line 1333). Always pass `"$PWD/var/dump"` or similar.
 
 ## 8. Overhead/performance — all current numbers, none permanent
@@ -1057,8 +1057,8 @@ Seven distinct measurements exist, each under different conditions — never
 treat one as "the" number, and re-measure after any workload-shape, scale,
 or plugin change:
 
-All five numbers now live in DESIGN_NOTES.md (moved out of README.md
-during the V1 Beta doc-consolidation pass; README.md §7.2 keeps only the
+All five numbers now live in DESIGN_NOTES.md (moved out of docs/DETAILED_REFERENCE.md
+during the V1 Beta doc-consolidation pass; docs/DETAILED_REFERENCE.md §7.2 keeps only the
 one-line summary and a pointer):
 
 1. ResNet, 1-GPU, earliest/undocumented mode: **~4.5x** (85ms Inspector vs.
@@ -1184,5 +1184,6 @@ vary.
 - **Alert-engine knobs added by the 2026-11 audit** (env on `alert_engine.py`):
   `DCGM_FALLBACK_STANDALONE_PERSIST_REQUIRED` (default 3), `DCGM_FALLBACK_CASCADE_RESAMPLES` (2),
   `DCGM_FALLBACK_CASCADE_RESAMPLE_INTERVAL_S` (5). Setting the first to 1 and the second to 0 restores the old
-  single-snapshot behavior (which false-pages on pipeline-parallel jobs). See README.md 7.3.
-- **Known operational risk:** aggregator RSS grows across jobs (soak-measured about +5 to +7 MB/hour per aggregator, about +4 MB/hour alert engine, cause not identified); see README.md 7.0.
+  single-snapshot behavior (which false-pages on pipeline-parallel jobs). See docs/DETAILED_REFERENCE.md 7.3.
+- **Known operational risk:** aggregator RSS grows early in a job and across jobs (107-minute soak: about 85 -> 106-109 MB, front-loaded and flattening; likely per-bucket lists filling to their caps plus per-communicator state never evicted; not confirmed by a heap profile). Restart the aggregators between very long multi-job campaigns; see docs/DETAILED_REFERENCE.md 7.0.
+- **Mean-check gate (`MEAN_CHECK_GATED_ROLE_N`, default `4`):** the main-path `mean` check is observed but not emitted for 4-member communicators (it produced about 64% of healthy-run alerts on TP4 shapes and never named the faulted rank). Logged once per member as `[MEAN-GATED]`. Set to an empty string to restore the old behaviour, or list other `role_n` values (comma-separated). Takes effect when `alert_engine.py` restarts. See docs/DETAILED_REFERENCE.md 7.0.
