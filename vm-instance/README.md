@@ -31,6 +31,14 @@ These scripts export the Terraform variables used by this module, create the Obj
 
 If you want to configure S3 credentials for bucket mounting outside of Terraform, use `source ./s3_keys.sh`.
 
+## Updating an existing checkout
+
+The tracked `terraform.tfvars` has been renamed to `terraform.tfvars.example`.
+Before updating an older checkout, back up your customized `terraform.tfvars` outside
+this repository. After updating, restore it as your local `terraform.tfvars` and
+compare it with the new example for added settings. Do not overwrite an existing
+local configuration with the copy command above.
+
 ## Usage
 
 After configuring your local `terraform.tfvars` and loading the environment above, run:
