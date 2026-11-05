@@ -1187,3 +1187,62 @@ vary.
   single-snapshot behavior (which false-pages on pipeline-parallel jobs). See docs/DETAILED_REFERENCE.md 7.3.
 - **Known operational risk:** aggregator RSS grows early in a job and across jobs (107-minute soak: about 85 -> 106-109 MB, front-loaded and flattening; likely per-bucket lists filling to their caps plus per-communicator state never evicted; not confirmed by a heap profile). Restart the aggregators between very long multi-job campaigns; see docs/DETAILED_REFERENCE.md 7.0.
 - **Mean-check gate (`MEAN_CHECK_GATED_ROLE_N`, default `4`):** the main-path `mean` check is observed but not emitted for 4-member communicators (it produced about 64% of healthy-run alerts on TP4 shapes and never named the faulted rank). Logged once per member as `[MEAN-GATED]`. Set to an empty string to restore the old behaviour, or list other `role_n` values (comma-separated). Takes effect when `alert_engine.py` restarts. See docs/DETAILED_REFERENCE.md 7.0.
+
+---
+
+## Kubernetes-specific maintenance (2026-11 addition)
+
+### K8s cluster state before testing
+
+On a soperator (Slurm-on-K8s) cluster, GPU nodes are exclusively allocated to
+Slurm worker pods. Before any K8s GPU test:
+
+```bash
+kubectl scale nodeset worker -n soperator --replicas=0   # free GPU nodes
+# ... run K8s tests ...
+kubectl scale nodeset worker -n soperator --replicas=2   # restore Slurm
+```
+
+Always confirm no active Slurm jobs before scaling down. After testing, confirm
+the NodeSet reaches `Ready` and both worker pods are running before treating
+the Slurm cluster as fully restored.
+
+### K8s workspace maintenance
+
+The `straggler-detection` K8s namespace contains:
+- `straggler-workspace` PVC (NFS, 50 Gi) — holds pipeline code, Inspector .so,
+  NCCL 2.32.3 lib. If code changes are made locally (not yet pushed), sync with:
+  ```bash
+  kubectl cp alerting/alert_engine.py workspace-pod:/workspace/.../alerting/alert_engine.py
+  ```
+  After a git push and pull-in-pod, the workspace updates automatically on the
+  next `k8s/install_k8s.sh` run.
+- VictoriaMetrics Deployment (emptyDir storage) — data cleared on pod restart.
+  Restart intentionally to clear historical comm data between test sessions
+  (old comms slow the alert engine's export queries significantly over port-forward).
+
+### Alert engine on K8s: known performance constraint
+
+The alert engine runs on the control machine and reaches VictoriaMetrics via
+`kubectl port-forward` (0.5 s/query latency). With many historical comms in VM,
+export queries for `_check_mean` accumulate and each poll cycle can take 3+ min.
+Mitigations:
+1. Restart VictoriaMetrics between test sessions to clear old comm data.
+2. For production K8s deployment, run the alert engine as a K8s pod with
+   direct ClusterIP access to VM (< 1 ms latency, same as Slurm over local network).
+
+### DCGM on K8s
+
+The alert engine cannot SSH to K8s node internal hostnames from the control
+machine. `[DCGM-HOSTENGINE-DOWN]` warnings are expected and harmless — DCGM-
+sourced cause classification is unavailable on K8s via the current SSH-based path.
+The Inspector-based timing detection (CV/mean/tiered) works identically to Slurm.
+
+### Tiered detection threshold calibration
+
+The `TIERED_MM_THRESH = 10.0` threshold in `_check_mean_tiered` was set based
+on the gap between healthy-run mm (< 1.5) and 100 ms fault mm (~25). If the
+cluster's hierarchical AllReduce topology changes (different node count, IB switch
+configuration), re-verify by running a healthy job and confirming the tiered check
+never splits (all ranks within the 80% gap threshold). The 80% threshold itself
+has an 8× safety margin over the maximum observed healthy jitter.

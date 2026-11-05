@@ -2367,3 +2367,148 @@ checking that particular deref's return value).
   peak) — not a new outlier, not evidence these fixes regressed drop
   behavior. The counter and its rate-limited `[WARN]` mechanism are
   confirmed still functioning correctly (never silent) post-fix.
+
+---
+
+## 6. Kubernetes port — architecture decisions and detection gap root cause (2026-11)
+
+### 6.1 Platform-specific layer: what had to change, what didn't
+
+The detection logic (Inspector plugin, aggregator, alert engine, classifier, CPU
+pinning mechanism, DCGM integration) is entirely platform-agnostic. Every
+one of these reads from generic hardware interfaces (`/proc`, `/sys/devices/system/cpu`,
+`nvidia-smi`, NCCL profiler API, VictoriaMetrics HTTP) with no Slurm dependency.
+
+The thin layer that is Slurm-specific:
+
+- **Topology discovery**: `lib/cluster_topology.sh` reads `SLURM_JOB_NODELIST`
+  and calls `scontrol`/`squeue` for node list, rank, rendezvous host.
+  K8s equivalent: `lib/cluster_topology_k8s.sh` reads `JOB_COMPLETION_INDEX`
+  (set automatically by K8s indexed Job) for rank; uses headless Service DNS
+  for rendezvous (`<job>-<index>.<headless-svc>.<ns>.svc.cluster.local`).
+- **Launcher**: `run_*.sh` uses `srun`/`sbatch`; K8s uses indexed Jobs
+  (`completionMode: Indexed`) with a pod per GPU node.
+- **Job ID discovery**: aggregator's `refresh_job_id()` calls `squeue -w hostname`;
+  on K8s, `--slurm-job-id` passed explicitly from the K8s Job name bypasses
+  squeue entirely. `sacct` failures are logged as warnings and ignored.
+- **Install**: `install.sh` uses `sinfo`/`scontrol`/SSH per-node; `k8s/install_k8s.sh`
+  uses `kubectl` and runs build steps inside a training container pod.
+
+### 6.2 K8s-specific blockers found during port (each confirmed live)
+
+**Cilium hairpin NAT**: ClusterIP Service routing back to itself (rank-0 as both
+rendezvous server and client) is blocked by Cilium's kube-proxy replacement.
+Fixed: headless Service + K8s 1.33 pod DNS (`hostname=<job>-<index>` set
+automatically for indexed Jobs). Direct pod-to-pod DNS avoids the loop-back
+routing entirely.
+
+**`/dev/shm` default too small**: K8s default is 64 MB; NCCL creates ~68 MB
+shared memory segments per communicator with 8 GPUs. Training fails immediately
+with ENOSPC (28). Fixed: Memory-backed emptyDir volume (32 Gi) mounted at `/dev/shm`.
+
+**soperator NodeSet claims all GPUs**: On a soperator (Slurm-on-K8s) cluster,
+the Slurm worker pods request `nvidia.com/gpu: 8` and `cpu: 120` on each GPU
+node, leaving 0 GPUs and ~3 CPUs free. K8s GPU training jobs cannot co-exist
+without scaling the NodeSet to 0 first. This is documented in the K8s quickstart
+as a one-command step (`kubectl scale nodeset worker -n soperator --replicas=0`).
+
+### 6.3 The hierarchical AllReduce detection gap: root cause and fix
+
+**The finding**: the same 100 ms sleep fault that Slurm detects within 50-56 s
+was not detected by the existing `_check_mean` on K8s, even with 2000 ms sleep.
+
+**Root cause — NCCL hierarchical AllReduce on multi-node K8s with IB**:
+
+NCCL selects a hierarchical AllReduce algorithm for multi-node InfiniBand jobs
+(intra-node reduce → inter-node AllReduce → broadcast). This creates a
+multi-tier timing distribution within a single communicator's window:
+
+| Rank role | Observed timing (100 ms sleep, 2-node 16-GPU H200) |
+|---|---|
+| Straggler (rank 1, slept before NCCL) | ~370 μs — fast, everyone was waiting |
+| Non-root ranks (ranks 3–7, 8–15) | ~9 500 μs — waited for straggler |
+| Intra-node root ranks (ranks 0, 2) | ~18 200 μs — waited through 2 phases |
+
+The existing `_check_mean` compares each rank against all 15 local peers
+(within-node). With the straggler's node having {370 μs, 9500 μs × 6, 18200 μs × 2},
+the peer standard deviation is ~3 000 μs (bimodal distribution). The z-score
+for the straggler's 370 μs vs. peer mean ~12 000 μs:
+
+```
+z = |370 - 12000| / 3000 ≈ 3.9    (threshold: 30.0 — fails badly)
+mm = peer_median / straggler = 9500 / 370 ≈ 25.6   (threshold: 2.0 — passes)
+```
+
+The AND logic (`z > 30 AND mm > 2.0`) never fires: z and mm don't coincide
+above threshold for the same member at the same timestamp.
+
+The alert engine on node 1 (all 8 ranks uniformly at ~9 500 μs) sees z → 3600+
+(any deviation in a tight uniform group amplifies z) but mm ≈ 1.0. So node 1
+has high z but no mm signal; node 0 has the mm signal but z is suppressed by
+the bimodal distribution. The conditions never coincide.
+
+**The fix — topology-aware tiered peer grouping** (`_check_mean_tiered`):
+
+A new, additive, parallel detection function in `alert_engine.py` (245
+insertions, 0 deletions — `_check_mean` and all existing code byte-for-byte
+unchanged):
+
+1. Collects `agg_mean_exec_time_us` for **all ranks across all nodes** (not
+   per-node like `_check_mean`), keyed by `(hostname, pid)` to avoid
+   cross-pod PID collisions (confirmed live: rank 1 on pod-0 and rank 10 on
+   pod-1 both had pid=246; dict overwrite silently destroyed the straggler's
+   370 μs entry before the fix).
+
+2. Splits into timing tiers wherever the relative gap exceeds **80%** (`(upper
+   − lower) / lower > 0.8`). Threshold justification:
+   - Straggler isolation gap: (9500 − 370) / 370 = 2460% — far above threshold
+   - Hierarchical tier gap: (18200 − 9500) / 9500 = 91% — above threshold
+   - Healthy H200 timing jitter: <50% — safely below threshold
+   - Minimum safety margin: >8× between smallest expected signal and largest jitter
+
+3. Compares the isolated lowest tier (potential straggler group, ≤ 25% of total
+   ranks) against the **next tier up** using `mm > 10.0` as the qualifying
+   signal. mm is used alone (not z) because: when the tier split correctly
+   isolates the tight 9500 μs reference group (sd ≈ 7 μs), z = 961 >> 30
+   and mm = 25.6 >> 10. When the split is incomplete (bimodal reference), mm
+   is still 25–28 >> 10 regardless, while z collapses to 3.5 (unreliable).
+   mm > 10 provides robust, reliable detection in both cases.
+
+4. Independent `tiered_tracker` (same CVPersistenceTracker pattern, same 3-
+   consecutive-window requirement) so the existing `mean_tracker` state is
+   never touched.
+
+**Validation results (100 ms sleep, rank 1, 2-node 16-GPU H200 K8s cluster)**:
+
+| Trial | mm | 3/3 qualifying | Result |
+|---|---|---|---|
+| Fault 1 | 25.7 | ✓ | ALERT WOULD FIRE |
+| Fault 2 | 25.5 | ✓ | ALERT WOULD FIRE |
+| Fault 3 | 25.9 | ✓ | ALERT WOULD FIRE |
+| Healthy | — | n/a (no tier split) | ZERO FALSE POSITIVES |
+
+Healthy run: all 16 ranks at 409–576 μs (40.7% spread < 80% threshold → no
+split → `_check_mean_tiered` exits at the unimodal check → never reaches
+qualifying condition).
+
+**Backward compatibility with Slurm**: with flat ring AllReduce, all non-straggler
+ranks have similar timing (unimodal, spread < 80%) → no tier split → function
+exits silently. The fix is a no-op on Slurm. Live Slurm regression validation
+is a separate step; static code analysis confirms the new code paths share no
+state with existing detection logic.
+
+### 6.4 CPU pinning on K8s (unchanged mechanism, different topology source)
+
+`rank_setup.py` reads `/sys/devices/system/cpu/cpuN/topology/thread_siblings_list`
+and nvidia-smi PCI bus IDs for NUMA topology. Both are accessible in K8s pods
+via the standard sysfs bind-mount. `taskset` on own process requires no special
+capability. With no CPU limits on the training pod spec (requests only), the
+kernel's cgroup has no cpu.cfs_quota, so `os.sched_getaffinity(0)` returns all
+host CPUs — identical to the Slurm `--cpus-per-task=128` convention.
+
+Full pinning overhead on K8s (H200, nanoGPT 85M, 2-node):
+- Full pinning (NCCL 2.32.3, dump + profiler threads): MFU = 76.77%
+- Dump-only pinning: MFU = 75.32%
+
+Consistent with the Slurm finding that full pinning is marginally faster (fewer
+thread scheduling conflicts when Inspector threads are dedicated).
