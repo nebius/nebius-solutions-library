@@ -12,7 +12,7 @@ on:
 #    - cron: '30 * * * *'
 
 permissions:
-  contents: write
+  contents: read
 
 env:
   TF_VAR_parent_id: project-e02s5a0dpr00nk11bgb0p9
