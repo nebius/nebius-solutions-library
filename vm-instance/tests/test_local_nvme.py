@@ -56,7 +56,10 @@ class TemplateTests(unittest.TestCase):
                 dropin = files["/etc/systemd/system/training.service.d/local-nvme.conf"]["content"]
                 self.assertIn("Requires=local-nvme.service", dropin)
                 self.assertIn("After=local-nvme.service", dropin)
-                self.assertEqual("mdadm" in config["packages"], mode == "raid0")
+                if mode == "raid0":
+                    self.assertEqual(config["packages"], ["mdadm"])
+                else:
+                    self.assertNotIn("packages", config)
                 self.assertIn("systemctl enable --now local-nvme.service", config["runcmd"])
 
 

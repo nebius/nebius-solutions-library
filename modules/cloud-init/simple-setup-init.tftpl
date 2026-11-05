@@ -1,13 +1,9 @@
 #cloud-config
 package_update: true
 package_upgrade: true
-%{if enable_local_disks}
+%{if enable_local_disks && local_disks_mount_mode == "raid0"}
 packages:
-  - nvme-cli
-%{ if local_disks_mount_mode == "raid0" }
   - mdadm
-%{ endif }
-
 %{endif}
 users:
 %{ for user in users}
