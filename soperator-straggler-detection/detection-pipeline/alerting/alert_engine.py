@@ -1467,6 +1467,22 @@ def format_alert(finding, coverage):
     return f"{header}{cascade_line}\n\n{body}\n{cov_line}{severity_line}"
 
 
+def _detect_platform():
+    """Detect whether this alert engine is running on Kubernetes or Slurm.
+    Used for startup logging only -- the tiered mean check runs
+    unconditionally on both platforms (it is a silent no-op when the
+    timing distribution is unimodal, which is the typical Slurm flat-
+    ring AllReduce case)."""
+    if os.environ.get("KUBERNETES_SERVICE_HOST"):
+        return "kubernetes"
+    if os.path.exists("/var/run/secrets/kubernetes.io/serviceaccount/token"):
+        return "kubernetes"
+    if any(os.environ.get(k) for k in
+           ("SLURM_JOB_ID", "SLURM_NODEID", "SLURM_PROCID", "SLURM_STEP_ID")):
+        return "slurm"
+    return "slurm"  # backward-compatible default for unrecognised environments
+
+
 class AlertEngine:
     def __init__(self, vm_url, hostnames=None,
                  dcgm_host_map=None, poll_interval=3.0,
@@ -1571,6 +1587,18 @@ class AlertEngine:
         # section on this for the concrete before/after.
         self.mean_tracker = CVPersistenceTracker(0.5, T.PERSIST_WINDOW, T.PERSIST_REQUIRED)
         self.outlier_tracker = CVPersistenceTracker(0.5, T.PERSIST_WINDOW, T.PERSIST_REQUIRED)
+        # Topology-aware tiered mean check -- additive parallel path, does
+        # not replace or modify mean_tracker/mean_check in any way.
+        # Fixes K8s hierarchical AllReduce detection gap: compares the
+        # isolated lowest timing tier (potential straggler) against the
+        # next tier up, using that tier's own tight distribution, rather
+        # than the full bimodal communicator distribution that inflates sd
+        # and suppresses z-scores. Same persistence discipline as mean_tracker.
+        self.tiered_tracker = CVPersistenceTracker(0.5, T.PERSIST_WINDOW, T.PERSIST_REQUIRED)
+        self._tiered_active_keys = set()  # tracks keys seen in the last poll's straggler tiers
+        self._platform = _detect_platform()
+        print(f"[PLATFORM] Detected: {self._platform} -- tiered mean check active "
+              f"(no-op when distribution is unimodal; fixes K8s hierarchical AllReduce gap)", flush=True)
         # P27-hotfix9 -- rolling pool of recently-fired timing-fallback
         # alerts, for _correlate_firing_timing_alerts. NOT scoped to a
         # single poll cycle: confirmed this session that two real,
@@ -1796,6 +1824,15 @@ class AlertEngine:
         futures = [self._pool.submit(self._poll_host, h) for h in self.hostnames]
         for f in futures:
             f.result()
+        # Cross-node topology-aware tiered mean check -- runs ONCE per unique
+        # (comm, bucket, coll) across ALL hosts, after per-host checks complete.
+        # This is additive: _check_mean (above, per-host) is entirely unchanged.
+        seen_cbc = set()
+        for hostname in self.hostnames:
+            for comm, bucket, coll in self._comm_buckets.get(hostname, []):
+                if (comm, bucket, coll) not in seen_cbc:
+                    seen_cbc.add((comm, bucket, coll))
+                    self._run_check("mean_tiered", self._check_mean_tiered, comm, bucket, coll)
 
     def _find_dependent_small_comms(self, hostname, comm):
         """P21.6 -- generic dependent-communicator discovery. A communicator
@@ -5340,6 +5377,214 @@ class AlertEngine:
             (sorted(peers)[len(peers) // 2 - 1] + sorted(peers)[len(peers) // 2]) / 2
         is_likely_root_cause = worst_real_us <= min(by_member.values())
         return worst_real_us, peer_median_real_us, is_likely_root_cause
+
+    def _check_mean_tiered(self, comm, bucket, coll):
+        """Cross-node topology-aware mean check -- additive parallel path.
+        Runs ALONGSIDE _check_mean (which is byte-for-byte unchanged).
+        Neither replaces nor modifies any existing detection logic.
+
+        Root cause this fixes: on multi-node Kubernetes with InfiniBand, NCCL
+        uses a hierarchical AllReduce (intra-node reduce -> inter-node ->
+        broadcast). This creates a bimodal/multi-tier timing distribution:
+        intra-node root ranks participate in two phases (~2x latency), non-root
+        ranks in one phase (~1x latency). The straggler appears as an isolated
+        fast outlier *below* the lowest "normal" tier, because all other ranks
+        waited for it. Within-node z-scores are low (the bimodal peer
+        distribution inflates sd, suppressing z), making the existing
+        _check_mean fail to fire. Within-tier z-scores are very high (the
+        reference tier is tight/unimodal once tiers are separated) -- this
+        check exploits that.
+
+        On Slurm with flat ring AllReduce: all ranks have similar timing ->
+        single unimodal tier -> no split -> this function returns immediately.
+        It is a silent no-op for every Slurm workload and for healthy K8s runs.
+
+        Threshold choice: GAP_RATIO_THRESH = 0.8 (80% relative gap).
+        Justification from real data:
+          - Observed K8s fault gap (2000ms sleep): 0.38ms -> 182ms = 478x >> 0.8
+          - Expected K8s fault gap (100ms sleep):   ~0.1ms -> 100ms = 999x >> 0.8
+          - Hierarchical AllReduce tier gap:  182ms -> 364ms = 100% >= 0.8 (correctly splits)
+          - Maximum natural healthy K8s timing jitter observed: ~10% << 80%
+          - Safety margin: at least 8x between smallest expected fault signal and largest
+            expected healthy jitter -- this threshold is not tight.
+        """
+        # --- Step 1: Collect per-rank timing from ALL nodes ---
+        now_ts = time.time()
+        # {(hostname, member_pid) -> (timing_us, hostname, role_rank, role_n, slurm_job_id)}
+        # Keyed by (hostname, pid) rather than pid alone: PIDs are assigned
+        # independently per container and can collide across pods (confirmed
+        # live: rank 1 on pod-0 and rank 10 on pod-1 both had pid=246, causing
+        # pod-1's data to silently overwrite pod-0's straggler signal).
+        all_timing = {}
+        for hostname in self.hostnames:
+            rows = _query_instant_real_ts(
+                self.vm_url,
+                f'agg_mean_exec_time_us{{hostname="{hostname}",comm="{comm}",'
+                f'bucket="{bucket}",coll="{coll}"}}'
+            )
+            for row in rows:
+                if not self._fresh(row):
+                    continue
+                m = row["metric"]
+                val = float(row["value"][1])
+                if val > 0:
+                    key = (m.get("hostname", hostname), m["member"])
+                    all_timing[key] = (
+                        val,
+                        m.get("hostname", hostname),
+                        m.get("role_rank", "na"),
+                        m.get("role_n", "na"),
+                        m.get("slurm_job_id", ""),
+                    )
+
+        # Need at least 3 ranks for meaningful tier detection
+        if len(all_timing) < 3:
+            self._reset_tiered_keys(set(), now_ts)
+            return
+
+
+        # --- Step 2: Sort by timing, find significant gaps ---
+        # GAP_RATIO_THRESH = 0.8: catches hierarchical AllReduce tier splits
+        # (100% gap) and straggler tiers (99.8%+ gap) while leaving natural
+        # timing jitter (<50%) as a single tier.
+        GAP_RATIO_THRESH = 0.8
+        sorted_members = sorted(all_timing.items(), key=lambda x: x[1][0])
+        timings = [v[0] for _, v in sorted_members]
+
+        split_indices = []
+        for i in range(1, len(timings)):
+            lower = timings[i - 1]
+            if lower <= 0:
+                continue
+            if (timings[i] - lower) / lower > GAP_RATIO_THRESH:
+                split_indices.append(i)
+
+        if not split_indices:
+            # Unimodal: single tier -- existing _check_mean handles this.
+            self._reset_tiered_keys(set(), now_ts)
+            return
+
+        # --- Step 3: Build tiers from split indices ---
+        tiers = []
+        prev = 0
+        for idx in split_indices:
+            tiers.append(sorted_members[prev:idx])
+            prev = idx
+        tiers.append(sorted_members[prev:])
+
+        if len(tiers) < 2:
+            self._reset_tiered_keys(set(), now_ts)
+            return
+
+        # The LOWEST timing tier = candidate straggler group.
+        # On K8s: this is the rank(s) that slept before calling NCCL --
+        # everyone waited, so their NCCL time is very short.
+        straggler_tier = tiers[0]
+        reference_tier = tiers[1]  # the NEXT tier up: the tight unimodal reference
+
+        n_total = len(all_timing)
+
+        # Guard 1: straggler tier must be small (isolated outlier pattern).
+        # Allow at most 25% of total ranks, minimum 1. Guards against treating
+        # a legitimately faster NUMA group as the "straggler tier".
+        if len(straggler_tier) > max(1, n_total // 4):
+            self._reset_tiered_keys(set(), now_ts)
+            return
+
+        # Guard 2: reference tier needs >= 2 members for a meaningful stdev.
+        if len(reference_tier) < 2:
+            self._reset_tiered_keys(set(), now_ts)
+            return
+
+        # --- Step 4: Compute reference tier statistics ---
+        ref_vals = [v[0] for _, v in reference_tier]
+        ref_median = statistics.median(ref_vals)
+        ref_sd = statistics.stdev(ref_vals)   # stdev of reference tier (unimodal, should be near-zero)
+
+        # Stdev floor: 0.1% of median. Prevents div-by-zero when the reference
+        # tier is perfectly uniform (sd=0 for deterministic NCCL) while keeping
+        # z large for any real straggler signal.
+        ref_sd_floored = max(ref_sd, ref_median * 0.001)
+
+        # --- Step 5: Require detection coverage maturity ---
+        has_coverage = False
+        for hostname in self.hostnames:
+            cov_rows = _query_instant_real_ts(
+                self.vm_url,
+                f'agg_detection_coverage_achieved{{hostname="{hostname}",'
+                f'comm="{comm}",bucket="{bucket}"}}'
+            )
+            for row in cov_rows:
+                if self._fresh(row) and float(row["value"][1]) >= 1.0:
+                    has_coverage = True
+                    break
+            if has_coverage:
+                break
+
+        if not has_coverage:
+            self._reset_tiered_keys(set(), now_ts)
+            return
+
+        # --- Step 6: Evaluate each potential straggler against reference tier ---
+        new_active_keys = set()
+        for (shost, smember), (timing_us, hostname, role_rank, role_n, slurm_job_id) in straggler_tier:
+            if timing_us <= 0:
+                continue
+
+            z_tiered = abs(timing_us - ref_median) / ref_sd_floored
+            mm_tiered = ref_median / timing_us   # always >> 1 for a real straggler
+
+            # Tiered-check qualifying threshold: use mm alone (not z).
+            # z is unreliable here when the recursive split is incomplete --
+            # if the 9507us/18176us gap falls below GAP_RATIO_THRESH on a
+            # given window, the reference tier becomes bimodal and sd inflates,
+            # collapsing z to ~3 even for a real straggler. mm is unaffected:
+            # ref_median/straggler = 9500us/370us ≈ 25x regardless of whether
+            # the root-rank tier is split out. TIERED_MM_THRESH=10.0 means
+            # "straggler's NCCL time is 10x shorter than its peers" -- a very
+            # strong signal in a healthy run when this cannot occur (there is
+            # no tier split at all, so this code is never reached).
+            TIERED_MM_THRESH = 10.0
+            qualifies = mm_tiered > TIERED_MM_THRESH
+
+            # Persistence key includes hostname to prevent cross-pod collision:
+            # the same PID can appear on different pods for different ranks.
+            key = ("mean_tiered", comm, shost, smember, bucket, coll)
+            new_active_keys.add(key)
+
+            # Feed persistence tracker -- same 0.0/1.0 boolean discipline
+            # as mean_tracker. Time-based timestamp (monotonically increasing
+            # per poll cycle) so each poll is a distinct observation.
+            persisted, duration_s = self.tiered_tracker.observe(
+                key, 1.0 if qualifies else 0.0, now_ts
+            )
+            if persisted:
+                # The straggler is the fastest rank -- it arrived late and
+                # everyone was waiting, so its NCCL time is minimal.
+                self._emit(
+                    "mean_tiered",
+                    hostname, comm, member, bucket, coll,
+                    z_tiered, mm_tiered,
+                    timing_us,       # worst_val = the straggler's own exec time
+                    ref_median,      # peer_mean = reference tier median
+                    slurm_job_id or None,
+                    anomaly_ts=now_ts,
+                    role_rank=role_rank,
+                    role_n=role_n,
+                    persist_duration_s=duration_s,
+                    is_likely_root_cause=True,  # fastest rank = the one everyone waited for
+                )
+
+        # Reset streak for any keys that are no longer in the straggler tier
+        self._reset_tiered_keys(new_active_keys, now_ts)
+
+    def _reset_tiered_keys(self, new_active_keys, now_ts):
+        """Record 0.0 (not qualifying) for any straggler keys seen in a previous
+        poll cycle that are absent from the current one, so their persistence
+        streak resets cleanly rather than freezing at the last observed value."""
+        for stale_key in self._tiered_active_keys - new_active_keys:
+            self.tiered_tracker.observe(stale_key, 0.0, now_ts)
+        self._tiered_active_keys = new_active_keys
 
     def _check_cv(self, hostname, comm, bucket, coll):
         # P22.2 -- coll filter added: without it this query would match
