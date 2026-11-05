@@ -7,6 +7,7 @@
 * [Introduction](#introduction)
 * [Solutions](#solutions)
 * [Prerequisites](#prerequisites)
+* [Contributing](#contributing)
 
 ## Introduction
 
@@ -82,3 +83,13 @@ These samples mainly use [Terraform](https://www.terraform.io/) to deploy archit
 These solutions will also require you to install the [Nebius AI CLI](https://docs.nebius.ai/cli/).
 
 More general documentation about Nebius AI can be found [here](https://docs.nebius.ai/).
+
+## Contributing
+
+An optional [pre-commit](https://pre-commit.com/) hook runs `terraform fmt` on changed Terraform files, including the solutions' `terraform.tfvars.example` files, before each commit. To enable it, install pre-commit (for example `brew install pre-commit` or `pipx install pre-commit`) and run once in your clone:
+
+```bash
+pre-commit install --allow-missing-config
+```
+
+`--allow-missing-config` skips the hook on branches created before it was added. The hook needs `terraform` on your `PATH` and uses your installed version. CI pins its own versions, so formatting results can occasionally differ.
