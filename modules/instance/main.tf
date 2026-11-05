@@ -83,7 +83,8 @@ resource "nebius_compute_v1_instance" "instance" {
   ] : []
 
 
-  cloud_init_user_data = templatefile("../modules/cloud-init/simple-setup-init.tftpl", {
+  cloud_init_user_data = templatefile("${path.module}/../cloud-init/simple-setup-init.tftpl", {
+    local_nvme_script              = file("${path.module}/../cloud-init/prepare-local-nvme.sh"),
     region                         = var.region,
     users                          = local.users,
     extra_path                     = local.extra_path,

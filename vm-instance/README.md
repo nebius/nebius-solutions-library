@@ -184,3 +184,21 @@ cleanup of the previous storage; the script refuses to erase existing signatures
 Validate on a disposable B300 VM with first boot, guest reboot, and API stop/start
 before using this for workloads. Terraform rendering checks cannot validate device
 presentation or RAID behavior on the host.
+
+The NVMe preparation script lives in
+`modules/cloud-init/prepare-local-nvme.sh`. Terraform includes its contents in
+cloud-init verbatim; the systemd service passes mode, mount path, and disk count
+as arguments. The file can be sourced without running disk preparation.
+
+Run the offline checks from the repository root (Terraform, Bash, and ShellCheck
+must be installed):
+
+```bash
+shellcheck modules/cloud-init/prepare-local-nvme.sh
+python3 -m unittest discover -s vm-instance/tests -v
+```
+
+These checks run in the `Local NVMe checks` PR workflow without cloud credentials.
+They render and parse cloud-init for disabled, RAID, and raw modes and exercise
+storage handling with mocked disk tools. Inspection failures must stop preparation
+before formatting, RAID creation, mounting, or permission changes.
