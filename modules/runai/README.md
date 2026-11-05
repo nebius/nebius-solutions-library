@@ -56,9 +56,11 @@ settings take precedence.
 
 Ingress and Prometheus Operator use the existing Marketplace products
 `nebius/nginx-ingress-controller` and `bitnami/kube-prometheus` (wrapper 11.0.0
-or later, containing kube-prometheus-stack 92.3.0). Only the Operator is installed;
-Run:ai owns its Prometheus server. Set the respective `install_*` flag false to
-reuse a compatible existing installation.
+or later, containing kube-prometheus-stack 92.3.0). The stock prerequisite stack
+installs its Prometheus server, kube-state-metrics and kubelet monitors; Run:ai
+also owns a dedicated Prometheus server. Stock kubelet scraping uses
+`insecureSkipVerify = true`; review certificate requirements for your environment.
+Set the respective `install_*` flag false to reuse a compatible existing installation.
 
 Nebius preinstalled-driver images retain their drivers, runtime and device
 plugin. The existing Marketplace device-plugin package supplies GFD with native

@@ -15,14 +15,15 @@ locals {
     "controller.config.use-forwarded-headers" = true
   } : {})
   prometheus_settings = merge({
-    "stack.prometheus.enabled"       = false
+    "stack.prometheus.enabled"       = true
     "stack.grafana.enabled"          = false
     "stack.alertmanager.enabled"     = false
     "stack.nodeExporter.enabled"     = false
-    "stack.kubeStateMetrics.enabled" = false
+    "stack.kubeStateMetrics.enabled" = true
+    "stack.kubelet.enabled"          = true
     "stack.defaultRules.create"      = false
     "blackboxExporter.replicas"      = 0
-    }, { for component in ["kubelet", "kubeApiServer", "kubeControllerManager", "kubeScheduler", "kubeEtcd", "kubeProxy", "coreDns"] :
+    }, { for component in ["kubeApiServer", "kubeControllerManager", "kubeScheduler", "kubeEtcd", "kubeProxy", "coreDns"] :
     "stack.${component}.enabled" => false
   })
   worker_values = {
