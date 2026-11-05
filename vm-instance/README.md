@@ -12,6 +12,9 @@ This Terraform configuration script provisions cloud instances with specific har
 
 ## Configuring Terraform for Nebius Cloud
 
+- Install Terraform **1.9.0 or newer**. Both `vm-instance` and `modules/instance`
+  require cross-variable validation: `enable_local_disks` is validated against
+  `platform` and `preset`. This minimum applies even when local disks are disabled.
 - Install [Nebius CLI](https://docs.nebius.com/cli/install/).
 - Add environment variables for Terraform authentication in Nebuis Cloud.
 
