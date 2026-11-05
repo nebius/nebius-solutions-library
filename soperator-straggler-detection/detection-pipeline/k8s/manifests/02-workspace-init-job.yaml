@@ -1,0 +1,117 @@
+# One-shot init job: clones the pipeline repo into the workspace PVC and builds
+# the Inspector plugin and NCCL 2.32.3 lib inside the training container image.
+# Run once (or on a fresh workspace). Idempotent: re-running skips already-built
+# artifacts (same as install.sh's own behavior on the Slurm path).
+#
+# Runs on a GPU node (toleration for nvidia.com/gpu=8:NoSchedule) to get:
+#   - CUDA toolkit at /usr/local/cuda (needed for Inspector plugin build)
+#   - nvidia-smi for GPU arch detection (NCCL 2.32.3 --gencode auto-detection)
+# The nvcr.io/nvidia/pytorch:25.01-py3 image has g++, nvcc, git, make.
+#
+# NCCL_HOME for Inspector plugin build: /usr (libnccl-dev headers at /usr/include).
+# The pytorch training container has libnccl-dev installed (confirmed: nccl.h at
+# /usr/include/nccl.h in that image family).
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: straggler-init-build
+  namespace: straggler-detection
+  labels:
+    straggler.nebius.ai/component: init-build
+spec:
+  ttlSecondsAfterFinished: 86400
+  backoffLimit: 1
+  template:
+    spec:
+      restartPolicy: OnFailure
+      tolerations:
+        - key: nvidia.com/gpu
+          value: "8"
+          effect: NoSchedule
+      nodeSelector:
+        nebius.com/gpu: "true"
+      volumes:
+        - name: workspace
+          persistentVolumeClaim:
+            claimName: straggler-workspace
+      containers:
+        - name: builder
+          image: nvcr.io/nvidia/pytorch:25.01-py3
+          imagePullPolicy: IfNotPresent
+          resources:
+            requests:
+              cpu: "2"
+              memory: 16Gi
+            # No GPU limit: the build only needs CUDA headers/compiler (nvcc),
+            # not a running GPU. GPU resources on this cluster are claimed by
+            # soperator's NodeSet. The nodeSelector+toleration still place the
+            # pod on a GPU node so CUDA toolkit (/usr/local/cuda) is available.
+            # H200 GPU arch (compute_90) is hardcoded in the NCCL build step.
+          volumeMounts:
+            - name: workspace
+              mountPath: /workspace
+          command:
+            - bash
+            - -c
+            - |
+              set -eo pipefail
+              BRANCH="add/straggler-detection-v1-beta"
+              REPO="https://github.com/nebius/nebius-solutions-library.git"
+              PKG_DIR="/workspace/nebius-solutions-library/soperator-straggler-detection/detection-pipeline"
+
+              echo "=== [init-build] step 1: clone or update pipeline repo ==="
+              if [ -d /workspace/nebius-solutions-library/.git ]; then
+                echo "  repo already present, pulling latest $BRANCH"
+                git -C /workspace/nebius-solutions-library pull --ff-only
+              else
+                git clone --branch "$BRANCH" --depth 1 "$REPO" /workspace/nebius-solutions-library
+              fi
+
+              echo "=== [init-build] step 2: build Inspector plugin ==="
+              cd "$PKG_DIR/inspector-plugin"
+              # NCCL_HOME=/usr: pytorch container has libnccl-dev (/usr/include/nccl.h)
+              # Confirmed: libnccl.so is at /usr/lib/x86_64-linux-gnu/ in this image family.
+              # CUDA_HOME=/usr/local/cuda is the standard path in NVIDIA containers.
+              make NCCL_HOME=/usr CUDA_HOME=/usr/local/cuda 2>&1 | tail -5
+              ls -la libnccl-profiler-inspector.so
+              echo "  Inspector plugin built OK"
+
+              echo "=== [init-build] step 3: build pinning interposer ==="
+              cd "$PKG_DIR/pinning"
+              bash build.sh 2>&1 | tail -3
+              ls -la libthread_pin_new.so 2>/dev/null && echo "  pinning interposer built OK" || \
+                echo "  WARNING: interposer build failed; pinning will degrade to unpinned"
+
+              echo "=== [init-build] step 4: build NCCL 2.32.3 for full pinning ==="
+              NCCL_DEST="/workspace/nccl-2.32.3"
+              NCCL_GENCODE="-gencode=arch=compute_90,code=sm_90"  # H200/H100 Hopper
+              cd "$PKG_DIR"
+              BUILD_NCCL_232=0  # set to 1 to enable (long: ~15 min)
+              if [ "${BUILD_NCCL_232:-0}" = "1" ]; then
+                bash pinning/nccl/fetch_build_nccl.sh \
+                  --dest "$NCCL_DEST" \
+                  --gencode "$NCCL_GENCODE" \
+                  --jobs "$(nproc)" 2>&1 | tail -10
+              else
+                echo "  NCCL 2.32.3 build skipped (BUILD_NCCL_232 not set to 1)."
+                echo "  Set BUILD_NCCL_232=1 in the job env or re-run install_k8s.sh"
+                echo "  with INSTALL_K8S_BUILD_NCCL=1 for full pinning (profiler thread)."
+                echo "  Dump-thread pinning still works with the host NCCL."
+              fi
+
+              echo "=== [init-build] step 5: verify shakespeare_char dataset ==="
+              # The dataset is pre-prepared in the repo at workloads/shared-data/shakespeare_char/
+              # (train.py reads it from there via __file__-relative path, not CWD-relative).
+              DATA_DIR="$PKG_DIR/workloads/shared-data/shakespeare_char"
+              if [ -f "$DATA_DIR/train.bin" ] && [ -f "$DATA_DIR/val.bin" ]; then
+                echo "  shakespeare_char dataset confirmed at $DATA_DIR (train.bin + val.bin)"
+              else
+                echo "  WARNING: shakespeare_char dataset not found at $DATA_DIR -- training will fail"
+                ls "$DATA_DIR" 2>/dev/null || echo "  (directory does not exist)"
+              fi
+
+              echo "=== [init-build] COMPLETE ==="
+              ls -la "$PKG_DIR/inspector-plugin/libnccl-profiler-inspector.so"
+              [ -f "$NCCL_DEST/build/lib/libnccl.so.2" ] && \
+                echo "  NCCL 2.32.3: $NCCL_DEST/build/lib" || \
+                echo "  NCCL 2.32.3: not built (dump-only pinning mode)"

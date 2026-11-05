@@ -5,6 +5,60 @@ profiler plugin writes per-collective timing from every rank; per-node aggregato
 VictoriaMetrics; `alert_engine.py` compares ranks against their peers and prints `[ALERT]` lines (and Grafana panels)
 naming the host, GPU and process. Pure-Python pipeline, no third-party packages.
 
+**Platform**: This pipeline runs on **two platforms** — Slurm/soperator (original) and **plain Kubernetes** (K8s, added
+2026-11). Select your platform below. The detection logic (Inspector plugin, aggregators, alert engine, CPU pinning
+mechanism, DCGM integration) is identical on both platforms; only the launcher and topology-discovery layer differ.
+
+---
+
+## Quickstart — Platform: Kubernetes (plain K8s)
+
+Requires: `kubectl` configured to a cluster with at least 2 GPU nodes (H200 tested), `nfs` StorageClass, github.com
+access from pods. GPU nodes must be schedulable (not exclusively allocated to Slurm). On soperator clusters, scale
+the Slurm worker NodeSet to 0 first: `kubectl scale nodeset worker -n soperator --replicas=0`.
+
+1. **Clone** (on the control machine where kubectl runs)
+   ```bash
+   git clone -b add/straggler-detection-v1-beta https://github.com/nebius/nebius-solutions-library.git
+   cd nebius-solutions-library/soperator-straggler-detection/detection-pipeline
+   ```
+2. **Install** (creates namespace, NFS workspace, builds Inspector plugin + NCCL 2.32.3 in a GPU pod)
+   ```bash
+   k8s/install_k8s.sh
+   # For full CPU pinning (builds NCCL 2.32.3, ~15 min extra): INSTALL_K8S_BUILD_NCCL=1 k8s/install_k8s.sh
+   ```
+   Success = `install_k8s.sh completed` and `cluster_k8s.env` written with real node/GPU counts.
+3. **Launch the pipeline** (VictoriaMetrics already deployed by install; this starts aggregator sidecars + alert engine)
+   ```bash
+   source cluster_k8s.env
+   k8s/run_k8s.sh [steps] [port] [pin_mode]   # defaults: 300 steps, port 29500, pin_mode=auto
+   ```
+   Exits after confirming aggregator heartbeats from both GPU nodes in VictoriaMetrics.
+4. **Verify CPU pinning** (check PIN-PREFLIGHT line in training pod logs)
+   ```bash
+   kubectl logs -n straggler-detection -l straggler.nebius.ai/component=training -c training | grep PIN-PREFLIGHT
+   # Expected: resolved=full nccl=2.32.3 (if NCCL 2.32.3 built) or resolved=dump
+   ```
+5. **Monitor**: alerts appear in `var/alert_engine_k8s_supervised.log`. Full-pinning overhead on K8s: `mfu=76.77%`
+   (full pinning) vs `75.32%` (dump-only); the full-pinning mode is marginally faster, same as Slurm.
+
+**K8s-specific notes**:
+- Rendezvous uses headless Service + pod DNS (K8s 1.27+ sets pod hostname to `<job>-<index>`), not ClusterIP,
+  to avoid Cilium's hairpin NAT restriction on this cluster.
+- `/dev/shm` is overridden to 32Gi (K8s default 64MB is insufficient for NCCL with 8 GPUs).
+- DCGM cause-classification is unavailable (the alert engine cannot SSH to K8s node internal hostnames from the
+  control machine). The Inspector-based timing detection (CV/mean checks) works identically to Slurm.
+- **Detection threshold calibration**: the Slurm-validated thresholds (`CV_Z_THRESH=60`, `MEAN_MM_THRESH=2.0`)
+  detect 100ms faults on Slurm within 50-56s. On K8s, the same fault produces lower z-scores due to higher
+  baseline InfiniBand timing variability in containers; the thresholds need K8s-specific calibration before
+  production use. The raw timing signal IS captured correctly (rank 1 at 377μs vs 182,000μs for all others in
+  the 2000ms fault test), and the aggregator's window-level z-scores spike correctly (z=4080 briefly).
+- When done testing, return GPU nodes to Slurm: `kubectl scale nodeset worker -n soperator --replicas=2`
+
+---
+
+## Quickstart — Platform: Slurm/soperator (original)
+
 ## Prerequisites
 
 | | Tested with |
@@ -74,10 +128,10 @@ Run everything from the login node. Allow about 30 minutes plus the NCCL build (
 
 ## Known limitations
 
-- **Scale:** the latest audit validated 16 GPUs (2 nodes) only. 48 GPUs / 6 nodes is the next step.
-- **CPU pinning is new code**, validated on one cluster, Megatron launcher only. Overhead at 16 GPUs: full pinning
-  +0.64% (not significant), dump-only +6.4%, unpinned +11.5%. Untested: single-NUMA, 4-GPU nodes, SMT off, ARM, small
-  Slurm CPU masks.
+- **Scale:** the latest audit validated 16 GPUs (2 nodes) on Slurm and 16 GPUs (2 nodes) on K8s. 48 GPUs / 6 nodes is the next step.
+- **CPU pinning is new code**, validated on both platforms at 16 GPUs. Overhead (Slurm): full pinning +0.64%,
+  dump-only +6.4%, unpinned +11.5%. Overhead (K8s, nanoGPT shape): `mfu=76.77%` full, `mfu=75.32%` dump.
+  Untested: single-NUMA, 4-GPU nodes, SMT off, ARM, small CPU masks.
 - **Noise path:** the main-path `mean` check is gated off for 4-member communicators (`MEAN_CHECK_GATED_ROLE_N=4`; set it to `""` to restore). It produced about 64% of healthy-run alerts on the TP4/PP2/DP2 shape and never named the faulted rank. After the gate, 2 healthy runs went from 18 and 24 total alerts to 9 and 6 (mean-check alerts 12 and 16 down to 0, no PAGE), and 3 fault runs still named the true rank in 51, 50 and 56 s. The criterion comes from one shape, so a 4-member communicator in another job is gated too. Remaining LOG-ONLY noise is from other paths.
 - **Memory growth:** aggregators about +5 to +7 MB/hour and the alert engine about +4 MB/hour over a 107-minute soak;
   cause not found. Restart them between very long campaigns.
@@ -87,6 +141,11 @@ Run everything from the login node. Allow about 30 minutes plus the NCCL build (
 - **DCGM clock fallback** now needs a sustained signal before it pages, so a real sustained clock fault pages
   about 10-60 s later than before.
 - Only `PAGE` alerts page a human; `LOG-ONLY` alerts are recorded for the dashboard and logs.
+- **K8s platform**: DCGM SSH-based cause classification unavailable (control machine cannot SSH to K8s node
+  internal hostnames). Detection thresholds (`CV_Z_THRESH=60`, `MEAN_MM_THRESH=2.0`) validated on Slurm need
+  K8s-specific calibration: K8s InfiniBand timing variability in containers raises the noise floor, making the
+  same 100ms sleep fault produce lower z-scores than on Slurm. The timing signal IS captured (raw difference
+  confirmed); the ALERT doesn't fire for small faults without threshold recalibration.
 
 ## Further reading
 

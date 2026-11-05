@@ -1,0 +1,63 @@
+# One-shot job: build NCCL 2.32.3 into the workspace PVC for full CPU pinning.
+# Requires init build job (02-workspace-init-job) to have completed first.
+# Takes ~15-20 minutes on 2 CPUs (H200/Hopper gencode, single-arch build).
+# After completion, cluster_k8s.env should be regenerated (re-run install_k8s.sh)
+# or manually set NCCL_232_LIB_PATH=/workspace/nccl-2.32.3/build/lib.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: straggler-nccl232-build
+  namespace: straggler-detection
+  labels:
+    straggler.nebius.ai/component: nccl232-build
+spec:
+  ttlSecondsAfterFinished: 86400
+  backoffLimit: 1
+  template:
+    spec:
+      restartPolicy: OnFailure
+      tolerations:
+        - key: nvidia.com/gpu
+          value: "8"
+          effect: NoSchedule
+      nodeSelector:
+        nebius.com/gpu: "true"
+      volumes:
+        - name: workspace
+          persistentVolumeClaim:
+            claimName: straggler-workspace
+      containers:
+        - name: nccl-builder
+          image: nvcr.io/nvidia/pytorch:25.01-py3
+          imagePullPolicy: IfNotPresent
+          resources:
+            requests:
+              cpu: "2"
+              memory: 16Gi
+          volumeMounts:
+            - name: workspace
+              mountPath: /workspace
+          command:
+            - bash
+            - -c
+            - |
+              set -eo pipefail
+              PKG="/workspace/nebius-solutions-library/soperator-straggler-detection/detection-pipeline"
+              [ -d "$PKG" ] || { echo "FATAL: workspace not initialized -- run init build job first"; exit 1; }
+
+              echo "=== [nccl232-build] building NCCL v2.32.3-1 for H200 (compute_90) ==="
+              echo "    This takes 15-20 minutes on 2 CPUs."
+              NCCL_DEST="/workspace/nccl-2.32.3"
+              NCCL_GENCODE="-gencode=arch=compute_90,code=sm_90"
+              export CUDA_HOME=/usr/local/cuda
+
+              bash "$PKG/pinning/nccl/fetch_build_nccl.sh" \
+                --dest "$NCCL_DEST" \
+                --gencode "$NCCL_GENCODE" \
+                --jobs 2 2>&1
+
+              echo "=== [nccl232-build] verifying ==="
+              ls -la "$NCCL_DEST/build/lib/libnccl.so.2"
+              python3 -I "$PKG/pinning/pin_resolve.py" \
+                NCCL_OVERRIDE_DIR="$NCCL_DEST/build/lib" PIN_MODE=full 2>&1 || true
+              echo "=== [nccl232-build] COMPLETE: $NCCL_DEST/build/lib ==="

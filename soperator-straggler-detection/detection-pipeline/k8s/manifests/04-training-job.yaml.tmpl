@@ -1,0 +1,206 @@
+# K8s training Job template for Shape 1 nanoGPT straggler-detection run.
+# Variables are substituted by run_k8s.sh via envsubst before kubectl apply.
+# Required env vars (set by run_k8s.sh):
+#   JOB_RUN_NAME     -- unique name for this run (e.g. straggler-train-1234567890)
+#   TRAIN_STEPS      -- training iterations (e.g. 300)
+#   TRAIN_PORT       -- torchrun rendezvous port (e.g. 29500)
+#   TRAIN_NUM_NODES  -- number of GPU nodes (2)
+#   TRAIN_GPUS       -- GPUs per node (8)
+#   NCCL_LIB_PATH    -- path to NCCL 2.32.3 lib in workspace (or "" for dump-only)
+#   PIN_MODE         -- auto|full|dump|off
+#   VM_URL_SVC       -- VM ClusterIP DNS (victoriametrics.straggler-detection.svc.cluster.local:8428)
+#   SLEEP_MS         -- straggler sleep delay for fault injection (0 = healthy run)
+#   TARGET_RANKS     -- ranks to inject fault into (e.g. "0" or "" for no fault)
+#
+# Architecture:
+#   - completionMode: Indexed → each pod gets JOB_COMPLETION_INDEX (0-based rank)
+#   - 2 containers per pod: training + aggregator sidecar
+#   - shared EmptyDir volume for Inspector dump files
+#   - aggregator sidecar reads dumps, pushes to VM with --slurm-job-id=JOB_RUN_NAME
+#   - rendezvous via pod DNS (Headless Service + subdomain, avoids hairpin NAT)
+#
+# Rendezvous model: K8s 1.33 sets each indexed Job pod's hostname to <job-name>-<index>
+# (confirmed: hostname=straggler-train-...-0 in logs). With a Headless Service named
+# "${JOB_RUN_NAME}-headless" and spec.template.spec.subdomain="${JOB_RUN_NAME}-headless",
+# rank-0's DNS is "${JOB_RUN_NAME}-0.${JOB_RUN_NAME}-headless.straggler-detection.svc.cluster.local".
+# All pods use this as RDZV_HOST. The connection goes directly to rank-0's pod IP (not
+# through a ClusterIP), avoiding the Cilium hairpin NAT issue on this cluster.
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: ${JOB_RUN_NAME}
+  namespace: straggler-detection
+  labels:
+    straggler.nebius.ai/component: training
+    straggler.nebius.ai/run: ${JOB_RUN_NAME}
+spec:
+  completions: ${TRAIN_NUM_NODES}
+  parallelism: ${TRAIN_NUM_NODES}
+  completionMode: Indexed
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        straggler.nebius.ai/component: training
+        straggler.nebius.ai/run: ${JOB_RUN_NAME}
+    spec:
+      restartPolicy: Never
+      # subdomain enables pod DNS via the Headless Service with same name.
+      # Pod hostname (set by K8s 1.33 for indexed Jobs): <job-name>-<index>
+      # Pod DNS: <job-name>-<index>.<subdomain>.<ns>.svc.cluster.local
+      subdomain: ${JOB_RUN_NAME}-headless
+      tolerations:
+        - key: nvidia.com/gpu
+          value: "8"
+          effect: NoSchedule
+      nodeSelector:
+        nebius.com/gpu: "true"
+      # Spread training pods across different GPU nodes (one pod per node).
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              straggler.nebius.ai/run: ${JOB_RUN_NAME}
+      volumes:
+        - name: workspace
+          persistentVolumeClaim:
+            claimName: straggler-workspace
+        - name: inspector-dumps
+          emptyDir: {}
+        - name: outdir
+          emptyDir: {}
+        # /sys needed by rank_setup.py for CPU topology discovery
+        # (/sys/devices/system/cpu/cpuN/topology/thread_siblings_list,
+        #  /sys/bus/pci/devices/<bus>/numa_node). Mounted read-only.
+        - name: sys
+          hostPath:
+            path: /sys
+            type: Directory
+        # /dev/shm: K8s default is 64MB, insufficient for NCCL shared memory segments
+        # (NCCL creates ~68MB segments per communicator with 8 GPUs).
+        # Override with a Memory-backed emptyDir of 32Gi to avoid ENOSPC.
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: "32Gi"
+      # K8s sets JOB_COMPLETION_INDEX automatically for indexed Jobs.
+      # We inject all topology env vars via the pod spec.
+      containers:
+        # ================================================================
+        # Container 1: training process (torchrun + Inspector plugin)
+        # ================================================================
+        - name: training
+          image: nvcr.io/nvidia/pytorch:25.01-py3
+          imagePullPolicy: IfNotPresent
+          resources:
+            requests:
+              # Request 120 vCPUs (leave ~8 for DaemonSet/system pods).
+              # No CPU limit → cgroup has no cpu.cfs_quota → os.sched_getaffinity(0)
+              # returns all 128 CPUs on the node, same as Slurm --cpus-per-task=128.
+              cpu: "120"
+              memory: 400Gi
+            limits:
+              nvidia.com/gpu: ${TRAIN_GPUS}
+          volumeMounts:
+            - name: workspace
+              mountPath: /workspace
+            - name: inspector-dumps
+              mountPath: /inspector-dumps
+            - name: outdir
+              mountPath: /outdir
+            - name: sys
+              mountPath: /sys
+              readOnly: true
+            - name: dshm
+              mountPath: /dev/shm
+          env:
+            # K8s indexed Job topology (platform-specific layer)
+            - name: TRAINING_NUM_NODES
+              value: "${TRAIN_NUM_NODES}"
+            # Direct pod DNS via Headless Service (avoids ClusterIP hairpin NAT).
+            # K8s 1.33 sets pod hostname to <job-name>-<index> for indexed Jobs.
+            - name: TRAINING_RDZV_HOST
+              value: "${JOB_RUN_NAME}-0.${JOB_RUN_NAME}-headless.straggler-detection.svc.cluster.local"
+            - name: TRAINING_GPUS_PER_NODE
+              value: "${TRAIN_GPUS}"
+            - name: TRAINING_NCCL_LIB_PATH
+              value: "${NCCL_LIB_PATH}"
+            # Inspector dump dir (shared with aggregator sidecar via EmptyDir)
+            - name: NCCL_INSPECTOR_DUMP_DIR
+              value: /inspector-dumps
+            # CPU pinning mode
+            - name: PIN_MODE
+              value: "${PIN_MODE}"
+            # Fault injection (0 = healthy run, >0 = inject delay on TARGET_RANKS)
+            - name: STRAGGLER_MODE
+              value: "file_trigger"
+            - name: STRAGGLER_TRIGGER_FILE
+              value: "/outdir/trigger.json"
+            - name: STRAGGLER_SLEEP_MS
+              value: "${SLEEP_MS}"
+            - name: STRAGGLER_TARGET_RANKS
+              value: "${TARGET_RANKS}"
+            # NCCL tuning (same as Slurm path)
+            - name: NCCL_INSPECTOR_DUMP_VERBOSE
+              value: "0"
+            - name: NCCL_VERSION_PROBE
+              value: "1"
+          command:
+            - bash
+            - -c
+            - |
+              set -e
+              # PKG hardcoded (not a shell variable) to avoid envsubst substitution
+              exec bash /workspace/nebius-solutions-library/soperator-straggler-detection/detection-pipeline/workloads/nanogpt/train_node_shape1_k8s.sh \
+                ${TRAIN_STEPS} /outdir ${TRAIN_PORT} /inspector-dumps
+
+        # ================================================================
+        # Container 2: aggregator sidecar (reads dumps, pushes to VM)
+        # Equivalent to run.sh's SSH-launched run_aggregator_supervised.sh
+        # on the Slurm path, but co-located in the same pod for K8s.
+        # --slurm-job-id bypasses squeue entirely (no squeue in K8s pods).
+        # ================================================================
+        - name: aggregator
+          image: python:3.11-slim
+          imagePullPolicy: IfNotPresent
+          resources:
+            requests:
+              cpu: "2"
+              memory: 4Gi
+          volumeMounts:
+            - name: workspace
+              mountPath: /workspace
+            - name: inspector-dumps
+              mountPath: /inspector-dumps
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: VM_URL
+              value: "http://${VM_URL_SVC}"
+          command:
+            - bash
+            - -c
+            - |
+              set -e
+              _AGGSCRIPT=/workspace/nebius-solutions-library/soperator-straggler-detection/detection-pipeline/k8s/run_aggregator_k8s.sh
+              # wait for the pipeline scripts to exist (workspace PVC may need a moment)
+              for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30; do
+                [ -f "$_AGGSCRIPT" ] && break
+                echo "[aggregator] waiting for workspace... ($i/30)"
+                sleep 5
+              done
+              [ -f "$_AGGSCRIPT" ] || {
+                echo "[aggregator] FATAL: workspace not populated after 150s" >&2
+                exit 1
+              }
+              # Uses NODE_NAME (Downward API spec.nodeName) as the hostname label
+              # in VictoriaMetrics -- the real node hostname, not the ephemeral pod name.
+              exec bash "$_AGGSCRIPT" \
+                /inspector-dumps \
+                "http://${VM_URL_SVC}" \
+                "${JOB_RUN_NAME}"

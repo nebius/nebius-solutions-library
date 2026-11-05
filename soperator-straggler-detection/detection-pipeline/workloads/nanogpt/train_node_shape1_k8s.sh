@@ -1,0 +1,74 @@
+#!/bin/bash
+# K8s-native per-pod training script for Shape 1 (nanoGPT).
+# Sibling to train_node_shape1.sh (Slurm) -- identical except it sources
+# cluster_topology_k8s.sh instead of cluster_topology.sh. Zero changes to
+# the detection logic, Inspector wiring, or training configuration.
+#
+# Invoked by the K8s training Job's entrypoint command per pod.
+# Required env vars (set in Job pod template):
+#   JOB_COMPLETION_INDEX       -- pod rank (0-based, set by K8s indexed Job)
+#   TRAINING_NUM_NODES         -- total pod count
+#   TRAINING_RDZV_HOST         -- rendezvous ClusterIP Service DNS
+#   TRAINING_GPUS_PER_NODE     -- GPUs per node (8 for H200)
+#   NCCL_INSPECTOR_DUMP_DIR    -- dump dir (EmptyDir mount shared with aggregator sidecar)
+#   TRAINING_NCCL_LIB_PATH     -- NCCL 2.32.3 lib dir for full pinning (optional)
+#   PIN_MODE                   -- auto|full|dump|off (default auto)
+set -u
+STEPS=$1
+OUTDIR=$2
+PORT=$3
+DUMPDIR=$4   # inside-pod path; shared with aggregator sidecar via EmptyDir volume
+
+_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../lib/cluster_topology_k8s.sh"
+source "$_LIB"
+cluster_topology_job_nodes
+cluster_topology_discover_rank
+cluster_topology_discover_rdzv_host
+cluster_topology_discover_gpu_count
+HN=$(hostname)
+RANK=$NODE_RANK
+
+mkdir -p "$DUMPDIR" "$OUTDIR"
+
+# Inspector plugin: same repo-relative path as Slurm version -- the workspace
+# PVC mounts the full pipeline tree at /workspace, so the .so is at the same
+# relative path regardless of where it was built.
+_PKG_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+export NCCL_PROFILER_PLUGIN="$_PKG_ROOT/inspector-plugin/libnccl-profiler-inspector.so"
+export NCCL_INSPECTOR_ENABLE=1
+export NCCL_INSPECTOR_DUMP_VERBOSE="${NCCL_INSPECTOR_DUMP_VERBOSE:-0}"
+export NCCL_INSPECTOR_DUMP_THREAD_INTERVAL_MICROSECONDS=500
+export NCCL_INSPECTOR_DUMP_DIR="$DUMPDIR"
+export NCCL_INSPECTOR_PROM_DUMP=0
+
+# CPU pinning -- same pin_env.sh/pin_prepare() pattern as train_node_megatron.sh.
+# rank_setup.py reads /sys/devices/system/cpu (accessible in K8s pods via sysfs
+# bind-mount) and nvidia-smi PCI bus IDs (requires nvidia.com/gpu resource in pod).
+# os.sched_getaffinity(0) returns all CPUs when no CPU limits are set (our job
+# spec uses requests only), identical to the Slurm --cpus-per-task=128 convention.
+# taskset on own process needs no special capability.
+# Degrades to unpinned with [PIN][WARN] on any failure -- never blocks the job.
+PIN_MODE="${PIN_MODE:-auto}"
+export PIN_MODE
+export PIN_LOG_DIR="${PIN_LOG_DIR:-$OUTDIR/pinlogs}"
+source "$_PKG_ROOT/pinning/pin_env.sh"
+pin_prepare
+
+cd "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# NCCL_VERSION_PROBE: each rank prints the NCCL version actually loaded at runtime
+# (confirms NCCL 2.32.3 override is active for full pinning).
+export NCCL_VERSION_PROBE="${NCCL_VERSION_PROBE:-1}"
+
+torchrun --nnodes="$NUM_NODES" --nproc_per_node="$GPUS_PER_NODE" --node_rank=$RANK \
+  --rdzv_id=k8s_shape1 --rdzv_backend=c10d --rdzv_endpoint=$RDZV_HOST:$PORT \
+  "${PIN_WRAP[@]}" \
+  train.py "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../nanogpt-base/config/train_shakespeare_char.py" \
+  --n_layer=12 --n_head=12 --n_embd=768 --block_size=512 --dropout=0.0 \
+  --batch_size=12 --gradient_accumulation_steps=$((2 * NUM_NODES * GPUS_PER_NODE)) \
+  --max_iters=$STEPS --lr_decay_iters=$STEPS --warmup_iters=200 \
+  --eval_interval=2000 --eval_iters=50 --log_interval=20 \
+  --always_save_checkpoint=False \
+  --compile=False --out_dir=$OUTDIR/ckpt \
+  2>&1 | tee $OUTDIR/train_${HN}.log
+EC=${PIPESTATUS[0]}
+echo "[$HN] TORCHRUN_EXIT: $EC"

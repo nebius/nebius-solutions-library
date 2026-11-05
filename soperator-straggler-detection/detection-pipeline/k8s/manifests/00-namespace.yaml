@@ -1,0 +1,6 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: straggler-detection
+  labels:
+    app.kubernetes.io/managed-by: straggler-detection-pipeline

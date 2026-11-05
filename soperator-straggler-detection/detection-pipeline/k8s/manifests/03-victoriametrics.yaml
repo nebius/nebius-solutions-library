@@ -1,0 +1,73 @@
+# VictoriaMetrics single-server for the K8s straggler-detection pipeline.
+# Equivalent to vm-setup.sh's nohup victoriametrics process on the Slurm path.
+# Configuration: same load-bearing flags (--dedup.minScrapeInterval=0s, long
+# retention) as the Slurm vm-standalone README specifies.
+# Data stored in an emptyDir -- sufficient for validation runs; replace with a
+# PVC for persistent data across pod restarts in production.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: victoriametrics
+  namespace: straggler-detection
+  labels:
+    straggler.nebius.ai/component: victoriametrics
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      straggler.nebius.ai/component: victoriametrics
+  template:
+    metadata:
+      labels:
+        straggler.nebius.ai/component: victoriametrics
+    spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: nebius.com/gpu
+                    operator: DoesNotExist
+      volumes:
+        - name: vm-data
+          emptyDir: {}
+      containers:
+        - name: victoriametrics
+          image: victoriametrics/victoria-metrics:v1.114.0
+          args:
+            - -storageDataPath=/vm-data
+            - -retentionPeriod=24h
+            - -dedup.minScrapeInterval=0s
+            - -httpListenAddr=:8428
+          ports:
+            - containerPort: 8428
+              name: http
+          volumeMounts:
+            - name: vm-data
+              mountPath: /vm-data
+          resources:
+            requests:
+              cpu: "1"
+              memory: 2Gi
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8428
+            initialDelaySeconds: 10
+            periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: victoriametrics
+  namespace: straggler-detection
+  labels:
+    straggler.nebius.ai/component: victoriametrics
+spec:
+  selector:
+    straggler.nebius.ai/component: victoriametrics
+  ports:
+    - port: 8428
+      targetPort: 8428
+      name: http
+  type: ClusterIP

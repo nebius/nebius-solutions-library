@@ -1,0 +1,17 @@
+# RWX NFS PVC for the straggler-detection pipeline workspace.
+# Holds: cloned pipeline repo, built Inspector plugin .so, NCCL 2.32.3 lib.
+# Accessible simultaneously by: init-build job, training pods, (future) DaemonSet.
+# StorageClass "nfs" (nfs.csi.k8s.io provisioner) is the same class used by
+# the existing falcon-workspace PVC on this cluster.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: straggler-workspace
+  namespace: straggler-detection
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: nfs
+  resources:
+    requests:
+      storage: 50Gi
