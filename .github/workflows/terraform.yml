@@ -12,7 +12,7 @@ on:
 #    - cron: '30 * * * *'
 
 permissions:
-  contents: write
+  contents: read
 
 env:
   TF_VAR_parent_id: project-e02s5a0dpr00nk11bgb0p9
@@ -317,32 +317,6 @@ jobs:
       continue-on-error: true
       run: s5cmd --endpoint-url "https://storage.${TF_VAR_region}.nebius.cloud" sync tests/reports/ s3://terraform-test-reports/${{ matrix.solution }}/
       if: always()
-
-    - name: Load test report history
-      uses: actions/checkout@v4
-      if: always()
-      continue-on-error: true
-      with:
-        ref: gh-pages
-        path: gh-pages
-
-    - name: Build test report
-      uses: simple-elf/allure-report-action@v1.15
-      if: always()
-      with:
-        gh_pages: gh-pages
-        keep_reports: 100
-        subfolder: ${{ matrix.solution }}
-        allure_results: ${{ matrix.solution }}/tests/reports
-
-    - name: Publish test report
-      uses: peaceiris/actions-gh-pages@v4
-      if: always()
-      with:
-        github_token: ${{ secrets.GITHUB_TOKEN }}
-        publish_branch: gh-pages
-        publish_dir: allure-history
-        keep_files: true
 
   cleanup-infra:
     name: 'Cleanup Infra'
