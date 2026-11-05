@@ -102,12 +102,6 @@ variable "boot_disk_size_gb" {
   description = "size of boot disk"
 }
 
-variable "boot_disk_image" {
-  type        = string
-  default     = "ubuntu24.04-cuda13.0"
-  description = "Image family to use for the boot disk."
-}
-
 variable "public_ip" {
   type        = bool
   default     = true

@@ -18,7 +18,7 @@ module "instance-module" {
   preset                         = var.preset
   platform                       = var.platform
   boot_disk_size_gb              = var.boot_disk_size_gb
-  boot_disk_image                = var.boot_disk_image
+  boot_image_family              = var.boot_image_family
   shared_filesystem_id           = var.shared_filesystem_id
   shared_filesystem_mount        = var.shared_filesystem_mount
   extra_path                     = var.extra_path
