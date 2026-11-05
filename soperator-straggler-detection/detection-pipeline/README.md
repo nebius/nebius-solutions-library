@@ -35,12 +35,15 @@ Run everything from the login node. Allow about 30 minutes plus the NCCL build (
    ./grafana-setup.sh   # Grafana with enforced login (optional)
    ./install.sh         # discovers nodes, builds the Inspector plugin and the pinning interposer, writes cluster.env
    ```
-   `install.sh` ends with a summary; any line starting `FAIL` must be fixed before continuing.
+   Success = exit code 0 and a last line `install.sh completed. Environment is ready`, after it prints the generated
+   `cluster.env` (node list, GPUs per node, VM and Grafana URLs). A hostname/DNS `WARNING` about Grafana access is
+   informational. Any non-zero exit means stop and read the message above it.
 3. **Build NCCL >= 2.32.3 for full CPU pinning** (optional; without it the dump thread is still pinned)
    ```bash
    pinning/nccl/fetch_build_nccl.sh --dest /root/nccl-2.32.3     # a path every compute node can read
    ```
-   It ends with `ncclGetVersion() = 2.32.3` and `profiler symbol: readable`. On a GPU-less login node add
+   Allow 10-20 minutes. Success ends with `version=2.32.3 lib=... -> resolved mode=full` and
+   `[nccl] OK: recorded <dir> in pinning/.nccl_override_dir` (8.5 minutes in the test run). On a GPU-less login node add
    `--gencode "-gencode=arch=compute_90,code=sm_90"` (H200/H100; use your GPU's arch).
 4. **Launch the standing pipeline** (aggregators on every node + alert engine)
    ```bash
@@ -51,17 +54,21 @@ Run everything from the login node. Allow about 30 minutes plus the NCCL build (
    ```bash
    ./tools/self_test.sh
    ```
-   Takes up to ~10 minutes. Expected last line: `PASS` (it found an `[ALERT]` naming exactly the injected rank).
-6. **Optional: Megatron run with Inspector and pinning** (default shape = 6 nodes / 48 GPUs; set `MEGA_*` and a
-   matching `--nodes` on fewer nodes, e.g. 2 nodes = TP4/PP2)
+   Takes about 8-10 minutes. Success: `RANK-MATCH CONFIRMED ... EXACT MATCH` and `=== RESULT: PASS ===` (it found an
+   `[ALERT]` naming exactly the injected rank; the alert may be `PROBABLE`/`LOG-ONLY`).
+6. **Optional: Megatron run with Inspector and pinning.** The launcher defaults to 6 nodes / 48 GPUs (TP4/PP4/DP3) and
+   takes its nodes from `cluster.env`. On 2 nodes / 16 GPUs use the `MEGA_*` shape below (skip that line on 6 nodes).
+   `--cpus-per-task` must be a **compute node's** CPU count, not the login node's.
    ```bash
    cd workloads/megatron
-   export SRUN_EXTRA="--exclusive --cpus-per-task=$(nproc) --cpu-bind=none"
-   ./run_megatron_tp4pp4dp3.sh 300 /root/run1 29500 /tmp/insp_dump_run1
-   grep -h 'PIN-PREFLIGHT\|PIN-VERIFY' /root/run1/*.log /root/run1/pinlogs/launch_*.log
+   export SRUN_EXTRA="--exclusive --cpus-per-task=$(ssh worker-0 nproc) --cpu-bind=none"   # first node in cluster.env NODE_LIST
+   export MEGA_TP=4 MEGA_PP=2 MEGA_LAYERS=40 MEGA_HIDDEN=4096 MEGA_HEADS=32 MEGA_SEQ=2048 MEGA_MBS=1 MEGA_GBS=32   # 2 nodes only
+   ./run_megatron_tp4pp4dp3.sh 300 /root/run1 29500 /tmp/insp_dump_run1       # returns at once ("launched, driver pid N")
+   while kill -0 $(cat /root/run1/srun_driver.pid) 2>/dev/null; do sleep 10; done   # wait for the job (~10 min)
+   grep -h 'PIN-PREFLIGHT' /root/run1/full_output.log; grep -h 'verdict' /root/run1/pin_verify_*.log
    ```
-   Expected: one `[PIN-PREFLIGHT] ... resolved=full` (or `resolved=dump` on NCCL < 2.32.3) per node and
-   `[PIN-VERIFY] ... verdict=FULLY_DEDICATED` (`DUMP_ONLY_DEDICATED` when resolved=dump) with `ranks=8/8`.
+   Expected: one `[PIN-PREFLIGHT] ... resolved=full` per node (`resolved=dump` if NCCL < 2.32.3 was not built) and
+   `[PIN-VERIFY] ... verdict=FULLY_DEDICATED` (`DUMP_ONLY_DEDICATED` when resolved=dump) with `ranks=8/8` per node.
    Alerts appear in `var/alert_engine_supervised.log`; `python3 tools/readable_alerts.py var/alert_engine_supervised.log`
    prints them in a short form. Turn pinning off with `PIN_MODE=off`.
 
