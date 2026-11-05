@@ -1,0 +1,40 @@
+# Static checks for every pull request. No cloud access, no approval.
+# Runs on all paths so it can be used as a required status check.
+name: 'Static checks'
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: static-checks-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  terraform-fmt:
+    name: 'Terraform fmt'
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3.1.2
+        with:
+          terraform_version: "v1.11.4"
+          terraform_wrapper: false
+
+      # Terraform does not discover .example files during recursive formatting.
+      - name: Prepare example variables for format checks
+        run: |
+          for solution in k8s-training vm-instance dsvm bastion wireguard; do
+            cp "$solution/terraform.tfvars.example" "$solution/terraform.tfvars"
+          done
+
+      - name: Terraform fmt
+        run: |
+          if ! terraform fmt -check -recursive -diff .; then
+            echo "::error::Terraform formatting check failed. Run 'terraform fmt -recursive' and commit the result (a diff for <solution>/terraform.tfvars means its terraform.tfvars.example). The pre-commit hook in the README (Contributing) catches this before pushing."
+            exit 1
+          fi
