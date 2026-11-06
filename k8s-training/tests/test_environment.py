@@ -38,6 +38,24 @@ case "$*" in
     printf '%s\\n' "$TEST_SUBNETS_JSON"
     exit "${TEST_SUBNETS_EXIT:-0}"
     ;;
+  "iam group get-by-name "*|"iam group create "*)
+    printf '%s\\n' 'mock-state-group'
+    case "$*" in
+      "iam group get-by-name "*) exit "${TEST_STATE_GROUP_EXIT:-0}" ;;
+    esac
+    exit 0
+    ;;
+  "iam service-account get-by-name "*|"iam service-account create "*)
+    printf '%s\\n' 'mock-id'
+    exit 0
+    ;;
+  "iam group-membership list-members "*)
+    case "$*" in *" --all"*) exit 2 ;; esac
+    if [ "${TEST_STATE_MEMBERS_EMPTY:-0}" = 1 ]; then
+      printf '%s\\n' '{}'
+      exit 0
+    fi
+    ;;
 esac
 printf '%s\n' '{"metadata":{"id":"mock-id"},"items":[{"metadata":{"id":"mock-subnet","name":"unused"}}],"memberships":[{"spec":{"member_id":"mock-id"}}],"status":{"aws_access_key_id":"mock-access","secret":"mock-secret"}}'
 ''')
@@ -66,6 +84,35 @@ printf '%s\n' '{"metadata":{"id":"mock-id"},"items":[{"metadata":{"id":"mock-sub
             text=True,
             capture_output=True,
         )
+
+    def test_state_account_access_is_bucket_scoped(self):
+        for lookup_exit in (0, 13, 15):
+            with self.subTest(lookup_exit=lookup_exit):
+                self.log.unlink(missing_ok=True)
+                result = self.source({"TEST_STATE_GROUP_EXIT": str(lookup_exit),
+                                      "TEST_STATE_MEMBERS_EMPTY": "1" if lookup_exit == 13 else "0"})
+                calls = self.log.read_text()
+                self.assertNotIn("--parent-id mock-tenant", calls)
+                self.assertIn("--name k8s-training-tfstate-sa", calls)
+                if lookup_exit == 15:
+                    self.assertEqual(result.returncode, 15)
+                    self.assertNotIn("iam v2 access-key create", calls)
+                    continue
+                self.assertEqual(result.returncode, 0, result.stderr)
+                for role in ("storage.object-editor", "storage.viewer"):
+                    self.assertIn(f"iam access-permit create --parent-id mock-state-group --resource-id mock-id --role {role}", calls)
+                self.assertEqual("iam group create" in calls, lookup_exit == 13)
+
+    def test_additional_clusters_have_distinct_backend_keys_and_access_key_names(self):
+        for name in ("training-a", "training-b"):
+            with self.subTest(name=name):
+                self.log.unlink(missing_ok=True)
+                state_key = f"clusters/{name}.tfstate"
+                result = self.source({"TF_VAR_cluster_name": name, "K8S_TF_STATE_KEY": state_key})
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn(f"--name tfstate-{name}-", self.log.read_text())
+                self.assertIn(f'key    = "{state_key}"',
+                              (self.root / "terraform_backend_override.tf").read_text())
 
     @staticmethod
     def resource(resource_id, name, network_id=None):
