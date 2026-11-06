@@ -36,6 +36,12 @@ jobs:
             .github/**
             .assets/**
             docs/**
+            **/*.md
+            **/*.png
+            **/*.jpg
+            **/*.jpeg
+            **/*.gif
+            **/*.svg
 
       - name: Match changed files
         id: parse-changed-files
@@ -95,7 +101,8 @@ jobs:
       run: terraform fmt -check -recursive .
 
   approve_terraform:
-    needs: terraform-format
+    needs: [terraform-format, detect-changes]
+    if: needs.detect-changes.outputs.solutions != '[]'
     name: 'Terraform ${{ matrix.solution }}'
     environment:
       name: project-e02s5a0dpr00nk11bgb0p9
@@ -325,8 +332,8 @@ jobs:
     concurrency:
       group: project-e02s5a0dpr00nk11bgb0p9
     runs-on: ubuntu-latest
-    needs: terraform
-    if: always() && needs.terraform.result
+    needs: [terraform, detect-changes]
+    if: always() && needs.terraform.result && needs.detect-changes.outputs.solutions != '[]'
     steps:
     - name: Status of the tf tests
       run: echo TF Matrix Job result is ${{ needs.terraform.result }}
