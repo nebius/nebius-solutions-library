@@ -2614,3 +2614,116 @@ counts, other communicator layouts) are untested. Back-to-back jobs: the 90 s fr
 job's series into the next; this appeared in offline replay (negative latencies) but was not seen as a live tiered
 incident.
 
+### 6.6 Production-scale (6 nodes / 48 GPUs) Slurm validation (2026-11)
+
+Fresh clone of `add/straggler-detection-v1-beta` at `691c296d` (the commit directly on top of 6.5's bug-fixed
+`5ee1214d`), into a clean directory, following this README's own documented setup exactly. Scope: Megatron
+TP4/PP4/DP3, 8B-class (40 layers, hidden 4096, 32 heads, seq 2048), 150-300 iterations/trial, NCCL 2.32.3
+(built from source -- no apt package exists at this CUDA pin), full CPU pinning.
+
+**6.6.1 Step 0/1 audit: clean, with two real operational gotchas found (not code bugs in the detection logic).**
+`environment.sh`/`vm-setup.sh`/`install.sh` all passed with no fixes needed; 6 nodes/48 GPUs discovered correctly,
+nothing hardcoded to the 2-node shape. Two real, disclosed gaps fixed in README.md (not in any detection code):
+(a) `run.sh`/`self_test.sh` silently reuse ANY already-running `run_alert_engine_supervised.sh` by process-name
+match alone, with no check that it's running this checkout's code -- found live, a weeks-old supervisor from an
+unrelated checkout was still running, and `self_test.sh`'s own PASS was scored against that stale code. Worked
+around by launching a second, independent `alert_engine.py` instance (same `VM_URL`, separate log paths -- safe,
+since the engine is a stateless VM consumer with no lock file) pointed at this checkout's own code, and using
+that instance's log for every result below. (b) The quickstart's own example `OUTDIR`/`DUMPDIR` (`/root/run1`,
+`/tmp/insp_dump_run1`) assume root access this user does not have, and a path outside the package root/`/root`/`/tmp`
+is not bind-mounted into the training container at all -- the job reports `TORCHRUN_EXIT: 0` almost instantly with
+an empty train log, a silent near-no-op rather than a loud error. Fixed by using `var/runs/<name>` and `var/dump`
+(both already covered by the launcher's own dynamic mount-fix) for every run below.
+
+**6.6.2 Communicator/tier structure at 6 nodes -- genuinely different from the 2-node shape, not just bigger.**
+Confirmed from the Inspector dump headers themselves (`n_ranks`, `nnodes` per communicator, ground truth, not the
+aggregator's derived `role_n` label, which reads the job's total world size regardless of the real group a given
+collective belongs to -- a possible future source of confusion if ever used for grouping instead of `comm`):
+- TP groups: `n_ranks=4`, `nnodes=1`, AllReduce, 16 MiB messages -- same shape as the already-validated 2-node case.
+- PP groups: `n_ranks=4`, `nnodes=2`, Send/Recv, 16 MiB -- new: spans 2 nodes (PP=4 here vs. PP=2 at 2 nodes).
+- DP groups: `n_ranks=3`, `nnodes=3`, ReduceScatter + AllGather (confirms `--use-distributed-optimizer`'s real
+  per-DP-group sharding) -- new: smaller (3, not the 2-node case's larger grouping) AND spread across 3 distinct
+  physical nodes, not 2.
+- Tied-embedding group: `n_ranks=2`, `nnodes=2`, AllReduce, 8-16 MiB -- present at both shapes but newly confirmed
+  relevant here: Guard 2 (`_check_mean_tiered` needs >=2 reference members after removing a candidate straggler)
+  means a 2-member group can NEVER be evaluated by the tiered check -- a real, previously-undocumented coverage
+  gap for any fault that manifests only in embedding-tie sync.
+- A previously-unseen job-wide group: `n_ranks=48`, `nnodes=6`, AllReduce/AllGather, 4-96 B messages (likely a
+  loss-scale/overflow-check sync, not gradient traffic). The tiered check's own `TIERED_MIN_BUCKET_BYTES=512` floor
+  (6.5.4) already excludes this group from evaluation entirely, since every one of its messages is far below the
+  floor -- a fortunate, not deliberately engineered, protection against a structurally novel 48-member group this
+  check was never validated against.
+
+Net: TP and PP groups behave as already validated; DP groups are smaller and more node-spread than before but still
+clear both guards; the embedding-tie and world-sync groups are both structurally new to this shape and both happen
+to fall outside what the tiered check ever evaluates (one via Guard 2, one via the bucket floor) -- not because
+either was designed with this shape in mind, but confirmed, not assumed, by this task.
+
+**6.6.3 Fault/healthy trials, final bug-fixed code, full CPU pinning active.** Ground truth for the injected rank
+(8) read directly from its own Inspector dump header each trial, independent of any alert.
+
+| Trial | Type | Result |
+|---|---|---|
+| healthy1-3 | none | 0 tiered incidents, 0 `CHECK-FAILED`, all 3 |
+| fault1c | 100 ms sleep, rank 8 | true rank named (PP Send group, role_rank=2, persisted 56.8s) + 1 secondary alert on a different, downstream rank (worker-3) -- cascade, not a miss |
+| fault2 | 100 ms sleep, rank 8 | true rank named TWICE independently (TP AllReduce role_rank=0, severity_ratio=80.0, persisted 42.9s; PP Send role_rank=2, persisted 51.4s) + secondary cascade alerts on worker-3/worker-5 |
+| fault3 | 100 ms sleep, rank 8 | true rank named twice (TP AllReduce role_rank=0, persisted 32.1s; PP Send role_rank=2, persisted 38.2s), no secondary alerts this trial |
+| storagefault1 | `STORAGE_FAULT_FILE_MB=500`, rank 8 | true rank (8) named correctly (PP Send role_rank=2, severity_ratio 2.4-2.6) -- BUT two other, non-faulted ranks (worker-0 role_rank=0, worker-3 role_rank=3) fired continuously for the entire 40+ minute job with far higher severity_ratio (up to ~995) than rank 8's own alert |
+
+0 `CHECK-FAILED` across all 7 trials. All 6 TORCHRUN_EXIT=0 on every trial. The storage-fault trial is this task's
+single most important new finding: the tiered check's `severity_ratio` is NOT a reliable cross-fault-type ranking
+signal -- for a compute-sleep fault it tracks the true cause fine, but for this storage fault, two downstream/
+unrelated ranks showed 100-400x higher severity_ratio than the true rank for the entire job duration. Anyone triaging
+by "highest severity_ratio" would be misdirected to the wrong rank for this fault type. The true rank is still
+correctly present and nameable in the alert stream -- this is a ranking/triage gap, not a missed detection.
+
+**6.6.4 CPU-pinning overhead at 48 GPUs -- effect is much larger than at 16 GPUs, not just "holds".** 3 full-pin
+trials (`healthy1-3`, reused from 6.6.3) vs. 3 `PIN_MODE=off` trials (`pinoff1-3`), same shape, 300 iters/trial,
+skip-first-10 warmup, steady-state n=290/trial (870/870 pooled):
+
+| Arm | mean iteration time |
+|---|---|
+| Full pin (ON) | 335.37 ms |
+| Unpinned (OFF) | 363.78 ms |
+
+Full pin is **7.81% faster** than unpinned (Welch t=-19.19 on 870/870 samples -- not a borderline result). This is a
+materially different finding from the 16-GPU reference (+0.64%, not significant, p=0.58): at 48 GPUs the benefit of
+removing Inspector's profiler/dump threads from training cores is large and highly significant, not negligible.
+**Caveat, disclosed honestly:** the 3 ON trials and 3 OFF trials were run as two separate blocks (ON block first,
+then OFF block), not strictly alternating pair-by-pair as this project's established interleaved-A/B methodology
+calls for -- a real deviation. The effect size (t=-19, ~8%) is large enough that a block-order confound (e.g.
+thermal drift, cluster-state change between blocks) would have to be unusually large to fully explain it, but this
+is weaker evidence than a genuinely interleaved design and should be re-run interleaved before being treated as
+fully conclusive. Full dedication independently confirmed via real `/proc` affinity checks: every `healthy1-3` and
+`fault*` trial's `pin_verify_<host>.log` showed `verdict=FULLY_DEDICATED ranks=8/8 roles=dump,profiler` on all 6
+nodes (48/48 ranks).
+
+**6.6.5 Bucket floor (`TIERED_MIN_BUCKET_BYTES=512`) re-check at this shape: holds, wider margin than before, no
+new sweep needed.** Real message sizes captured from this shape's own Inspector dumps: sub-floor traffic tops out
+at 96 B (the newly-seen 48-member world-sync AllGather, 6.6.2); the smallest real gradient-bearing collective is
+~2.29 MB (a DP ReduceScatter bucket). The gap between the largest sub-floor size and the smallest real traffic
+(96 B to 2.29 MB) is far wider here than the shape the floor was originally derived from (99 B to 8 KiB) -- any
+floor value in a wide range would be equivalent on this data, so 512 B continues to hold, now with real evidence
+from a second, structurally different shape, not just the one it was derived from.
+
+**6.6.6 Hang-safety and sustained-run stability.** 7 live trials at this scale (3 healthy, 3 compute-fault, 1
+storage-fault) plus 3 unpinned A/B trials -- 10 real jobs total, 300 iterations each except the two 150-iteration
+smoke tests, zero hangs, zero non-zero `TORCHRUN_EXIT`, zero `CHECK-FAILED`. No dedicated single longer-than-300-
+iteration soak was run beyond this (budget/cluster-time constraint, disclosed rather than omitted) -- 300 iterations
+at the low end of this task's own "300-500" target, not the high end.
+
+**6.6.7 Memory.** `alert_engine.py` (this validation's own instance): RSS 58.8 MB at 2.08 hours real elapsed
+(continuous, across this whole validation campaign). `node_aggregator_ref.py` on worker-0: RSS 40.3 MB at 2.1 hours.
+Single-point-in-time readings, not a two-point growth-rate measurement (no baseline captured at process start) --
+both are well below any concerning threshold, but this does not independently confirm or refute the 2-node case's
+documented +4-7 MB/hour growth estimate; a dedicated before/after measurement across a long soak would be needed for
+that.
+
+**6.6.8 Verdict.** The tiered check, platform detection, and bucket floor all hold at 48 GPUs/6 nodes on the shapes
+tested, with two real, newly-confirmed gaps (embedding-tie 2-member groups never evaluated; `severity_ratio` not a
+reliable cross-fault-type ranking signal) that existed in the design all along but had never been exercised against
+real traffic until this task. CPU pinning's benefit is confirmed to grow, not shrink or vanish, at this scale,
+though the A/B design here was blocked rather than interleaved. This is real progress past the explicit "48 GPUs
+is the next step" gap the prior audit flagged -- not yet exhaustive (one fault magnitude/rank, no long soak beyond
+300 iterations, blocked A/B design) but no longer untested.
+
