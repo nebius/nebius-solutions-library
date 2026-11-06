@@ -73,11 +73,11 @@
  },
  "batch/CronJob/monitoring/cost-export": {
   "component": "observability",
-  "sha256": "58d3665cd4409af8da8921839ccd21376db4e7742dcfb51bd0b67ced6d616db7"
+  "sha256": "7cffcb4886a91fa272562abd0ccd929b27f519c2f3c211eb166eb5cb1fb05783"
  },
  "batch/CronJob/ops/recover-stopped-nodes": {
   "component": "ops",
-  "sha256": "5248c888d64fef4217790a4b68d46ce7e5fcd3e6d5756863f855700e98d448de"
+  "sha256": "fd96b665caf3e420180a12eed6aaae818e0bb26412dfc901344d1230c73edf6c"
  },
  "cert-manager.io/Certificate/envoy-gateway-system/models": {
   "component": "gateway",

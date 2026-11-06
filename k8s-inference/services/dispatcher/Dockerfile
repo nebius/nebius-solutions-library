@@ -7,7 +7,12 @@ FROM ${OPS_IMAGE} AS ops
 # 3.12-slim pinned by digest so that a rebuild gets the same base; the tag is the one resolved by `crane digest`
 FROM python:3.12-slim@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1
 # Debian security updates of the base image (trivy in CI fails on a fixed CRITICAL)
-RUN apt-get update && apt-get upgrade -y && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get upgrade -y \
+ && apt-get install -y --no-install-recommends ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+# Bootstrap Python package updates through the refreshed OS trust store.
+ENV PIP_CERT=/etc/ssl/certs/ca-certificates.crt
+RUN python -m pip install --no-cache-dir --upgrade "pip>=26.2.2" "certifi>=2026.10.19"
 RUN pip install --no-cache-dir kubernetes==36.0.3
 COPY --from=ops /usr/local/bin/nebius /usr/local/bin/nebius
 WORKDIR /app

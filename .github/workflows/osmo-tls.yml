@@ -1,0 +1,28 @@
+name: OSMO TLS verification
+
+on:
+  pull_request:
+    paths:
+      - 'applications/osmo/deploy/example/002-setup/**'
+      - '.github/workflows/osmo-tls.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'applications/osmo/deploy/example/002-setup/**'
+      - '.github/workflows/osmo-tls.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  tls:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Shell syntax
+        run: |
+          bash -n applications/osmo/deploy/example/002-setup/lib/tls.sh
+          bash -n applications/osmo/deploy/example/002-setup/05-deploy-osmo-control-plane.sh
+          bash -n applications/osmo/deploy/example/002-setup/06-deploy-osmo-backend.sh
+      - name: Verify TLS before sending Keycloak credentials
+        run: python3 -m unittest discover -s applications/osmo/deploy/example/002-setup/tests -v
