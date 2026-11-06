@@ -1,0 +1,267 @@
+# Terragrunt expands this cluster map into separate regional Terraform states.
+# Export TF_VAR_iam_token separately; keep credentials out of these examples.
+defaults = {
+  loki                          = { enabled = false }
+  tenant_id                     = "tenant-REPLACE"
+  k8s_version                   = "1.35"
+  ssh_public_key                = { path = "/secure/id_ed25519.pub" }
+  cpu_nodes_platform            = "cpu-d3"
+  cpu_nodes_preset              = "8vcpu-32gb"
+  cpu_nodes_fixed_count         = 3
+  cpu_disk_size                 = 512
+  cpu_nodes_public_ips          = false
+  gpu_nodes_public_ips          = false
+  infiniband_fabric             = ""
+  gpu_nodes_autoscaling         = { enabled = true, min_size = 0, max_size = 2 }
+  gpu_nodes_driverfull_image    = true
+  gpu_node_groups               = 2
+  gpu_disk_size                 = 512
+  custom_driver                 = false
+  network_operator_values       = <<-YAML
+    nfd:
+      enabled: false
+    operator:
+      deployCR: false
+      ofedDriver:
+        initContainer:
+          enable: false
+  YAML
+  enable_filestore              = true
+  existing_filestore            = ""
+  filestore_disk_size_gibibytes = 1024
+  filestore_forbid_deletion     = true
+  filestore_mount_path          = "/mnt/weights"
+  enable_nim_operator           = true
+  nim_operator                  = { version = "3.1.2", runai_cache_reader = {}, values_files = ["/secure/nim-operator-values.yaml"] }
+  enable_dynamo                 = true
+  enable_runai                  = true
+  enable_grafana                = false
+  enable_prometheus             = false
+  enable_nebius_o11y_agent      = false
+  enable_mpi_operator           = true
+  mpi_operator                  = { version = "0.8.2" }
+  enable_opencost               = true
+  opencost = {
+    chart_version  = "2.5.33"
+    namespace      = "monitoring"
+    prometheus_url = "http://prometheus-operated.runai.svc.cluster.local:9090"
+    values_files   = ["/secure/opencost-values.yaml"]
+  }
+  platform_namespaces = ["runai", "knative-serving", "dcgm-exporter"]
+  # Stock NVIDIA telemetry; native-image discovery has one Marketplace owner.
+  platform_releases = {
+    nebius-dcgm-exporter = {
+      namespace = "dcgm-exporter", repository = "https://nvidia.github.io/dcgm-exporter/helm-charts", chart = "dcgm-exporter"
+      version   = "4.8.3", values_files = ["/secure/dcgm-exporter-values.yaml"]
+    }
+  }
+}
+
+
+clusters = {
+  eu-north1 = {
+    parent_id          = "project-REPLACE-eu"
+    subnet_id          = "vpcsubnet-REPLACE-eu"
+    region             = "eu-north1"
+    cluster_name       = "runai-dynamo-eu"
+    gpu_nodes_platform = "gpu-h100-sxm"
+    gpu_nodes_preset   = "1gpu-16vcpu-200gb"
+    gpu_node_group_overrides = [
+      { platform = "gpu-l40s-a", preset = "1gpu-24vcpu-96gb", labels = { "runai.nebius/pool" = "serving" } },
+      { labels = { "runai.nebius/pool" = "batch" }, preemptible = true },
+    ]
+    runai = {
+      role                    = "worker"
+      public_endpoint         = true
+      tunnel_public_key_file  = "/secure/runai-eu-tunnel.pub"
+      tunnel_private_key_file = "/secure/runai-eu-tunnel.pem"
+      control_plane_url       = "https://runai.example.com"
+      cluster_uid             = "REPLACE_WITH_REGISTERED_EU_CLUSTER_UUID"
+      bootstrap_token_file    = "/secure/runai-eu-bootstrap-token"
+      values                  = <<-YAML
+        clusterConfig:
+          global:
+            subdomainSupport: false
+            nvidiaDcgmExporter:
+              installedFromGpuOperator: false
+              namespace: dcgm-exporter
+              serviceMonitor: {enabled: true}
+      YAML
+      serving = {
+        inference_domain = "*.models.eu.example.com"
+        spec             = <<-YAML
+          version: "1.23.0"
+          high-availability: {replicas: 2}
+          ingress:
+            kourier: {enabled: true, service-type: ClusterIP}
+          config:
+            domain: {models.eu.example.com: ""}
+            autoscaler: {enable-scale-to-zero: "true"}
+            features:
+              kubernetes.podspec-affinity: enabled
+              kubernetes.podspec-init-containers: enabled
+              kubernetes.podspec-persistent-volume-claim: enabled
+              kubernetes.podspec-persistent-volume-write: enabled
+              kubernetes.podspec-schedulername: enabled
+              kubernetes.podspec-securitycontext: enabled
+              kubernetes.podspec-tolerations: enabled
+              kubernetes.podspec-volumes-emptydir: enabled
+              kubernetes.podspec-fieldref: enabled
+              kubernetes.podspec-nodeselector: enabled
+              multi-container: enabled
+              multi-container-probing: enabled
+              secure-pod-defaults: enabled
+            network:
+              domainTemplate: '{{.Name}}-{{.Namespace}}.{{.Domain}}'
+              ingress-class: kourier.ingress.networking.knative.dev
+              default-external-scheme: https
+            observability:
+              metrics-protocol: prometheus
+              request-metrics-protocol: http/protobuf
+              request-metrics-endpoint: http://prometheus-operated.runai.svc.cluster.local:9090/api/v1/otlp/v1/metrics
+        YAML
+      }
+    }
+  }
+
+  eu-north2 = {
+    parent_id          = "project-REPLACE-eu2"
+    subnet_id          = "vpcsubnet-REPLACE-eu2"
+    region             = "eu-north2"
+    cluster_name       = "runai-dynamo-eu2"
+    gpu_nodes_platform = "gpu-h200-sxm"
+    gpu_nodes_preset   = "1gpu-16vcpu-200gb"
+    gpu_node_group_overrides = [
+      { labels = { "runai.nebius/pool" = "serving" } },
+      { labels = { "runai.nebius/pool" = "batch" }, preemptible = true },
+    ]
+    runai = {
+      role                    = "worker"
+      public_endpoint         = true
+      tunnel_public_key_file  = "/secure/runai-eu2-tunnel.pub"
+      tunnel_private_key_file = "/secure/runai-eu2-tunnel.pem"
+      control_plane_url       = "https://runai.example.com"
+      cluster_uid             = "REPLACE_WITH_REGISTERED_EU2_CLUSTER_UUID"
+      bootstrap_token_file    = "/secure/runai-eu2-bootstrap-token"
+      values                  = <<-YAML
+        clusterConfig:
+          global:
+            subdomainSupport: false
+            nvidiaDcgmExporter:
+              installedFromGpuOperator: false
+              namespace: dcgm-exporter
+              serviceMonitor: {enabled: true}
+      YAML
+      serving = {
+        inference_domain = "*.models.eu2.example.com"
+        spec             = <<-YAML
+          version: "1.23.0"
+          high-availability: {replicas: 2}
+          ingress:
+            kourier: {enabled: true, service-type: ClusterIP}
+          config:
+            domain: {models.eu2.example.com: ""}
+            autoscaler: {enable-scale-to-zero: "true"}
+            features:
+              kubernetes.podspec-affinity: enabled
+              kubernetes.podspec-init-containers: enabled
+              kubernetes.podspec-persistent-volume-claim: enabled
+              kubernetes.podspec-persistent-volume-write: enabled
+              kubernetes.podspec-schedulername: enabled
+              kubernetes.podspec-securitycontext: enabled
+              kubernetes.podspec-tolerations: enabled
+              kubernetes.podspec-volumes-emptydir: enabled
+              kubernetes.podspec-fieldref: enabled
+              kubernetes.podspec-nodeselector: enabled
+              multi-container: enabled
+              multi-container-probing: enabled
+              secure-pod-defaults: enabled
+            network:
+              domainTemplate: '{{.Name}}-{{.Namespace}}.{{.Domain}}'
+              ingress-class: kourier.ingress.networking.knative.dev
+              default-external-scheme: https
+            observability:
+              metrics-protocol: prometheus
+              request-metrics-protocol: http/protobuf
+              request-metrics-endpoint: http://prometheus-operated.runai.svc.cluster.local:9090/api/v1/otlp/v1/metrics
+        YAML
+      }
+    }
+  }
+
+  eu-west1 = {
+    parent_id          = "project-REPLACE-west"
+    subnet_id          = "vpcsubnet-REPLACE-west"
+    region             = "eu-west1"
+    cluster_name       = "runai-dynamo-west"
+    gpu_nodes_platform = "gpu-h200-sxm"
+    gpu_nodes_preset   = "1gpu-16vcpu-200gb"
+    gpu_node_group_overrides = [
+      { labels = { "runai.nebius/pool" = "serving" } },
+      { labels = { "runai.nebius/pool" = "batch" }, preemptible = true },
+    ]
+    runai = {
+      role                    = "worker"
+      public_endpoint         = true
+      tunnel_public_key_file  = "/secure/runai-west-tunnel.pub"
+      tunnel_private_key_file = "/secure/runai-west-tunnel.pem"
+      control_plane_url       = "https://runai.example.com"
+      cluster_uid             = "REPLACE_WITH_REGISTERED_WEST_CLUSTER_UUID"
+      bootstrap_token_file    = "/secure/runai-west-bootstrap-token"
+      values                  = <<-YAML
+        clusterConfig:
+          global:
+            subdomainSupport: false
+            nvidiaDcgmExporter:
+              installedFromGpuOperator: false
+              namespace: dcgm-exporter
+              serviceMonitor: {enabled: true}
+      YAML
+      serving = {
+        inference_domain = "*.models.west.example.com"
+        spec             = <<-YAML
+          version: "1.23.0"
+          high-availability: {replicas: 2}
+          ingress:
+            kourier: {enabled: true, service-type: ClusterIP}
+          config:
+            domain: {models.west.example.com: ""}
+            autoscaler: {enable-scale-to-zero: "true"}
+            features:
+              kubernetes.podspec-affinity: enabled
+              kubernetes.podspec-init-containers: enabled
+              kubernetes.podspec-persistent-volume-claim: enabled
+              kubernetes.podspec-persistent-volume-write: enabled
+              kubernetes.podspec-schedulername: enabled
+              kubernetes.podspec-securitycontext: enabled
+              kubernetes.podspec-tolerations: enabled
+              kubernetes.podspec-volumes-emptydir: enabled
+              kubernetes.podspec-fieldref: enabled
+              kubernetes.podspec-nodeselector: enabled
+              multi-container: enabled
+              multi-container-probing: enabled
+              secure-pod-defaults: enabled
+            network:
+              domainTemplate: '{{.Name}}-{{.Namespace}}.{{.Domain}}'
+              ingress-class: kourier.ingress.networking.knative.dev
+              default-external-scheme: https
+            observability:
+              metrics-protocol: prometheus
+              request-metrics-protocol: http/protobuf
+              request-metrics-endpoint: http://prometheus-operated.runai.svc.cluster.local:9090/api/v1/otlp/v1/metrics
+        YAML
+      }
+    }
+  }
+}
+
+
+# Supply each region's platform_secrets for wildcard inference TLS,
+# as in the single-region worker profile. Values maps are replaced, not deep-merged.
+# Install shared optional add-ons through platform_releases, never model endpoints.
+# Customer onboarding, buckets, notebooks and model deployments belong to the
+# external application.
+
+# Use this file as K8S_FLEET_CONFIG; Terragrunt selects every configured cluster.
+
+# Native exporter and registration values: modules/runai/README.md.
