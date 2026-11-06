@@ -97,8 +97,12 @@ terraform-test-installations:
 terraform-test-cloud-init:
 	python3 test/cloud-init/test_cloud_init.py
 
+.PHONY: terraform-test-disk-cleanup
+terraform-test-disk-cleanup:
+	python3 -m unittest discover -s test/disk-cleanup -p 'test_*.py'
+
 .PHONY: terraform-check
-terraform-check: terraform-fmt-check terraform-validate-modules terraform-validate-installations terraform-test-modules terraform-test-installations terraform-test-cloud-init
+terraform-check: terraform-fmt-check terraform-validate-modules terraform-validate-installations terraform-test-modules terraform-test-installations terraform-test-cloud-init terraform-test-disk-cleanup
 	@echo 'All Terraform checks passed successfully!'
 
 # markdownlint-cli2

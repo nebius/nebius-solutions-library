@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 
+from __future__ import annotations
+
 import asyncio
 import json
 import logging
@@ -8,7 +10,7 @@ import random
 import sys
 import time
 from dataclasses import dataclass
-from enum import StrEnum
+from enum import Enum
 from typing import Final, Optional
 
 ALLOWED_CLEANUP_NAMESPACES: tuple[str, ...] = (
@@ -24,9 +26,10 @@ NOT_FOUND_PATTERNS: tuple[str, ...] = (
 )
 
 PARENT_ID: str = ""
+EXPECTED_CLUSTER_ID: str = ""
+DISK_IDS: frozenset[str] = frozenset()
 
 START_DELETE_PARALLELISM: Final[int] = 100
-PAGE_SIZE: Final[int] = 999
 CLI_RETRIES: Final[int] = 5
 MAX_REQUEUE: Final[int] = 3
 INITIAL_REQUEUE_BACKOFF_SECONDS: Final[float] = 1.0
@@ -64,7 +67,7 @@ class CommandError(CleanupError):
         return f"{self.stdout}\n{self.stderr}"
 
 
-class TaskStatus(StrEnum):
+class TaskStatus(str, Enum):
     COMPLETE = "complete"
     REQUEUE = "requeue"
 
@@ -143,6 +146,23 @@ def load_parent_id() -> str:
     return parent_id
 
 
+def load_disk_ids() -> frozenset[str]:
+    try:
+        disk_ids = json.loads(os.environ.get("DISK_IDS", "[]"))
+    except json.JSONDecodeError as exc:
+        raise CleanupError("DISK_IDS must be a JSON array of Compute disk IDs") from exc
+
+    if not isinstance(disk_ids, list) or not all(
+        isinstance(disk_id, str)
+        and disk_id.startswith("computedisk-")
+        and len(disk_id) > len("computedisk-")
+        and disk_id == disk_id.strip()
+        for disk_id in disk_ids
+    ):
+        raise CleanupError("DISK_IDS must be a JSON array of Compute disk IDs")
+    return frozenset(disk_ids)
+
+
 def format_command_error(
     command: list[str], returncode: int, stdout: str, stderr: str
 ) -> str:
@@ -215,18 +235,42 @@ async def run_command(command: list[str]) -> str:
 
 
 def disk_from_item(item: dict) -> Optional[Disk]:
-    metadata = item.get("metadata") or {}
-    status = item.get("status") or {}
-    labels = metadata.get("labels") or {}
+    if not isinstance(item, dict):
+        return None
+    metadata = item.get("metadata")
+    spec = item.get("spec")
+    status = item.get("status")
+    if not all(isinstance(value, dict) for value in (metadata, spec, status)):
+        return None
+    labels = metadata.get("labels")
+    if not isinstance(labels, dict):
+        return None
 
     disk_id = metadata.get("id") or ""
     name = metadata.get("name") or ""
     namespace = labels.get("kubernetes.io/created-for/pvc/namespace") or ""
-    attachment = status.get("read_write_attachment")
+    # CSI ownership alone does not establish retention intent. Only an exact
+    # disk allowlist constitutes approval to delete; all other disks are retained.
+    conflicting_owner = any(
+        key.startswith("k8s.io/mk8scluster-")
+        and value == "owned"
+        and key != f"k8s.io/{EXPECTED_CLUSTER_ID}"
+        for key, value in labels.items()
+    )
 
     if (
-        disk_id
-        and not attachment
+        EXPECTED_CLUSTER_ID
+        and disk_id in DISK_IDS
+        and metadata.get("parent_id") == PARENT_ID
+        and labels.get("compute.csi.nebius.com/cluster-id") == EXPECTED_CLUSTER_ID
+        and not conflicting_owner
+        and not spec.get("forbid_deletion")
+        and status.get("state") == "READY"
+        and not status.get("reconciling")
+        and not status.get("read_write_attachment")
+        and not status.get("read_only_attachments")
+        and not status.get("managed_by")
+        and not status.get("lock_state")
         and namespace in ALLOWED_CLEANUP_NAMESPACES
         and name.startswith("pvc-")
     ):
@@ -235,63 +279,23 @@ def disk_from_item(item: dict) -> Optional[Disk]:
 
 
 async def list_disks() -> list[Disk]:
-    page_token = ""
+    # Never discover deletion targets by scanning the project.
     result: list[Disk] = []
-    page_number = 0
-
-    while True:
-        page_number += 1
-        command = [
-            "nebius",
-            "compute",
-            "disk",
-            "list",
-            "--parent-id",
-            PARENT_ID,
-            "--page-size",
-            str(PAGE_SIZE),
-            "--format",
-            "json",
-            "--no-progress",
-            "--retries",
-            str(CLI_RETRIES),
-        ]
-        if page_token:
-            command.extend(["--page-token", page_token])
-
-        output = await run_command(command)
-        try:
-            payload = json.loads(output)
-        except json.JSONDecodeError as exc:
-            raise CleanupError(
-                f"failed to parse disk list JSON page {page_number}: {exc}"
-            ) from exc
-
-        items = payload.get("items") or []
-        for item in items:
-            disk = disk_from_item(item)
-            if disk is not None:
-                result.append(disk)
-
-        page_token = payload.get("next_page_token") or ""
-        logger.info(
-            "Scanned disk page %d: %d items, %d cleanup candidates so far",
-            page_number,
-            len(items),
-            len(result),
-        )
-        if not page_token:
-            return result
+    for disk_id in sorted(DISK_IDS):
+        disk = await get_disk(disk_id)
+        if disk is not None:
+            result.append(disk)
+    return result
 
 
-async def disk_exists(disk: Disk) -> bool:
+async def get_disk(disk_id: str) -> Optional[Disk]:
     command = [
         "nebius",
         "compute",
         "disk",
         "get",
         "--id",
-        disk.id,
+        disk_id,
         "--format",
         "json",
         "--no-progress",
@@ -299,12 +303,23 @@ async def disk_exists(disk: Disk) -> bool:
         str(CLI_RETRIES),
     ]
     try:
-        await run_command(command)
-        return True
+        output = await run_command(command)
     except CommandError as error:
         if is_not_found(error):
-            return False
+            logger.info("Disk %s is already absent", disk_id)
+            return None
         raise
+
+    try:
+        item = json.loads(output)
+    except json.JSONDecodeError as exc:
+        raise CleanupError(f"failed to parse disk {disk_id}: {exc}") from exc
+    if not isinstance(item, dict) or (item.get("metadata") or {}).get("id") != disk_id:
+        raise CleanupError(f"disk get returned unexpected identity for {disk_id}")
+    disk = disk_from_item(item)
+    if disk is None:
+        logger.warning("Preserving disk %s: cleanup safety checks did not pass", disk_id)
+    return disk
 
 
 async def start_delete_operation(
@@ -326,6 +341,10 @@ async def start_delete_operation(
         str(CLI_RETRIES),
     ]
     await start_limiter.wait()
+    # Check again after rate limiting, and on every retry. The cloud API accepts
+    # only an ID for deletion, so it cannot enforce a resource-version condition.
+    if await get_disk(disk.id) is None:
+        return None
     try:
         output = await run_command(command)
     except CommandError as error:
@@ -363,9 +382,8 @@ async def wait_delete_operation(
 
 
 async def recheck_after_not_found(disk: Disk) -> TaskResult:
-    exists = await disk_exists(disk)
-    if not exists:
-        logger.info("Disk %s is absent; task complete", disk.id)
+    if await get_disk(disk.id) is None:
+        logger.info("Disk %s is absent or no longer eligible; task complete", disk.id)
         return TaskResult(TaskStatus.COMPLETE)
     return TaskResult(TaskStatus.REQUEUE, "disk still exists after not-found response")
 
@@ -384,7 +402,7 @@ async def run_start_delete_task(
     )
     operation_id = await start_delete_operation(disk, start_limiter)
     if operation_id is None:
-        return await recheck_after_not_found(disk)
+        return TaskResult(TaskStatus.COMPLETE)
 
     logger.info("Started disk %s delete operation %s", disk.id, operation_id)
     return WaitDeleteTask(
@@ -554,9 +572,9 @@ async def cleanup_disks(disks: list[Disk]) -> int:
         worker_task.cancel()
     await asyncio.gather(*workers, return_exceptions=True)
 
-    deleted_count = len(disks) - len(failures)
-    if deleted_count > 0:
-        logger.info("Deleted %d leftover disks", deleted_count)
+    processed_count = len(disks) - len(failures)
+    if processed_count > 0:
+        logger.info("Processed %d approved disks", processed_count)
 
     if failures:
         logger.error("Failed disk deletions:")
@@ -567,14 +585,24 @@ async def cleanup_disks(disks: list[Disk]) -> int:
 
 
 async def async_main() -> int:
-    global PARENT_ID
+    global PARENT_ID, EXPECTED_CLUSTER_ID, DISK_IDS
+    DISK_IDS = load_disk_ids()
+    EXPECTED_CLUSTER_ID = os.environ.get("EXPECTED_CLUSTER_ID", "").strip()
+    PARENT_ID = ""
+    if not DISK_IDS:
+        logger.info("No disks explicitly approved for cleanup; preserving leftover disks")
+        return 0
+    if not EXPECTED_CLUSTER_ID.startswith("mk8scluster-") or len(
+        EXPECTED_CLUSTER_ID
+    ) <= len("mk8scluster-"):
+        raise CleanupError("EXPECTED_CLUSTER_ID is required for explicit disk cleanup")
     PARENT_ID = load_parent_id()
 
     logger.info(
-        "Disk cleanup config: start_delete_parallelism=%d, page_size=%d, cli_retries=%d, "
+        "Disk cleanup config: approved_disks=%d, start_delete_parallelism=%d, cli_retries=%d, "
         "max_requeue=%d, start_rate_per_second=%.2f",
+        len(DISK_IDS),
         START_DELETE_PARALLELISM,
-        PAGE_SIZE,
         CLI_RETRIES,
         MAX_REQUEUE,
         START_RATE_PER_SECOND,
