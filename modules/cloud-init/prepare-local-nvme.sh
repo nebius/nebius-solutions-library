@@ -83,8 +83,31 @@ mount_device() {
   chmod 1777 "$target"
 }
 
+# Discovery is best-effort for other arrays; selected-array checks remain fatal.
+find_active_raid() {
+  local uuid="$1" candidate device info active_uuid
+  shift
+  for candidate in "$@"; do
+    [[ -e "$candidate" ]] || continue
+    device="/dev/${candidate##*/}"
+    if ! info=$(mdadm --detail --export "$device"); then
+      echo "[local-nvme] Warning: cannot inspect RAID candidate $device; skipping" >&2
+      continue
+    fi
+    active_uuid=$(awk -F= '$1 == "MD_UUID" {print $2}' <<< "$info")
+    if [[ -z "$active_uuid" ]]; then
+      echo "[local-nvme] Warning: missing UUID for RAID candidate $device; skipping" >&2
+      continue
+    fi
+    if [[ "$active_uuid" == "$uuid" ]]; then
+      printf '%s\n' "$device"
+      return 0
+    fi
+  done
+}
+
 prepare_raid() {
-  local uuid="" blank=0 disk signatures info member_uuid active candidate device active_uuid
+  local uuid="" blank=0 disk signatures info member_uuid active
   local resolved md_name level raid_disks actual expected
   for disk in "${NVME_DISKS[@]}"; do
     signatures=$(inspect wipefs --noheadings --output TYPE "$disk") || fail "Cannot inspect signatures: $disk"
@@ -106,15 +129,7 @@ prepare_raid() {
   else
     [[ "$blank" -eq 0 ]] || fail "Partial RAID signatures; refusing reconstruction"
     # Locate the array by UUID even when udev assembled it under another name.
-    active=""
-    for candidate in /sys/block/md*; do
-      [[ -e "$candidate" ]] || continue
-      device="/dev/${candidate##*/}"
-      info=$(inspect mdadm --detail --export "$device") || fail "Cannot inspect active RAID: $device"
-      active_uuid=$(awk -F= '$1 == "MD_UUID" {print $2}' <<< "$info")
-      [[ -n "$active_uuid" ]] || fail "Missing active RAID UUID: $device"
-      [[ "$active_uuid" != "$uuid" ]] || active="$device"
-    done
+    active=$(find_active_raid "$uuid" /sys/block/md*)
     if [[ -n "$active" ]]; then
       MD_DEV="$active"
     else

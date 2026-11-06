@@ -219,6 +219,60 @@ class DiskSafetyTests(unittest.TestCase):
         self.assertIn("ACTION mount_device /dev/fake0 /mnt/test/disk-0", result.stderr)
         self.assertIn("ACTION mount_device /dev/fake1 /mnt/test/disk-1", result.stderr)
 
+    def test_raid_scan_skips_unreadable_and_missing_uuid_candidates(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            candidates = [Path(tmp) / name for name in ("md0", "md1", "md2", "md127")]
+            for candidate in candidates:
+                candidate.touch()
+            paths = " ".join(shlex.quote(str(path)) for path in candidates)
+            result = self.run_script('''
+                mdadm() {
+                    case "${*: -1}" in
+                        /dev/md0) echo MD_UUID=one; return 1;;
+                        /dev/md1) echo MD_LEVEL=raid0;;
+                        /dev/md2) echo MD_UUID=unrelated;;
+                        /dev/md127) echo MD_UUID=one;;
+                        *) return 99;;
+                    esac
+                }
+            ''', f"find_active_raid one {paths}")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout.strip(), "/dev/md127")
+            self.assertIn("cannot inspect RAID candidate /dev/md0; skipping", result.stderr)
+            self.assertIn("missing UUID for RAID candidate /dev/md1; skipping", result.stderr)
+            self.assertNotIn("ACTION", result.stderr)
+            result = self.run_script("mdadm() { return 1; }", f"find_active_raid one {paths}")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout, "")
+
+    def test_matching_active_raid_still_requires_validation(self):
+        base = '''
+            wipefs() { echo linux_raid_member; }
+            mdadm() {
+                [[ "$1" == --examine ]] || { echo "ACTION unexpected mdadm $*" >&2; return 99; }
+                echo MD_UUID=one
+            }
+            find_active_raid() { echo /dev/md127; }
+            cat() { case "$1" in */level) echo raid0;; */raid_disks) echo 1;; *) return 99;; esac; }
+            find() { echo /dev/fake0; }
+        '''
+        for overrides, message in [
+            ("cat() { return 1; }", "Cannot inspect RAID level"),
+            ("cat() { echo raid1; }", "Unexpected RAID level"),
+            ('cat() { case "$1" in */level) echo raid0;; *) return 1;; esac; }', "Cannot inspect RAID size"),
+            ('cat() { case "$1" in */level) echo raid0;; *) echo 2;; esac; }', "Unexpected RAID size"),
+            ("find() { return 1; }", "Cannot inspect RAID members"),
+            ("find() { echo /dev/unrelated; }", "Unexpected RAID members"),
+        ]:
+            with self.subTest(message=message):
+                self.assert_refused(base + overrides, "prepare_raid", message)
+        result = self.run_script(base + '''
+            mount_device() { echo "ACTION mount_device $*" >&2; }
+        ''', "prepare_raid")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("ACTION mount_device /dev/md127 /mnt/test", result.stderr)
+        self.assertNotIn("unexpected mdadm", result.stderr)
+
     def test_existing_raid_assembly(self):
         result = self.run_script('''
             wipefs() { echo linux_raid_member; }
