@@ -69,7 +69,8 @@ def queries(kind: str, namespace: str, name: str, step: int = 15) -> list[tuple[
         {"namespace": namespace, "pod": re.escape(name) + ("-predictor.*" if kind == "endpoint" else "-.*")}, {"pod"}
     )
     containers = pods[:-1] + ',container!="",container!="POD"}'
-    w = f"{max(120, 2 * step)}s"  # the rate window follows the step: a coarse window still catches a short-lived pod
+    seconds = max(120, 2 * step)  # the rate window follows the step: a coarse window still catches a short-lived pod
+    w = f"{seconds}s"
     q = [
         ("cpu", "CPU usage", "cores", f"sum(rate(container_cpu_usage_seconds_total{containers}[{w}]))"),
         ("memory", "Memory usage", "bytes", f"sum(container_memory_working_set_bytes{containers})"),
@@ -77,26 +78,34 @@ def queries(kind: str, namespace: str, name: str, step: int = 15) -> list[tuple[
         ("gpu_memory", "GPU memory", "bytes", f"sum(DCGM_FI_DEV_FB_USED{pods}) * 1048576"),
     ]
     if kind == "endpoint":
-        service = selectors({"namespace": namespace, "inferenceservice": name})
+        # the queue-proxy's http_server_request_duration_seconds histogram (otelhttp): the inference requests are the
+        # POSTs; the GETs are readiness and health probes and would otherwise count as traffic. Counts per window,
+        # not a per-second rate (one call every two minutes read "0.01 req/s"), and the MEAN latency from sum/count,
+        # exact for any duration: the histogram's buckets end at 10 s, so a percentile of a 40 s inference read a
+        # constant 10 000 ms (api 0.11.130).
+        calls = selectors({"namespace": namespace, "inferenceservice": name, "http_request_method": "POST"})
+        failed = calls[:-1] + ',http_response_status_code=~"5.."}'
         knative = selectors({"k8s_namespace_name": namespace, "kn_service_name": name + "-predictor"})
+        per = f"{seconds // 60} min" if seconds % 60 == 0 else f"{seconds} s"
         q = [
             (
                 "requests",
-                "Request rate",
-                "req/s",
-                f"sum(rate(http_server_request_duration_seconds_count{service}[{w}]))",
+                f"Requests per {per}",
+                "requests",
+                f"round(sum(increase(http_server_request_duration_seconds_count{calls}[{w}]))) or vector(0)",
             ),
             (
                 "latency",
-                "Response latency · p95",
+                "Response latency · mean",
                 "ms",
-                f"histogram_quantile(0.95, sum by(le) (rate(http_server_request_duration_seconds_bucket{service}[{w}]))) * 1000",
+                f"sum(rate(http_server_request_duration_seconds_sum{calls}[{w}])) "
+                f"/ sum(rate(http_server_request_duration_seconds_count{calls}[{w}])) * 1000",
             ),
             (
                 "errors",
-                "Server errors",
-                "req/s",
-                f'sum(rate(http_server_request_duration_seconds_count{service[:-1]},http_response_status_code=~"5.."}}[{w}]))',
+                f"Server errors per {per}",
+                "requests",
+                f"round(sum(increase(http_server_request_duration_seconds_count{failed}[{w}]))) or vector(0)",
             ),
             ("replicas", "Ready replicas", "replicas", f"sum(kn_revision_pods_count{knative})"),
             ("concurrency", "Concurrent requests", "requests", f"sum(kn_revision_concurrency_stable{knative})"),
@@ -187,18 +196,12 @@ async def logs(
             },
             headers,
         )
-    lines = []
-    for stream in data.get("result", []):
-        labels = stream.get("stream") or {}
-        for timestamp, line in stream.get("values", []):
-            lines.append(
-                {
-                    "timestamp": str(timestamp),
-                    "line": line,
-                    "pod": labels.get("pod", ""),
-                    "container": labels.get("container", ""),
-                }
-            )
+    lines = [
+        {"timestamp": str(ts), "line": line, "pod": lb.get("pod", ""), "container": lb.get("container", "")}
+        for stream in data.get("result", [])
+        for lb in [stream.get("stream") or {}]
+        for ts, line in stream.get("values", [])
+    ]
     lines.sort(key=lambda line: int(line["timestamp"]), reverse=True)
     lines = lines[:limit]
     return {"region": region, "start": start, "end": stop, "lines": lines, "truncated": len(lines) == limit}

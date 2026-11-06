@@ -36,6 +36,9 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from datetime import datetime, timedelta, timezone
 
+import psycopg
+from fastapi import HTTPException
+
 import db
 from config import LITELLM_MASTER_KEY, LITELLM_URL
 
@@ -45,18 +48,17 @@ COLS = (
     "hash, alias, tenant, role, models, budget, spend, expires, blocked, preview, metadata, created_at, created_by, updated_at, "
     "scopes, max_concurrent, budget_requests, budget_gpu_seconds, spent_requests, spent_gpu_seconds, rate_limit"
 )
+_MEMBER = "operation, root, predecessor, key_hash, tenant, gpu_bound, gpu_seconds, state"
+_IMPORT_COLS = (
+    "hash, alias, tenant, role, models, budget, expires, blocked, preview, metadata, created_at, created_by, "
+    "scopes, max_concurrent, budget_requests, budget_gpu_seconds, rate_limit"
+)
+_IMPORT_VALUES = ", ".join("coalesce(%s, now())" if k == "created_at" else "%s" for k in _IMPORT_COLS.split(", "))
+_GRAPH_COLUMNS = "root, stages, deadline_at, cancelled_at, closed_at, reason, tenant, owner, sealed_at, models"
 # what a key may do; an empty list on a key means everything (keys created before scopes existed, Terraform's keys)
-SCOPES = (
-    "invoke:sync",
-    "invoke:async",
-    "run:submit",
-    "run:control",
-    "read:catalog",
-    "read:operations",
-    "read:results",
-    "read:logs",
-    "read:metrics",
-    "artifacts:write",
+SCOPES = tuple(
+    "invoke:sync invoke:async run:submit run:control read:catalog read:operations read:results read:logs read:metrics "
+    "artifacts:write".split()
 )
 HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 ALIAS_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,119}$")
@@ -102,52 +104,37 @@ def _when(s) -> datetime | None:
     return t if t.tzinfo else t.replace(tzinfo=timezone.utc)
 
 
+def _dicts(cols: str, rows) -> list[dict]:
+    """Rows as dicts named by `cols` (one select list); the numeric GPU columns as floats, None kept."""
+    names = cols.split(", ")
+    gpu = {"gpu_bound", "gpu_seconds"}
+    return [{n: float(v) if n in gpu and v is not None else v for n, v in zip(names, r)} for r in rows]
+
+
 def _info(r) -> dict:
     """A key as the API's Principal carries it: the shape LiteLLM's /key/info returned, kept so that nothing above
     auth.py changed when the keys moved into the fleet database."""
-    (
-        h,
-        alias,
-        tenant,
-        role,
-        models,
-        budget,
-        spend,
-        expires,
-        blocked,
-        prev,
-        meta,
-        created,
-        by,
-        _updated,
-        scopes,
-        max_c,
-        b_req,
-        b_gpu,
-        s_req,
-        s_gpu,
-        rate,
-    ) = r
+    k = _dicts(COLS, [r])[0]
     num = lambda x: float(x) if x is not None else None  # noqa: E731
     return {
-        "token": h,
-        "key_name": prev,
-        "key_alias": alias,
-        "max_budget": num(budget),
-        "spend": float(spend or 0),
-        "models": list(models or []),
-        "expires": _iso(expires),
-        "blocked": bool(blocked),
-        "created_at": _iso(created),
-        "created_by": by,
-        "metadata": {"tenant": tenant, "role": role, **(meta or {})},
-        "scopes": list(scopes or []),
-        "max_concurrent": max_c,
-        "budget_requests": num(b_req),
-        "budget_gpu_seconds": num(b_gpu),
-        "spent_requests": float(s_req or 0),
-        "spent_gpu_seconds": float(s_gpu or 0),
-        "rate_limit": rate,
+        "token": k["hash"],
+        "key_name": k["preview"],
+        "key_alias": k["alias"],
+        "max_budget": num(k["budget"]),
+        "spend": float(k["spend"] or 0),
+        "models": list(k["models"] or []),
+        "expires": _iso(k["expires"]),
+        "blocked": bool(k["blocked"]),
+        "created_at": _iso(k["created_at"]),
+        "created_by": k["created_by"],
+        "metadata": {"tenant": k["tenant"], "role": k["role"], **(k["metadata"] or {})},
+        "scopes": list(k["scopes"] or []),
+        "max_concurrent": k["max_concurrent"],
+        "budget_requests": num(k["budget_requests"]),
+        "budget_gpu_seconds": num(k["budget_gpu_seconds"]),
+        "spent_requests": float(k["spent_requests"] or 0),
+        "spent_gpu_seconds": float(k["spent_gpu_seconds"] or 0),
+        "rate_limit": k["rate_limit"],
     }
 
 
@@ -168,16 +155,6 @@ def list_tenant(tenant: str) -> list[dict]:
 def _expiry(days: int | None) -> datetime | None:
     """days from now; 0 = never."""
     return datetime.now(timezone.utc) + timedelta(days=days) if days else None
-
-
-def _conflict(e, alias: str):
-    import psycopg
-
-    if isinstance(e, psycopg.errors.UniqueViolation):
-        from fastapi import HTTPException
-
-        raise HTTPException(409, f"key {alias} exists") from None
-    raise e
 
 
 def create(
@@ -212,35 +189,37 @@ def create(
                         by,
                     ),
                 ).fetchone()
-        except Exception as e:  # noqa: BLE001 - a duplicate alias is the caller's 409, anything else propagates
-            _conflict(e, alias)
+        except psycopg.errors.UniqueViolation:  # a duplicate alias is the caller's 409, anything else propagates
+            raise HTTPException(409, f"key {alias} exists") from None
     i = _info(r)
     mirror_create(value, i)
     return value, i
 
 
+UNSET = object()  # "leave this field as it is" in update(): distinct from None, which is an explicit value
+
+
 def update(
     tenant: str,
     alias: str,
-    budget: float | None = None,
+    budget=UNSET,
     models: list[str] | None = None,
     expires_days: int | None = None,
+    blocked: bool | None = None,
 ) -> dict | None:
-    """Budget, allowed models, expiry (days from now; 0 = never); fields left None stay. Spend never changes here."""
-    sets, args = [], []
-    if budget is not None:
-        sets.append("budget = %s")
-        args.append(budget)
-    if models is not None:
-        sets.append("models = %s")
-        args.append(json.dumps(models))
-    if expires_days is not None:
-        sets.append("expires = %s")
-        args.append(_expiry(expires_days))
+    """Budget (a number, or None for unlimited; UNSET keeps it), allowed models, expiry (days from now; 0 = never),
+    the block flag; fields left out stay. Spend never changes here."""
+    given = (
+        ("blocked", blocked, blocked is not None),
+        ("budget", budget, budget is not UNSET),
+        ("models", json.dumps(models), models is not None),
+        ("expires", _expiry(expires_days), expires_days is not None),
+    )
+    sets = [f"{k} = %s" for k, _v, ok in given if ok]
     with db.pool().connection() as c, c.transaction():
         r = c.execute(
             f"update keys set {', '.join(sets + ['updated_at = now()'])} where tenant = %s and alias = %s returning {COLS}",
-            (*args, tenant, alias),
+            (*(v for _k, v, ok in given if ok), tenant, alias),
         ).fetchone()
     if r is None:
         return None
@@ -250,16 +229,7 @@ def update(
 
 
 def block(tenant: str, alias: str, blocked: bool = True) -> dict | None:
-    with db.pool().connection() as c, c.transaction():
-        r = c.execute(
-            f"update keys set blocked = %s, updated_at = now() where tenant = %s and alias = %s returning {COLS}",
-            (blocked, tenant, alias),
-        ).fetchone()
-    if r is None:
-        return None
-    i = _info(r)
-    mirror_update(i)
-    return i
+    return update(tenant, alias, blocked=blocked)
 
 
 def revoke(tenant: str, alias: str) -> bool:
@@ -371,10 +341,8 @@ def bootstrap(
                               returning {COLS}""",
                 (h, alias, tenant, role, json.dumps(list(models or [])), budget, preview(value), meta),
             ).fetchone()
-        if old and old[0] != h:
-            _retire(
-                c, old[0]
-            )  # the replaced value's LiteLLM record is an entry point of its own: revoked with the value
+        if old and old[0] != h:  # the replaced value's LiteLLM record is an entry point of its own: revoked with it
+            _retire(c, old[0])
         c.execute("delete from retired_mirrors where hash = %s", (h,))  # a rollback may restore a retired value
     i = _info(r)
     mirror_create(value, i)
@@ -447,15 +415,12 @@ def validate_records(records: list, tenant: str) -> tuple[list[dict], list[dict]
                 rate = None
             else:
                 rate = {"requests": int(rate["requests"]), "window_s": int(rate["window_s"])}
-        expires = created = None
-        try:
-            expires = _when(r.get("expires"))
-        except ValueError:
-            e.append("expires must be RFC 3339")
-        try:
-            created = _when(r.get("created_at"))
-        except ValueError:
-            e.append("created_at must be RFC 3339")
+        when: dict = {}
+        for field in ("expires", "created_at"):
+            try:
+                when[field] = _when(r.get(field))
+            except ValueError:
+                e.append(f"{field} must be RFC 3339")
         meta = r.get("metadata") or {}
         if not isinstance(meta, dict):
             e.append("metadata must be an object")
@@ -482,11 +447,11 @@ def validate_records(records: list, tenant: str) -> tuple[list[dict], list[dict]
                 "budget_gpu_seconds": b_gpu,
                 "max_concurrent": max_c,
                 "rate_limit": rate,
-                "expires": expires,
+                "expires": when["expires"],
                 "blocked": bool(r.get("blocked")) or bool(unknown),
                 "preview": r.get("preview"),
                 "metadata": metadata,
-                "created_at": created,
+                "created_at": when["created_at"],
                 "unknown_scopes": unknown,
             }
         )
@@ -530,23 +495,8 @@ def _stored_view(r) -> dict:
 
 
 def equivalent(stored: dict, row: dict) -> bool:
-    keys_ = (
-        "alias",
-        "tenant",
-        "role",
-        "models",
-        "scopes",
-        "budget",
-        "budget_requests",
-        "budget_gpu_seconds",
-        "max_concurrent",
-        "rate_limit",
-        "expires",
-        "blocked",
-        "preview",
-        "metadata",
-    )
-    return all(stored.get(k) == row.get(k) for k in keys_)
+    """Every imported field of the stored view (everything but the hash that found it) equals the record's."""
+    return all(stored[k] == row.get(k) for k in stored if k != "hash")
 
 
 class _DryRun(Exception):
@@ -559,19 +509,11 @@ def import_records(records: list, tenant: str, by: str | None, dry_run: bool = F
     anything else (the hash under another alias or tenant, the alias with another hash, the same key with changed
     limits, grants or principal) -> conflict, and the whole batch is refused with the list. `dry_run` reports the
     classification and writes nothing. Returns the report; raises HTTPException 400 (invalid records) or 409 (conflicts)."""
-    from fastapi import HTTPException
-
     rows, errors = validate_records(records, tenant)
     if errors:
         raise HTTPException(400, {"message": "invalid records; nothing imported", "errors": errors})
-    report = {
-        "dry_run": dry_run,
-        "inserted": [],
-        "unchanged": [],
-        "conflicts": [],
-        "blocked_for_unknown_scope": [],
-        "not_mirrored": [],
-    }
+    lists = ("inserted", "unchanged", "conflicts", "blocked_for_unknown_scope", "not_mirrored")
+    report: dict = {"dry_run": dry_run, **{k: [] for k in lists}}
     try:
         with db.pool().connection() as c, c.transaction():
             for row in rows:
@@ -580,29 +522,15 @@ def import_records(records: list, tenant: str, by: str | None, dry_run: bool = F
                     f"select {COLS} from keys where tenant = %s and alias = %s for update", (tenant, row["alias"])
                 ).fetchone()
                 if by_hash is None and by_alias is None:
+                    stored = {
+                        **row,
+                        **{k: json.dumps(row[k]) for k in ("models", "metadata", "scopes")},
+                        "rate_limit": json.dumps(row["rate_limit"]) if row["rate_limit"] else None,
+                        "created_by": f"import:{by or 'operator'}",
+                    }
                     c.execute(
-                        """insert into keys (hash, alias, tenant, role, models, budget, expires, blocked, preview, metadata, created_at, created_by,
-                                                   scopes, max_concurrent, budget_requests, budget_gpu_seconds, rate_limit)
-                                 values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, coalesce(%s, now()), %s, %s, %s, %s, %s, %s)""",
-                        (
-                            row["hash"],
-                            row["alias"],
-                            tenant,
-                            "user",
-                            json.dumps(row["models"]),
-                            row["budget"],
-                            row["expires"],
-                            row["blocked"],
-                            row["preview"],
-                            json.dumps(row["metadata"]),
-                            row["created_at"],
-                            f"import:{by or 'operator'}",
-                            json.dumps(row["scopes"]),
-                            row["max_concurrent"],
-                            row["budget_requests"],
-                            row["budget_gpu_seconds"],
-                            json.dumps(row["rate_limit"]) if row["rate_limit"] else None,
-                        ),
+                        f"insert into keys ({_IMPORT_COLS}) values ({_IMPORT_VALUES})",
+                        [stored[k] for k in _IMPORT_COLS.split(", ")],
                     )
                     report["inserted"].append(row["alias"])
                     report["not_mirrored"].append(row["alias"])  # no plaintext: LiteLLM's route cannot know this key
@@ -642,18 +570,15 @@ class KeyLimit(Exception):
         self.status, self.detail = status, detail
 
 
-def admit(h: str, operation: str, tenant: str, gpu_seconds: float = 0.0, counts_request: bool = True) -> dict:
+def admit(
+    h: str, operation: str, tenant: str, gpu_seconds: float = 0.0, counts_request: bool = True, run_member: bool = False
+) -> dict:
     """Reserve what `operation` will take from the key: one concurrency slot and (unless `counts_request` is false)
     one request against the request budget and the rate window, plus `gpu_seconds` against the GPU-second budget.
     The key row is locked, so two API replicas never admit past a limit together; a reservation that already exists
     (a replay with the same idempotency key) counts once. Raises KeyLimit(402 | 429)."""
     with _connection() as c, c.transaction():
-        k = c.execute(
-            "select max_concurrent, budget_requests, budget_gpu_seconds, spent_requests, spent_gpu_seconds, rate_limit from keys where hash = %s for update",
-            (h,),
-        ).fetchone()
-        if k is None:
-            raise KeyLimit(401, "invalid API key")
+        max_c, b_req, b_gpu, s_req, s_gpu, _blocked, _expires, rate = _locked_key(c, h, "invalid API key")
         existing = c.execute(
             "select key_hash, tenant from key_reservations where operation = %s", (operation,)
         ).fetchone()
@@ -661,38 +586,71 @@ def admit(h: str, operation: str, tenant: str, gpu_seconds: float = 0.0, counts_
             raise KeyLimit(409, "operation is reserved by another key")
         if existing:
             return {"operation": operation, "replay": True}
-        max_c, b_req, b_gpu, s_req, s_gpu, rate = k
-        active, r_req, r_gpu = c.execute(
-            "select count(*), coalesce(sum(requests), 0), coalesce(sum(gpu_seconds), 0) from key_reservations where key_hash = %s",
-            (h,),
-        ).fetchone()
-        if max_c is not None and active >= max_c:
-            raise KeyLimit(429, f"key concurrency limit reached ({active}/{max_c} operations in flight)")
+        active, r_req, r_gpu = _reserved(c, h)
+        r_gpu += _unknown_gpu(c, h)  # attempts that ran without a trustworthy measurement keep their bound
+        _concurrency(active, max_c)
         req = 1 if counts_request else 0
-        if b_req is not None and req and float(s_req) + float(r_req) + req > float(b_req):
+        if b_req is not None and req and float(s_req) + r_req + req > float(b_req):
             raise KeyLimit(402, "key request budget exhausted")
-        if b_gpu is not None and float(s_gpu) + float(r_gpu) + gpu_seconds > float(b_gpu):
+        if b_gpu is not None and float(s_gpu) + r_gpu + gpu_seconds > float(b_gpu):
             raise KeyLimit(
                 402,
-                f"key GPU-second budget exhausted ({max(0.0, float(b_gpu) - float(s_gpu) - float(r_gpu)):.0f} s left, {gpu_seconds:.0f} s needed)",
+                f"key GPU-second budget exhausted ({max(0.0, float(b_gpu) - float(s_gpu) - r_gpu):.0f} s left, {gpu_seconds:.0f} s needed)",
             )
         if rate and req:
-            n = c.execute(
-                "select count(*) from key_calls where key_hash = %s and at > now() - make_interval(secs => %s)",
-                (h, rate["window_s"]),
-            ).fetchone()[0]
-            if n >= rate["requests"]:
-                raise KeyLimit(429, f"key rate limit reached ({rate['requests']} requests per {rate['window_s']} s)")
+            _rate_call(c, h, rate)
             c.execute(
                 "delete from key_calls where key_hash = %s and at <= now() - make_interval(secs => %s)",
                 (h, rate["window_s"]),
             )
-            c.execute("insert into key_calls (key_hash) values (%s)", (h,))
         c.execute(
             "insert into key_reservations (operation, key_hash, tenant, gpu_seconds, requests) values (%s, %s, %s, %s, %s)",
             (operation, h, tenant, gpu_seconds, req),
         )
-        return {"operation": operation, "replay": False, "active": int(active) + 1}
+        if run_member:
+            # the root of a logical run (docs/API.md "Keys"): its continuations join this reservation as members
+            c.execute(
+                "insert into key_run_members (operation, root, predecessor, key_hash, tenant, gpu_bound) values (%s, %s, null, %s, %s, %s) on conflict do nothing",
+                (operation, operation, h, tenant, gpu_seconds),
+            )
+        return {"operation": operation, "replay": False, "active": active + 1}
+
+
+_LIMITS = "max_concurrent, budget_requests, budget_gpu_seconds, spent_requests, spent_gpu_seconds, blocked, expires, rate_limit"
+
+
+def _locked_key(c, h: str, gone: str) -> tuple:
+    """The key's limits (`_LIMITS`), its row locked for the transaction: two API replicas never admit past a limit
+    together. KeyLimit(401, `gone`) when the key no longer exists."""
+    k = c.execute(f"select {_LIMITS} from keys where hash = %s for update", (h,)).fetchone()
+    if k is None:
+        raise KeyLimit(401, gone)
+    return k
+
+
+def _reserved(c, h: str) -> tuple[int, float, float]:
+    """(operations in flight, requests, GPU seconds) the key's live reservations hold."""
+    active, req, gpu = c.execute(
+        "select count(*), coalesce(sum(requests), 0), coalesce(sum(gpu_seconds), 0) from key_reservations where key_hash = %s",
+        (h,),
+    ).fetchone()
+    return int(active), float(req), float(gpu)
+
+
+def _concurrency(active: int, max_c) -> None:
+    if max_c is not None and active >= max_c:
+        raise KeyLimit(429, f"key concurrency limit reached ({active}/{max_c} operations in flight)")
+
+
+def _rate_call(c, h: str, rate: dict) -> None:
+    """One request of the key against its rate window ({requests, window_s}); KeyLimit(429) when the window is full."""
+    n = c.execute(
+        "select count(*) from key_calls where key_hash = %s and at > now() - make_interval(secs => %s)",
+        (h, rate["window_s"]),
+    ).fetchone()[0]
+    if n >= rate["requests"]:
+        raise KeyLimit(429, f"key rate limit reached ({rate['requests']} requests per {rate['window_s']} s)")
+    c.execute("insert into key_calls (key_hash) values (%s)", (h,))
 
 
 def abandon(operation: str, h: str) -> bool:
@@ -749,18 +707,452 @@ def operation_owner(operation: str) -> tuple[str, str, str] | None:
 
 def release(operation: str, gpu_seconds: float | None = None) -> bool:
     """The operation is done: its slot goes, its request count and the measured GPU seconds (`gpu_seconds`; None =
-    nothing measured: a cancelled, failed-at-admission or CPU-only attempt) become spent. Idempotent."""
-    with db.pool().connection() as c, c.transaction():
-        r = c.execute(
-            "delete from key_reservations where operation = %s returning key_hash, requests", (operation,)
-        ).fetchone()
-        if r is None:
-            return False
+    nothing measured: a cancelled, failed-at-admission or CPU-only attempt) become spent. Idempotent. A member of a
+    logical run settles through the run's ledger (settle_run_member): its root's slot goes only with the run."""
+    with _connection() as c, c.transaction():
+        if c.execute("select 1 from key_run_members where operation = %s", (operation,)).fetchone():
+            return bool(settle_run_member(operation, gpu_seconds).get("settled"))
+        return _spend_reservation(c, operation, gpu_seconds)
+
+
+def _spend_reservation(c, operation: str, gpu_seconds: float | None = None) -> bool:
+    """The reservation's slot goes; its request count and `gpu_seconds` become the key's spend. False when there was
+    no reservation (released already)."""
+    r = c.execute(
+        "delete from key_reservations where operation = %s returning key_hash, requests", (operation,)
+    ).fetchone()
+    if r is None:
+        return False
+    c.execute(
+        "update keys set spent_requests = spent_requests + %s, spent_gpu_seconds = spent_gpu_seconds + %s, updated_at = now() where hash = %s",
+        (r[1], float(gpu_seconds or 0), r[0]),
+    )
+    return True
+
+
+def _settle_member(c, operation: str, h: str, gpu_seconds: float) -> None:
+    """The member is settled at the measured `gpu_seconds`, which become the key's spend."""
+    c.execute(
+        "update key_run_members set state = 'settled', gpu_seconds = %s, settled_at = now() where operation = %s",
+        (float(gpu_seconds), operation),
+    )
+    c.execute(
+        "update keys set spent_gpu_seconds = spent_gpu_seconds + %s, updated_at = now() where hash = %s",
+        (float(gpu_seconds), h),
+    )
+
+
+# ---- the ledger of a logical run: one reservation per root, members per continuation (docs/API.md "Keys") ------
+def _unknown_gpu(c, h: str) -> float:
+    return float(
         c.execute(
-            "update keys set spent_requests = spent_requests + %s, spent_gpu_seconds = spent_gpu_seconds + %s, updated_at = now() where hash = %s",
-            (r[1], float(gpu_seconds or 0), r[0]),
+            "select coalesce(sum(gpu_bound), 0) from key_run_members where key_hash = %s and state = 'unknown'", (h,)
+        ).fetchone()[0]
+    )
+
+
+def _one(cols: str, source: str, params: tuple) -> dict | None:
+    """The first row of `select <cols> from <source>` as a dict (`_dicts`), None when there is none."""
+    with _connection() as c:
+        rows = c.execute(f"select {cols} from {source}", params).fetchall()
+    return next(iter(_dicts(cols, rows)), None)
+
+
+def run_member(operation: str) -> dict | None:
+    return _one(_MEMBER, "key_run_members where operation = %s", (operation,))
+
+
+def admitting_key_hashes(operations: set[str]) -> dict[str, set[str]]:
+    """Read existing admission provenance in one query, without inventing attribution.
+
+    Callers must first authorize each operation's tenant/owner/model. Sets deliberately
+    preserve conflicting evidence; no row (including when the DB is disabled) is unknown,
+    not proof that another key created the operation. Never serialize these hashes.
+    """
+    if not operations or not db.enabled():
+        return {}
+    names = sorted(operations)
+    with _connection() as c:
+        rows = c.execute(
+            "select operation, key_hash from key_run_members where operation = any(%s) "
+            "union all select operation, key_hash from key_reservations where operation = any(%s)",
+            (names, names),
+        ).fetchall()
+    result: dict[str, set[str]] = {}
+    for operation, fingerprint in rows:
+        result.setdefault(operation, set()).add(fingerprint)
+    return result
+
+
+def reservation_key(operation: str) -> str | None:
+    """The key hash holding a live reservation for `operation` (its slot: admitted, not released); None otherwise. The
+    gateway hook's proof that an admitted operation is active. A MEMBER of a run (a continuation, a stage, an endpoint
+    child) holds no row of its own: use `reservation_key_of`."""
+    with _connection() as c:
+        r = c.execute("select key_hash from key_reservations where operation = %s", (operation,)).fetchone()
+    return r[0] if r else None
+
+
+def reservation_key_of(operation: str) -> str | None:
+    """The key (hash) an operation is admitted on, resolved through the durable run ledger: its own reservation, or,
+    for an ACTIVE member of a run (a continuation, a stage, an endpoint child: `key_run_members`), its root's live
+    reservation. None when nothing live holds it: no reservation and no member, a member that is settled, unknown or
+    rolled back (a settled child never borrows its root's live slot), or a root whose reservation is released. The
+    one proof every native-execution fence uses (the gateway's admission, the worker's attach)."""
+    h = reservation_key(operation)
+    if h:
+        return h
+    member = member_of(operation)
+    if not member or member.get("state") not in (None, "active") or not member.get("root"):
+        return None
+    return reservation_key(member["root"])
+
+
+def run_members(root: str) -> list[dict]:
+    """The members of a run, oldest first (empty: no ledger for this root)."""
+    cols = "operation, predecessor, gpu_bound, gpu_seconds, state, kind, stage, note"
+    with _connection() as c:
+        rows = c.execute(
+            f"select {cols} from key_run_members where root = %s order by created_at, operation", (root,)
+        ).fetchall()
+    return _dicts(cols, rows)
+
+
+# ---- stage graphs (docs/JOBS.md "Stage composition") ----------------------------------------------------------
+def declare_graph(
+    root: str, tenant: str, owner: str, stages: dict, deadline_at=None, models: dict | None = None
+) -> None:
+    """Seal the stages of a root at its submission (idempotent for a replay of the same root); `models` binds declared
+    stages to the model they will run on (docs/JOBS.md "Delegated stages")."""
+    with _connection() as c, c.transaction():
+        c.execute(
+            "insert into run_graphs (root, tenant, owner, stages, deadline_at, models) values (%s, %s, %s, %s, %s, %s) on conflict (root) do nothing",
+            (root, tenant, owner, json.dumps(stages), deadline_at, json.dumps(models or {})),
         )
+
+
+def _graphs(rows) -> list[dict]:
+    return [{**g, "models": g["models"] or {}} for g in _dicts(_GRAPH_COLUMNS, rows)]
+
+
+def graph_of(root: str) -> dict | None:
+    g = _one(_GRAPH_COLUMNS, "run_graphs where root = %s", (root,))
+    return {**g, "models": g["models"] or {}} if g else None
+
+
+def open_graphs() -> list[dict]:
+    """The graphs still waiting for a stage (neither cancelled nor closed), oldest first."""
+    with _connection() as c:
+        rows = c.execute(
+            f"select {_GRAPH_COLUMNS} from run_graphs where cancelled_at is null and closed_at is null order by sealed_at"
+        ).fetchall()
+    return _graphs(rows)
+
+
+def cancel_graph(root: str, reason: str) -> bool:
+    """The root was cancelled, or its graph can never complete (deadline, root failed): no stage attaches or is
+    admitted any more; the run closes once nothing is active. Idempotent (the first reason stands)."""
+    with _connection() as c, c.transaction():
+        c.execute("select pg_advisory_xact_lock(hashtextextended(%s, 2))", (root,))
+        r = c.execute(
+            "update run_graphs set cancelled_at = coalesce(cancelled_at, now()), reason = coalesce(reason, %s) where root = %s returning root",
+            (reason, root),
+        ).fetchone()
+        if r is not None:
+            _close_run_if_idle(c, root)
+        return r is not None
+
+
+def note_member(operation: str, note: str) -> None:
+    """Why a member ended the way it did (a stage cancelled for a failed dependency), for the root's graph view."""
+    with _connection() as c, c.transaction():
+        c.execute("update key_run_members set note = %s where operation = %s", (note, operation))
+
+
+def _lineage_head(c, root: str, kind: str, stage: str | None) -> str | None:
+    r = c.execute(
+        "select operation from key_run_members where root = %s and kind = %s and stage is not distinct from %s "
+        "order by created_at desc, operation desc limit 1",
+        (root, kind, stage),
+    ).fetchone()
+    return r[0] if r else None
+
+
+def _head(root: str, kind: str, stage: str | None = None) -> str | None:
+    """The newest member of one lineage of the run `root` (docs/API.md "Keys"): the root's own (`continuation`: the root
+    and its resumes/exports/recoveries), one declared stage's (`stage`: the stage's operation and its continuations) or
+    one endpoint child's (`child`: the child and its transfer-only export retries); None when the run has no ledger
+    (an unbounded key admitted before the ledger existed, or no database) or the lineage has no member yet."""
+    with _connection() as c:
+        return _lineage_head(c, root, kind, stage)
+
+
+def run_head(root: str) -> str | None:
+    return _head(root, "continuation")
+
+
+def child_head(root: str, unit: str) -> str | None:
+    return _head(root, "child", unit)
+
+
+def stage_head(root: str, stage: str) -> str | None:
+    return _head(root, "stage", stage)
+
+
+def member_of(operation: str) -> dict | None:
+    """The ledger row of an operation: its root, kind (`continuation` | `stage` | `child`), stage (the unit for a
+    child) and state; None when it is no member (no ledger)."""
+    return _one(
+        "root, kind, stage, state, predecessor, created_at", "key_run_members where operation = %s", (operation,)
+    )
+
+
+def prepare_run_member(
+    root: str,
+    operation: str,
+    predecessor: str | None,
+    gpus: int,
+    timeout_s: int | None,
+    transfer_only: bool = False,
+    kind: str = "continuation",
+    stage: str | None = None,
+) -> dict:
+    """Admit a continuation of the run `root` (resume, export retry, finalizer, fallback, recovery) as member
+    `operation` on the root's original key, before its Job exists: the key must still be valid (not blocked, not
+    expired); `predecessor` must be the run's current head (one chain, one head; a transfer-only member may follow a
+    terminal head); the member's GPU bound (gpus x timeout for a key with a GPU-second budget, else 0) must fit the
+    budget next to everything reserved and unknown; the root's slot is reused while the run is open and re-acquired
+    (concurrency re-checked, no second request, no rate call) when the run had closed. Idempotent for the same
+    member. Raises KeyLimit(400 | 401 | 402 | 403 | 409 | 429)."""
+    with _connection() as c, c.transaction():
+        c.execute("select pg_advisory_xact_lock(hashtextextended(%s, 2))", (root,))
+        own = c.execute(
+            "select key_hash, tenant from key_run_members where operation = %s and root = %s", (root, root)
+        ).fetchone()
+        if own is None:
+            raise KeyLimit(409, f"run {root} has no reservation ledger; it cannot be continued on a bounded key")
+        h, tenant = own
+        if c.execute("select 1 from key_run_members where operation = %s", (operation,)).fetchone():
+            return {"operation": operation, "replay": True}
+        max_c, b_req, b_gpu, s_req, s_gpu, blocked, expires, rate = _locked_key(c, h, "the run's key no longer exists")
+        if blocked:
+            raise KeyLimit(403, "the run's key is blocked")
+        if expires is not None and expires < datetime.now(timezone.utc):
+            raise KeyLimit(401, "the run's key has expired")
+        active, r_req, reserved = _reserved(c, h)
+        if kind == "stage":
+            # a declared stage of the root's graph (docs/JOBS.md "Stage composition"), or a continuation of one: each
+            # stage is its own lineage inside the root's run (one head per stage; siblings coexist; the stage's
+            # resume/export/recovery members follow that stage's head); the graph must exist and name the stage; a
+            # cancelled graph admits nothing, a closed one no new stage (continuations of its stages still run)
+            g = c.execute(
+                "select stages, cancelled_at, closed_at from run_graphs where root = %s for update", (root,)
+            ).fetchone()
+            if g is None:
+                raise KeyLimit(409, f"run {root} declared no stage graph")
+            if stage not in (g[0] or {}):
+                raise KeyLimit(400, f"stage {stage!r} is not declared by {root} ({sorted(g[0] or {})})")
+            if g[1] is not None:
+                raise KeyLimit(409, f"the graph of {root} is cancelled; no stage attaches to it")
+            head = _lineage_head(c, root, "stage", stage)
+            if predecessor is None:
+                if head is not None:
+                    raise KeyLimit(409, f"stage {stage!r} of {root} already has an operation ({head})")
+                if g[2] is not None:
+                    raise KeyLimit(409, f"the graph of {root} is closed; no stage attaches to it")
+            elif predecessor != head:
+                raise KeyLimit(
+                    409, f"only the current head of stage {stage!r} may be continued ({head}, not {predecessor})"
+                )
+        elif kind == "child" and predecessor is not None:
+            # a continuation of an endpoint child (its transfer-only export retry, docs/JOBS.md "Endpoint children"):
+            # the child's own lineage inside the root's run (one head per unit), no second request (nothing is
+            # inferred again), the slot re-acquired like any continuation when the run had closed
+            head = _lineage_head(c, root, "child", stage)
+            if predecessor != head:
+                raise KeyLimit(
+                    409, f"only the current head of child unit {stage!r} may be continued ({head}, not {predecessor})"
+                )
+        elif kind == "child":
+            # an endpoint child of an active run (docs/JOBS.md "Endpoint children"): attaches to an OPEN root only (the
+            # root's reservation still exists: nothing settled it), never to a head; counts one request against the
+            # key's request budget and rate window (one inference each)
+            if c.execute("select 1 from key_reservations where operation = %s", (root,)).fetchone() is None:
+                raise KeyLimit(409, f"run {root} is closed (its reservation is settled); no child attaches to it")
+            if b_req is not None and float(s_req) + r_req + 1 > float(b_req):
+                raise KeyLimit(402, "key request budget exhausted for the child")
+            if rate and isinstance(rate, dict):
+                _rate_call(c, h, rate)
+            c.execute("update key_reservations set requests = requests + 1 where operation = %s", (root,))
+        else:
+            head = _lineage_head(c, root, "continuation", None)
+            if predecessor != head:
+                raise KeyLimit(409, f"only the current run head may be continued ({head}, not {predecessor})")
+        bound = 0.0
+        if b_gpu is not None and gpus > 0 and not transfer_only:
+            if not timeout_s:
+                raise KeyLimit(400, "this key has a GPU-second budget: the continuation needs a bounded timeout")
+            bound = float(gpus * int(timeout_s))
+        if b_gpu is not None and bound and float(s_gpu) + reserved + _unknown_gpu(c, h) + bound > float(b_gpu):
+            raise KeyLimit(402, "key GPU-second budget exhausted for the continuation")
+        res = c.execute("select gpu_seconds from key_reservations where operation = %s for update", (root,)).fetchone()
+        if res is None:  # the run had closed (every member settled): the continuation re-acquires the slot
+            _concurrency(active, max_c)
+            c.execute(
+                "insert into key_reservations (operation, key_hash, tenant, gpu_seconds, requests) values (%s, %s, %s, %s, 0)",
+                (root, h, tenant, bound),
+            )
+        else:
+            c.execute("update key_reservations set gpu_seconds = gpu_seconds + %s where operation = %s", (bound, root))
+        c.execute(
+            "insert into key_run_members (operation, root, predecessor, key_hash, tenant, gpu_bound, kind, stage) values (%s, %s, %s, %s, %s, %s, %s, %s)",
+            (operation, root, predecessor, h, tenant, bound, kind, stage),
+        )
+        return {"operation": operation, "replay": False, "gpu_bound": bound, "key_hash": h}
+
+
+def _close_run_if_idle(c, root: str) -> bool:
+    """No active member left, and every stage the root declared has a settled member (a graph keeps its slot and
+    request until all declared stages settled or the graph was cancelled, docs/JOBS.md "Stage composition"): the
+    run's slot goes and its request count is spent. Returns whether it closed now."""
+    if c.execute("select 1 from key_run_members where root = %s and state = 'active' limit 1", (root,)).fetchone():
+        return False
+    g = c.execute("select stages, cancelled_at from run_graphs where root = %s", (root,)).fetchone()
+    if g and g[1] is None:
+        settled = {
+            r[0]
+            for r in c.execute(
+                "select stage from key_run_members where root = %s and kind = 'stage' and state <> 'active'", (root,)
+            ).fetchall()
+        }
+        if not set(g[0] or {}) <= settled:
+            return False
+    if g:
+        c.execute("update run_graphs set closed_at = coalesce(closed_at, now()) where root = %s", (root,))
+    return _spend_reservation(c, root)
+
+
+def settle_run_member(operation: str, gpu_seconds: float | None) -> dict:
+    """A member's attempt is over: `gpu_seconds` measured (spent; its bound leaves the reservation) or None (nothing
+    trustworthy was measured: the member is `unknown` and its bound stays counted against the budget, outside the
+    slot). The run's slot closes when no member is active. Idempotent."""
+    with _connection() as c, c.transaction():
+        m = c.execute(
+            "select root, key_hash, gpu_bound, state from key_run_members where operation = %s for update", (operation,)
+        ).fetchone()
+        if m is None:
+            return {"settled": False, "reason": "no member"}
+        root, h, bound, state = m
+        c.execute("select pg_advisory_xact_lock(hashtextextended(%s, 2))", (root,))
+        if state != "active":
+            return {"settled": False, "state": state, "closed": _close_run_if_idle(c, root)}
+        if gpu_seconds is None:
+            c.execute(
+                "update key_run_members set state = 'unknown', settled_at = now() where operation = %s", (operation,)
+            )
+        else:
+            _settle_member(c, operation, h, gpu_seconds)
+        c.execute(
+            "update key_reservations set gpu_seconds = greatest(gpu_seconds - %s, 0) where operation = %s",
+            (bound, root),
+        )
+        return {
+            "settled": True,
+            "state": "unknown" if gpu_seconds is None else "settled",
+            "closed": _close_run_if_idle(c, root),
+        }
+
+
+def settle_unknown(operation: str, gpu_seconds: float) -> bool:
+    """An operator's later measurement of an `unknown` member (a lost worker's attempt): it becomes spend. False
+    when the member is not unknown."""
+    with _connection() as c, c.transaction():
+        m = c.execute(
+            "select key_hash from key_run_members where operation = %s and state = 'unknown' for update", (operation,)
+        ).fetchone()
+        if m is None:
+            return False
+        _settle_member(c, operation, m[0], gpu_seconds)
         return True
+
+
+def rollback_run_member(operation: str) -> bool:
+    """The continuation's (or endpoint child's) Job was never created (a confirmed absence after a failed create): the
+    member goes and its bound leaves the reservation (a child's request too); the run closes when nothing else is
+    active. Never for a member whose Job may exist."""
+    with _connection() as c, c.transaction():
+        m = c.execute(
+            "select root, gpu_bound, kind from key_run_members where operation = %s and state = 'active' and (predecessor is not null or kind = 'child') for update",
+            (operation,),
+        ).fetchone()
+        if m is None:
+            return False
+        root, bound, kind = m
+        c.execute("select pg_advisory_xact_lock(hashtextextended(%s, 2))", (root,))
+        c.execute("delete from key_run_members where operation = %s", (operation,))
+        c.execute(
+            "update key_reservations set gpu_seconds = greatest(gpu_seconds - %s, 0) where operation = %s",
+            (bound, root),
+        )
+        if kind == "child":  # the child's one request was counted on the root's reservation at its preparation
+            c.execute("update key_reservations set requests = greatest(requests - 1, 0) where operation = %s", (root,))
+        _close_run_if_idle(c, root)
+        return True
+
+
+def tenants_on_record() -> dict[str, dict]:
+    """Every tenant the keys table knows (docs/API.md "Fleet operators"): key counts by role and blocked state, and
+    the tenant's spend (USD) summed over its keys. The platform's own keys (the router, fleet operators) are not a
+    tenant and are left out."""
+    with _connection() as c:
+        rows = c.execute(
+            "select tenant, role, blocked, count(*), coalesce(sum(spend), 0) from keys where tenant <> %s "
+            "group by tenant, role, blocked order by tenant",
+            (ROUTER["tenant"],),
+        ).fetchall()
+    out: dict[str, dict] = {}
+    for tenant, role, blocked, n, spend in rows:
+        t = out.setdefault(tenant, {"keys": 0, "blocked": 0, "admins": 0, "spend": 0.0})
+        t["keys"] += int(n)
+        t["spend"] += float(spend)
+        if blocked:
+            t["blocked"] += int(n)
+        if role == "admin":
+            t["admins"] += int(n)
+    return out
+
+
+def tenant_usage(tenant: str) -> dict:
+    """What a tenant's keys hold right now beyond their spend (the per-key `run_usage`, summed): operations in
+    flight, GPU seconds reserved by active work, GPU seconds of attempts that ended without a trustworthy
+    measurement (kept against the budgets)."""
+    with _connection() as c:
+        active, reserved = c.execute(
+            "select count(*), coalesce(sum(r.gpu_seconds), 0) from key_reservations r join keys k on k.hash = r.key_hash "
+            "where k.tenant = %s",
+            (tenant,),
+        ).fetchone()
+        unknown = c.execute(
+            "select coalesce(sum(m.gpu_bound), 0) from key_run_members m join keys k on k.hash = m.key_hash "
+            "where k.tenant = %s and m.state = 'unknown'",
+            (tenant,),
+        ).fetchone()[0]
+    return {
+        "active_operations": int(active),
+        "reserved_gpu_seconds": float(reserved),
+        "unknown_gpu_seconds": float(unknown),
+    }
+
+
+def run_usage(h: str) -> dict:
+    """What a key holds beyond its spend: reserved GPU seconds (bounds of active work), unknown GPU seconds (attempts
+    without a trustworthy measurement) and the operations in flight."""
+    with _connection() as c:
+        active, reserved = c.execute(
+            "select count(*), coalesce(sum(gpu_seconds), 0) from key_reservations where key_hash = %s", (h,)
+        ).fetchone()
+        unknown = _unknown_gpu(c, h)
+    return {"active_operations": int(active), "reserved_gpu_seconds": float(reserved), "unknown_gpu_seconds": unknown}
 
 
 def stale_reservations(older_than_s: int) -> list[tuple[str, str]]:
@@ -776,12 +1168,8 @@ def stale_reservations(older_than_s: int) -> list[tuple[str, str]]:
 
 
 # ---- the LiteLLM mirror (best effort; the fleet database is the source of truth) ----------------------
-def _litellm(method: str, path: str, body: dict) -> int:
-    """Status code of a LiteLLM admin call, 0 when LiteLLM is unreachable; never raises."""
-    return _litellm_call(method, path, body)[0]
-
-
 def _litellm_call(method: str, path: str, body: dict) -> tuple[int, str]:
+    """(status code, body) of a LiteLLM admin call, (0, "") when LiteLLM is unreachable; never raises."""
     if not LITELLM_MASTER_KEY:
         return 0, ""
     import httpx
@@ -809,16 +1197,13 @@ def _mirror_body(i: dict) -> dict:
 
 def mirror_create(value: str, i: dict) -> None:
     """LiteLLM accepts a provided key value: the same key works on its OpenAI route."""
-    code = _litellm("POST", "/key/generate", {"key": value, "key_alias": i["key_alias"], **_mirror_body(i)})
+    code, _ = _litellm_call("POST", "/key/generate", {"key": value, "key_alias": i["key_alias"], **_mirror_body(i)})
     if code == 400:  # exists already (a re-run of the bootstrap, a restored database): bring it in line
         mirror_update(i)
 
 
 def mirror_update(i: dict) -> None:
-    body = _mirror_body(i)
-    if "duration" not in body:
-        body["duration"] = None
-    _litellm("POST", "/key/update", {"key": i["token"], **body})
+    _litellm_call("POST", "/key/update", {"key": i["token"], "duration": None, **_mirror_body(i)})
 
 
 def mirror_delete(h: str) -> bool:
@@ -849,19 +1234,7 @@ if __name__ == "__main__":
             time.sleep(10)
     else:
         sys.exit("database unavailable")
-    i = bootstrap(
-        value,
-        spec["alias"],
-        spec["tenant"],
-        spec.get("role") or "user",
-        spec.get("budget"),
-        spec.get("models"),
-        spec.get("routes"),
-    )
-    log.info(
-        "key %s of tenant %s ready (role %s, budget %s)",
-        i["key_alias"],
-        spec["tenant"],
-        i["metadata"]["role"],
-        i["max_budget"],
-    )
+    role, *rest = (spec.get(k) for k in ("role", "budget", "models", "routes"))
+    i = bootstrap(value, spec["alias"], spec["tenant"], role or "user", *rest)
+    role, budget = i["metadata"]["role"], i["max_budget"]
+    log.info("key %s of tenant %s ready (role %s, budget %s)", i["key_alias"], spec["tenant"], role, budget)

@@ -9,7 +9,9 @@ A model definition ("spec") is the shape of the console form:
      "port": 8000, "protocol": "openai" | "http" | "websocket" | "grpc", "path": "/v1/chat/completions",
      "health_path": "/health", "served_model": "llm",
      "gpu": {"count": 1, "classes": ["h100", "l40s"]},       # preferred class first; pools of these classes
-     "resources": {"cpu": "8", "memory": "32Gi"}, "scaling": {"min": 0, "max": 2, "target": 4},
+     "resources": {"cpu": "8", "memory": "64Gi", "cpu_limit": "24", "memory_limit": "128Gi",   # requests; limits optional
+                   "ephemeral_storage": "4Gi", "ephemeral_storage_limit": "16Gi"},              # (= requests unless given)
+     "scaling": {"min": 0, "max": 2, "target": 4},
      "timeout_s": 600, "shm_gib": 4, "pull_secret": "ngc",
      "weights": {"path": "my-llm", "mount_path": "/weights", "env": {"HF_HOME": "/weights"}},
      "regions": ["eu-north1"],                                 # default: every region with a pool of a class
@@ -38,9 +40,12 @@ on spot; each variant is its own Knative service `<id>-<variant>`, the first kee
 ({field, map, default}: a request field picks a variant, else the first ready one in priority order). LiteLLM's
 model group lists every variant of every cluster as a deployment with its priority (`order`).
 
-`to_entry` turns a spec into the catalog entry the rest of the API and the endpoint renderer
-(services/api/render_endpoint.py) understand (catalog/README.md); the entry is stored next to the spec in the fleet
-database (`models` table, services/api/db.py). Entries that come from files (the bundled classes) are read-only here.
+`definition` turns a spec into the one shape every reader holds: the validated spec (flat, and under `spec` as the
+API echoes it), the catalog's derived fields (k8s_name, display_name, served_model, gpu, regions, endpoint_host, ...)
+and `deployments`, the placement resolved against the fleet (pool, class image and variants per cluster). The fleet
+database stores the spec and that placement (`models` table, services/api/db.py); the endpoint renderer
+(services/api/render_endpoint.py) reads the definition. Run classes keep the catalog's `job` block (catalog/README.md),
+the shape the bundled classes are written in and jobs.py renders.
 """
 
 import json
@@ -53,6 +58,7 @@ from fastapi import HTTPException
 from kubernetes.client.rest import ApiException
 from pydantic import ValidationError
 
+import config
 import db
 import kube
 import render_endpoint
@@ -60,6 +66,7 @@ from config import (
     ENDPOINT_DOMAIN,
     ENDPOINT_DOMAINS,
     GATEWAY_NAMESPACE,
+    HUB_REGION,
     IMAGES_HOST,
     IMAGES_SOURCE,
     INFINIBAND_CLAIM_TEMPLATE,
@@ -74,6 +81,7 @@ from config import (
     ROUTER_KEY,
 )
 from pod_metadata import normalise as normalise_pod_metadata
+from render_endpoint import command, gpu_count
 from resilience import retry
 from schemas import EphemeralVolumeSpec
 from schemas import ScalingSpec as ScalingSpec
@@ -87,7 +95,6 @@ FIELD_MANAGER = "serverless2-api"
 ID_RE = re.compile(r"^[a-z][a-z0-9-]{1,40}$")
 PROTOCOLS = ("http", "openai", "websocket", "grpc")
 PROTOCOL_PATH = {"openai": "/v1/chat/completions", "http": "/", "websocket": "/", "grpc": "/"}
-RESERVED = ("images", "routing")  # carried on the entry as given (validated below)
 VARIANT_RE = re.compile(r"^[a-z][a-z0-9-]{0,20}$")
 MAX_VARIANTS = 8
 DATA_PATH_RE = re.compile(
@@ -166,14 +173,50 @@ def normalise_image(ref: str) -> str:
     return f"{IMAGES_HOST}/{alias}/{path}" if alias else ref
 
 
-def _command(v):
-    if v is None or v == "" or v == []:
-        return None
-    return ["/bin/sh", "-c", v] if isinstance(v, str) else list(v)
+KNATIVE_RESERVED_ENV = ("PORT", "K_SERVICE", "K_CONFIGURATION", "K_REVISION")
 
 
-def _env_list(env: dict | None) -> list[dict]:
-    return [{"name": k, "value": str(v)} for k, v in (env or {}).items()]
+def _endpoint_timeout(s: dict) -> None:
+    """An endpoint's `timeout_s` is its Knative revision timeout: above the fleet's max-revision-timeout-seconds the
+    definition would store and register but its InferenceService would never reconcile (ReconcileFailed on every
+    region). Refused at registration with the knob that raises the ceiling."""
+    t = s.get("timeout_s", 600)
+    if not isinstance(t, int) or isinstance(t, bool) or t < 1:
+        raise HTTPException(400, "timeout_s: a positive integer (seconds)")
+    limit = int(config.KNATIVE_MAX_REVISION_TIMEOUT_S)
+    if t > limit:
+        raise HTTPException(
+            400,
+            f"timeout_s {t} exceeds this fleet's Knative max-revision-timeout-seconds ({limit}); an endpoint above it registers "
+            f"but never reconciles. Raise fleet.knative.max_revision_timeout_s (stack tfvars: the platform chart sets Knative "
+            f"and the API from that one value) to at least {t}, or lower timeout_s",
+        )
+
+
+def _reserved_env(s: dict) -> None:
+    """Knative Serving reserves PORT (it injects the serving port) and K_SERVICE/K_CONFIGURATION/K_REVISION in a
+    revision's containers: a definition that sets them stores but its InferenceService never reconciles. Refused at
+    registration (endpoints only; run classes are plain Jobs and keep their env as declared)."""
+    places = {
+        "env": s.get("env") or {},
+        "env_field_refs": s.get("env_field_refs") or {},
+        "weights.env": ((s.get("weights") or {}).get("env") or {}) if isinstance(s.get("weights"), dict) else {},
+    }
+    for where, env in places.items():
+        if not isinstance(env, dict):
+            continue
+        bad = sorted(k for k in env if str(k).upper() in KNATIVE_RESERVED_ENV)
+        if bad:
+            hint = (
+                " (Knative injects the serving port into PORT: declare `port` and read PORT at runtime)"
+                if "PORT" in [b.upper() for b in bad]
+                else ""
+            )
+            raise HTTPException(
+                400,
+                f"{where}: {', '.join(bad)} reserved by Knative Serving ({', '.join(KNATIVE_RESERVED_ENV)}); an endpoint "
+                f"setting it registers but never reconciles{hint}",
+            )
 
 
 def cluster_id() -> str:
@@ -247,7 +290,10 @@ def pool_for(cid: str, classes: list[str], count: int = 1, nodes: int = 1, inter
     return None
 
 
-def validate(spec: dict) -> dict:
+def validate(spec: dict, fleet: bool = True) -> dict:
+    """The spec of docs/API.md "Models", checked and completed (kind, the scaling policy, canonical mounts and
+    variant names). `fleet`: also the checks against the fleet and its limits of the moment (GPU classes and pools
+    exist, the Knative timeout and node bounds): at registration; a stored definition is loaded without them."""
     s = dict(spec or {})
     _endpoint_bindings(s)
     if "pod_metadata" in s:
@@ -283,11 +329,12 @@ def validate(spec: dict) -> dict:
             raise HTTPException(
                 400, "weights (jobs): {path (a directory of the region's shared weights, no '..'), mount_path}"
             )
-    if "automount_service_account_token" in s:
-        if kind != "endpoint" or not isinstance(s["automount_service_account_token"], bool):
-            raise HTTPException(
-                400, "automount_service_account_token: an endpoint-only boolean; run helpers require their token"
-            )
+    if "automount_service_account_token" in s and (
+        kind != "endpoint" or not isinstance(s["automount_service_account_token"], bool)
+    ):
+        raise HTTPException(
+            400, "automount_service_account_token: an endpoint-only boolean; run helpers require their token"
+        )
     if not s.get("image") and not (s.get("images") or {}).get("default"):
         raise HTTPException(400, "image is required (or images.default)")
     gpu = s.get("gpu") or {}
@@ -298,6 +345,14 @@ def validate(spec: dict) -> dict:
             raise HTTPException(400, f"protocol: one of {PROTOCOLS}")
         if not isinstance(s.get("port", 8080), int):
             raise HTTPException(400, "port: an integer")
+        if fleet:
+            _endpoint_timeout(s)
+        _reserved_env(s)
+        if s.get("native_lease") and s["native_lease"] not in ("optional", "required"):
+            raise HTTPException(400, "native_lease: optional | required")
+        if s.get("ingress_isolation") and s["ingress_isolation"] != "declared-ports":
+            # opt-in (docs/API.md "Ingress isolation"): nothing changes for an endpoint that does not name it
+            raise HTTPException(400, "ingress_isolation: declared-ports")
         try:
             scaling = ScalingSpec.model_validate(s.get("scaling") or {}).model_dump(exclude_none=True)
         except ValidationError as exc:
@@ -317,7 +372,7 @@ def validate(spec: dict) -> dict:
         scaling.setdefault("window_s", 30)
         s["scaling"] = scaling
         nodes = s.get("nodes", 1)
-        if not isinstance(nodes, int) or nodes < 1 or nodes > MULTINODE_MAX_NODES:
+        if not isinstance(nodes, int) or nodes < 1 or (fleet and nodes > MULTINODE_MAX_NODES):
             raise HTTPException(400, f"nodes: an integer from 1 to {MULTINODE_MAX_NODES}")
         if nodes > 1:
             if not (gpu.get("classes") and int(gpu.get("count") or 0) >= 1):
@@ -330,10 +385,12 @@ def validate(spec: dict) -> dict:
                 scaling["max"] = max(
                     scaling.get("min", 0), 1
                 )  # replica groups of whole nodes do not autoscale: max = running count
-            if "worker_command" in s and not _command(s["worker_command"]):
+            if "worker_command" in s and not command(s["worker_command"]):
                 raise HTTPException(400, "worker_command: a string or a list")
     classes = list(gpu.get("classes") or [])
-    fleet_classes = sorted({p.get("gpu_class") for p in kube.fleet()["pools"].values() if p.get("gpu_class")})
+    fleet_classes = (
+        sorted({p.get("gpu_class") for p in kube.fleet()["pools"].values() if p.get("gpu_class")}) if fleet else []
+    )
     if classes and fleet_classes and not any(c in fleet_classes for c in classes):
         raise HTTPException(400, f"gpu.classes {classes}: none exists in this fleet (classes: {fleet_classes})")
     images = s.get("images")
@@ -342,25 +399,26 @@ def validate(spec: dict) -> dict:
         or not all(isinstance(k, str) and isinstance(v, str) and v for k, v in images.items())
     ):
         raise HTTPException(400, 'images: {"default": <image>, "<gpu class>": <image>, ...}')
-    _validate_variants(s, kind)
+    _validate_variants(s, kind, fleet)
     s["kind"] = kind
     return s
 
 
-def _validate_variants(s: dict, kind: str) -> None:
-    """`deployments.<region>.variants` and `routing` of an endpoint (docs/API.md "Variants")."""
+def _validate_variants(s: dict, kind: str, fleet: bool = True) -> None:
+    """`deployments.<region>.variants` and `routing` of an endpoint (docs/API.md "Variants"); `fleet`: the regions
+    and pools they name exist."""
     deployments, routing = s.get("deployments"), s.get("routing")
     if deployments is None and routing is None:
         return
     if kind != "endpoint":
         raise HTTPException(400, "deployments.variants and routing: endpoints only")
-    pools = kube.fleet()["pools"]
+    pools = kube.fleet()["pools"] if fleet else {}
     names: set[str] = set()
     if deployments is not None:
         if not isinstance(deployments, dict) or not deployments:
             raise HTTPException(400, "deployments: {<region>: {variants: [{name, pool, min, max, image}]}}")
         for region, d in deployments.items():
-            cid = regions_for([], [region])[0]
+            cid = regions_for([], [region])[0] if fleet else region
             variants = (d or {}).get("variants") if isinstance(d, dict) else None
             if not isinstance(variants, list) or not variants or len(variants) > MAX_VARIANTS:
                 raise HTTPException(400, f"deployments.{region}.variants: a list of 1 to {MAX_VARIANTS} variants")
@@ -379,11 +437,11 @@ def _validate_variants(s: dict, kind: str) -> None:
                     (p for p in pools.values() if p.get("pool") == v["pool"] and (p.get("region") or REGION) == cid),
                     None,
                 )
-                if pool is None:
+                if pool is None and fleet:
                     raise HTTPException(
                         400, f"deployments.{region}.variants[{i}].pool: {v['pool']} is not a pool of {region}"
                     )
-                if pool.get("tenant"):
+                if (pool or {}).get("tenant"):
                     raise HTTPException(
                         400, f"deployments.{region}.variants[{i}].pool: {v['pool']} is dedicated to a tenant"
                     )
@@ -415,252 +473,287 @@ def _validate_variants(s: dict, kind: str) -> None:
         routing.setdefault("default", "priority")
 
 
-def to_entry(spec: dict, managed_by: str = "api") -> dict:
-    """Catalog entry (catalog/README.md schema) for a spec; the chart and the job renderer read this."""
-    s = validate(spec)
-    mid, kind = s["id"], s["kind"]
-    gpu = s.get("gpu") or {}
-    classes = list(gpu.get("classes") or [])
-    count = gpu.get("count", 1 if classes else 0)
-    image = normalise_image(s.get("image") or (s.get("images") or {}).get("default"))
-    regions = regions_for(classes, s.get("regions"))
-    entry: dict = {
-        "id": mid,
-        "displayName": s.get("display_name") or mid,
+def _assets_spec(raw) -> list[dict]:
+    """`assets: [{alias, mount_path}]`: shape checked here (the registry and the grant are checked at render, against
+    the fleet document of the moment)."""
+    from jobs import MAX_ASSETS  # one bound for the registration and the render
+
+    if not isinstance(raw, list) or len(raw) > MAX_ASSETS:
+        raise HTTPException(400, f"assets: a list of at most {MAX_ASSETS} {{alias, mount_path}} entries")
+    out = []
+    for x in raw:
+        if not isinstance(x, dict) or not re.fullmatch(
+            r"[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?", str(x.get("alias") or "")
+        ):
+            raise HTTPException(400, "assets: alias is a DNS label")
+        path = str(x.get("mount_path") or "")
+        if not path.startswith("/") or path == "/":
+            raise HTTPException(400, "assets: mount_path is an absolute path")
+        out.append({"alias": x["alias"], "mountPath": path})
+    return out
+
+
+def _work_aliases(raw) -> list[dict]:
+    import jobs  # the render's own validation (jobs.work_aliases), at registration already
+
+    return [{"path": a["path"], "scope": a["scope"]} for a in jobs.work_aliases({"workMountAliases": raw})]
+
+
+def _retry_policy(r) -> dict:
+    """`retry: {max_attempts 1..10, on_exit_codes [1..255] (default [137, 143])}` of a run class spec."""
+    from schemas import RETRY_MAX_ATTEMPTS
+
+    if not isinstance(r, dict) or "max_attempts" not in r:
+        raise HTTPException(400, "retry: {max_attempts (1..10), on_exit_codes (default [137, 143])}")
+    try:
+        n = int(r["max_attempts"])
+    except (TypeError, ValueError):
+        raise HTTPException(400, "retry.max_attempts: 1..10")
+    if not 1 <= n <= RETRY_MAX_ATTEMPTS:
+        raise HTTPException(400, "retry.max_attempts: 1..10")
+    codes = r.get("on_exit_codes", [137, 143])
+    if not isinstance(codes, list) or not codes or any(not isinstance(c, int) or not 1 <= c <= 255 for c in codes):
+        raise HTTPException(400, "retry.on_exit_codes: a non-empty list of exit codes 1..255")
+    return {"maxAttempts": n, "onExitCodes": sorted(set(codes))}
+
+
+def _run_class(s: dict, image: str, count, classes: list[str], managed_by: str) -> dict:
+    """A run class's catalog entry (catalog/README.md: the `job` block jobs.py renders into a Kubernetes Job), the
+    shape the bundled classes are written in."""
+    job: dict = {
+        "image": image,
+        "command": s.get("command") or "",
+        "gpu": count,
+        "cpu": str(s.get("cpu", "4")),
+        "memory": str(s.get("memory", "16Gi")),
+        # separate limits and node-local scratch (docs/JOBS.md "Run class"), read by name here: the contract test
+        # (tests/test_openapi_schemas.py) walks this module for the spec keys it reads
+        **({"cpuLimit": str(s["cpu_limit"])} if s.get("cpu_limit") else {}),
+        **({"memoryLimit": str(s["memory_limit"])} if s.get("memory_limit") else {}),
+        **({"ephemeralStorage": str(s["ephemeral_storage"])} if s.get("ephemeral_storage") else {}),
+        **({"ephemeralStorageLimit": str(s["ephemeral_storage_limit"])} if s.get("ephemeral_storage_limit") else {}),
+        # run classes a graph rooted here may bind stages to (docs/JOBS.md "Delegated stages"): operator-owned
+        **({"delegates": [str(x) for x in s["delegates"]]} if s.get("delegates") else {}),
+        # the class's bounded retry policy (docs/JOBS.md "Retries"): {maxAttempts, onExitCodes}
+        **({"retry": _retry_policy(s["retry"])} if s.get("retry") is not None else {}),
+        "pvcSizeGi": int(s.get("disk_gi", 50)),
+        "graceSeconds": int(s.get("grace_seconds", 300)),
+        "scratch": s.get("scratch", "network"),
+        # canonical aliases of the work volume (docs/JOBS.md "Work mount aliases"): operator-owned, validated here
+        **({"workMountAliases": _work_aliases(s["work_mount_aliases"])} if s.get("work_mount_aliases") else {}),
+        # restricted assets (docs/JOBS.md "Restricted assets"): operator-owned aliases of the fleet registry
+        **({"assets": _assets_spec(s["assets"])} if s.get("assets") else {}),
+        "env": dict(s.get("env") or {}),
+        "envFrom": [{"secretRef": {"name": name}} for name in s.get("env_secrets", [])],
+        # per-GPU-class images (docs/SCHEDULING.md "Per-GPU images for runs"): the class chosen at submission picks one
+        **(
+            {"images": {k: normalise_image(v) for k, v in s["images"].items()}}
+            if isinstance(s.get("images"), dict) and s["images"]
+            else {}
+        ),
+    }
+    if s.get("args"):
+        job["args"] = s["args"]
+    if (fz := s.get("finalize")) is not None:
+        # the model-owned finalizer (docs/JOBS.md "Finalization by the application"): a fixed command in the model's
+        # own image that re-delivers from the kept work volume after the run's compute ended with one of
+        # `on_exit_codes`; never a caller-supplied executable, never a GPU
+        if not isinstance(fz, dict) or not str(fz.get("command") or "").strip():
+            raise HTTPException(
+                400,
+                "finalize: {command (required), on_exit_codes (default [75]), timeout_s (60..86400), cpu, memory}",
+            )
+        codes = fz.get("on_exit_codes", [75])
+        if not isinstance(codes, list) or not codes or not all(isinstance(c, int) and 1 <= c <= 255 for c in codes):
+            raise HTTPException(
+                400,
+                "finalize.on_exit_codes: a non-empty list of exit codes 1..255 of the compute that mean 'delivery pending'",
+            )
+        timeout = int(fz.get("timeout_s", 1800))
+        if not 60 <= timeout <= 86400:
+            raise HTTPException(400, "finalize.timeout_s: 60..86400")
+        job["finalize"] = {
+            "command": str(fz["command"]),
+            "onExitCodes": codes,
+            "timeoutS": timeout,
+            "cpu": str(fz.get("cpu", "1")),
+            "memory": str(fz.get("memory", "2Gi")),
+        }
+    if s.get("child_endpoints") is not None:
+        # endpoint children (docs/JOBS.md "Endpoint children"): the operator's allowlist of endpoint models a live
+        # attempt may ask for, with an explicit bound per root (never a silent default: the retained declared
+        # range of a dataset-driven workload is the operator's statement, not the platform's guess)
+        ce = s["child_endpoints"]
+        if (
+            not isinstance(ce, list)
+            or not ce
+            or not all(isinstance(x, str) and re.fullmatch(r"[a-z0-9][a-z0-9.-]{0,62}", x) for x in ce)
+        ):
+            raise HTTPException(400, "child_endpoints: a non-empty list of endpoint model ids")
+        if s.get("child_max_units") is None:
+            raise HTTPException(
+                400, "child_endpoints needs child_max_units (the explicit bound of children per root, 1..65536)"
+            )
+        n = int(s["child_max_units"])
+        if not 1 <= n <= 65536:
+            raise HTTPException(400, "child_max_units: 1..65536")
+        job["childEndpoints"] = sorted(set(ce))
+        job["childMaxUnits"] = n
+        delivery = str(s.get("child_delivery") or "platform")
+        if delivery not in ("platform", "application"):
+            raise HTTPException(400, "child_delivery: platform | application")
+        job["childDelivery"] = delivery
+    elif s.get("child_max_units") is not None:
+        raise HTTPException(400, "child_max_units applies with child_endpoints")
+    if s.get("pull_secret"):
+        job["imagePullSecret"] = s["pull_secret"]
+    if d := s.get("data"):
+        job.update(
+            {
+                "data": d["path"],
+                "dataMountPath": d.get("mount_path", "/data"),
+                "dataReadOnly": bool(d.get("readonly", True)),
+            }
+        )
+    if w := s.get("weights"):
+        job.update({"weights": w["path"], "weightsMountPath": w.get("mount_path", "/weights")})
+    return {
+        "id": s["id"],
+        "displayName": s.get("display_name") or s["id"],
         "description": s.get("description", ""),
         "task": s.get("task", "custom"),
         "managed_by": managed_by,
         "spec": s,
+        **({"podMetadata": s["pod_metadata"]} if s.get("pod_metadata") else {}),
+        **({"example": s["example"]} if isinstance(s.get("example"), dict) else {}),
+        **{k: s[k] for k in ("images", "routing") if k in s},
+        "mode": "run",
+        "protocol": "kubernetes-job",
+        "gpu": {"count": count, "classes": classes} if classes else "none",
+        "job": job,
+        "parameters": list(s.get("parameters") or []),
     }
-    if s.get("pod_metadata"):
-        entry["podMetadata"] = s["pod_metadata"]
-    if isinstance(s.get("example"), dict):
-        entry["example"] = s["example"]
-    for k in RESERVED:
-        if k in s:
-            entry[k] = s[k]
-    if kind == "endpoint":
-        protocol = s.get("protocol", "http")
-        path = s.get("path") or PROTOCOL_PATH[protocol]
-        port = int(s.get("port", 8080))
-        scaling = s.get("scaling") or {}
-        # Knative: `concurrency_utilization` is the concurrency metric with the replica limit as the scale target and
-        # the percentage as its utilization; `requests_per_second` is the rps metric at 100 % with no concurrency limit
-        rate = scaling.get("metric") == "requests_per_second"
-        concurrency = int(scaling.get("container_concurrency", 0 if rate else 1))
-        res = s.get("resources") or {}
-        runtime: dict = {
-            "image": image,
-            "port": port,
-            "protocol": protocol,
-            "resources": {"gpu": count, "cpu": str(res.get("cpu", "4")), "memory": str(res.get("memory", "16Gi"))},
-            "scaling": {
-                "minReplicas": int(scaling.get("min", 0)),
-                "maxReplicas": int(scaling.get("max", 1)),
-                "metric": "rps" if rate else "concurrency",
-                "target": int(scaling.get("target", 5)) if rate else concurrency,
-                "containerConcurrency": concurrency,
-                **({"scaleToZeroRetention": f"{int(scaling['idle_s'])}s"} if scaling.get("idle_s") is not None else {}),
-            },
-            "timeout": int(s.get("timeout_s", 600)),
-            "shm": {"enabled": True, "size": f"{int(s.get('shm_gib', 1))}Gi"},
-        }
-        if "automount_service_account_token" in s:
-            runtime["automountServiceAccountToken"] = s["automount_service_account_token"]
-        annotations = {
-            f"autoscaling.knative.dev/{a}": f"{scaling[k]}s"
-            for k, a in (("cooldown_s", "scale-down-delay"), ("window_s", "window"))
-            if k in scaling
-        }
-        annotations["autoscaling.knative.dev/target-utilization-percentage"] = (
-            "100" if rate else str(scaling.get("target", 100))
-        )
-        runtime["annotations"] = annotations
-        if s.get("args"):
-            runtime["args"] = [str(a) for a in s["args"]]
-        if cmd := _command(s.get("command")):
-            runtime["command"] = cmd
-        if s.get("env"):
-            runtime["env"] = _env_list(s["env"])
-        if s.get("env_field_refs"):
-            runtime.setdefault("env", []).extend(
-                {"name": name, "valueFrom": {"fieldRef": {"fieldPath": field}}}
-                for name, field in s["env_field_refs"].items()
-            )
-        if s.get("empty_dirs"):
-            runtime["volumes"] = [
+
+
+def _placement(s: dict, classes: list[str], count) -> dict:
+    """Where an endpoint runs, resolved against the fleet of the moment and frozen in its row until the next write:
+    {<cluster id>: {pool, image?, variants?, ib_devices?}}. The pool is `pool_for` of the classes (a GPU-free
+    definition is pinned to the system nodes, or to the region's customer CPU pool when the fleet policy keeps tenants
+    off the system nodes: kube.tenant_pool, docs/FLEET.md "Customer CPU pools"); `image` is the pool's class image
+    (`images.<class>`) when one is named; variants carry their own pool, bounds and image (docs/API.md "Variants")."""
+    regions = regions_for(classes, s.get("regions"))
+    nodes, interconnect = int(s.get("nodes", 1)), s.get("interconnect", "none")
+    if nodes > 1 and not s.get("regions"):  # by default every region that has a whole-node pool of the class
+        regions = [r for r in regions if pool_for(r, classes, count, nodes, interconnect)]
+    explicit = s.get("deployments") or {}
+    if explicit and not s.get("regions"):  # variants name their regions
+        regions = [regions_for([], [r])[0] for r in explicit]
+    deployments = {}
+    for r in regions:
+        p = pool_for(r, classes, count, nodes, interconnect) if classes else kube.tenant_pool(r, "system")
+        deployments[r] = {"pool": p} if p else {}
+    pool_class = {p["pool"]: p.get("gpu_class") for p in kube.fleet()["pools"].values()}
+    images = s.get("images") or {}
+    for r, d in deployments.items():
+        spec_region = next((k for k in explicit if regions_for([], [k])[0] == r), None)
+        variants = (explicit.get(spec_region) or {}).get("variants") if spec_region else None
+        if variants:
+            d["pool"] = variants[0]["pool"]
+            d["variants"] = [
                 {
                     "name": v["name"],
-                    "mountPath": v["mount_path"],
-                    "sizeLimit": v["size_limit"],
-                    **({"medium": "Memory"} if v["memory"] else {}),
+                    "pool": v["pool"],
+                    "min": int(v.get("min", 0)),
+                    "max": int(v.get("max", 1)),
+                    "image": normalise_image(
+                        v.get("image")
+                        or images.get(pool_class.get(v["pool"]) or "")
+                        or s.get("image")
+                        or images.get("default")
+                    ),
                 }
-                for v in s["empty_dirs"]
+                for v in variants
             ]
-        if s.get("env_secrets"):
-            runtime["envFrom"] = [{"secretRef": {"name": name}} for name in s["env_secrets"]]
-        if s.get("health_path"):
-            runtime["readinessProbe"] = {"path": s["health_path"], "port": port}
-        if s.get("pull_secret"):
-            runtime["imagePullSecrets"] = [s["pull_secret"]]
-        w = s.get("weights") or {}
-        if w:
-            runtime["weights"] = {
-                "sharedFilesystem": {
-                    "enabled": True,
-                    "path": w.get("path", mid),
-                    "mountPath": w.get("mount_path", "/weights"),
-                },
-                "env": dict(w.get("env") or {}),
-            }
-        nodes, interconnect = int(s.get("nodes", 1)), s.get("interconnect", "none")
-        if nodes > 1 and not s.get("regions"):  # by default every region that has a whole-node pool of the class
-            regions = [r for r in regions if pool_for(r, classes, count, nodes, interconnect)]
-        explicit = s.get("deployments") or {}
-        if explicit and not s.get("regions"):  # variants name their regions
-            regions = [regions_for([], [r])[0] for r in explicit]
-        deployments = {
-            r: (
-                {"pool": p}
-                if (p := (pool_for(r, classes, count, nodes, interconnect) if classes else "system"))
-                else {}
-            )
-            for r in regions
-        }
-        pool_class = {p["pool"]: p.get("gpu_class") for p in kube.fleet()["pools"].values()}
-        images = s.get("images") or {}
+            d["image"] = d["variants"][0]["image"]
+        elif d.get("pool") and images.get(pool_class.get(d["pool"]) or ""):
+            d["image"] = normalise_image(images[pool_class[d["pool"]]])  # the class's own image for this deployment
+    if nodes > 1:
+        # render_endpoint._leaderworkerset: one replica group of `nodes` pods, the leader serves
         for r, d in deployments.items():
-            spec_region = next((k for k in explicit if regions_for([], [k])[0] == r), None)
-            variants = (explicit.get(spec_region) or {}).get("variants") if spec_region else None
-            if variants:
-                d["pool"] = variants[0]["pool"]
-                d["variants"] = [
-                    {
-                        "name": v["name"],
-                        "pool": v["pool"],
-                        "min": int(v.get("min", 0)),
-                        "max": int(v.get("max", 1)),
-                        "image": normalise_image(
-                            v.get("image")
-                            or images.get(pool_class.get(v["pool"]) or "")
-                            or s.get("image")
-                            or images.get("default")
-                        ),
-                    }
-                    for v in variants
-                ]
-                d["image"] = d["variants"][0]["image"]
-            elif d.get("pool") and images.get(pool_class.get(d["pool"]) or ""):
-                d["image"] = normalise_image(images[pool_class[d["pool"]]])  # the class's own image for this deployment
-        if nodes > 1:
-            # render_endpoint._leaderworkerset: one replica group of `nodes` pods, the leader serves
-            runtime["nodes"] = nodes
-            runtime["interconnect"] = interconnect
-            if wc := _command(s.get("worker_command")):
-                runtime["workerCommand"] = wc
-            if scaling.get("idle_s") is not None:
-                runtime["idleSeconds"] = int(scaling["idle_s"])
-            for r, d in deployments.items():
-                if not d.get("pool"):
-                    raise HTTPException(
-                        400,
-                        f"nodes: no pool in {r} whose preset has {count} GPUs per node for classes {classes}"
-                        + (" with InfiniBand" if interconnect == "required" else ""),
-                    )
-                pool = next((p for p in kube.fleet()["pools"].values() if p.get("pool") == d["pool"]), {})
-                if (pool.get("interconnect") or "none") == "infiniband" and interconnect != "none":
-                    d["ibDevices"] = kube.ib_devices_per_node(
-                        [d["pool"]]
-                    )  # DRA claim of every fabric NIC (docs/JOBS.md)
-        entry.update(
-            {
-                "mode": "sync",
-                "protocol": protocol,
-                "port": port,
-                "endpoints": {
-                    "chat" if protocol == "openai" else "invoke": path,
-                    **({"ready": s["health_path"]} if s.get("health_path") else {}),
-                },
-                "gpu": {"count": count, "classes": classes} if classes else "none",
-                "servedModel": s.get("served_model"),
-                "runtime": runtime,
-                **({"routing": s["routing"]} if s.get("routing") else {}),
-                **({"nodes": nodes} if nodes > 1 else {}),
-                # no GPU class: the endpoint runs on the region's system pool (CPU nodes, label serverless2.nebius/pool=system)
-                "deployments": deployments,
-            }
-        )
-        if not entry["servedModel"]:
-            entry.pop("servedModel")
-    else:
-        job: dict = {
-            "image": image,
-            "command": s.get("command") or "",
-            "gpu": count,
-            "cpu": str(s.get("cpu", "4")),
-            "memory": str(s.get("memory", "16Gi")),
-            "pvcSizeGi": int(s.get("disk_gi", 50)),
-            "graceSeconds": int(s.get("grace_seconds", 300)),
-            "scratch": s.get("scratch", "network"),
-            "env": dict(s.get("env") or {}),
-            "envFrom": [{"secretRef": {"name": name}} for name in s.get("env_secrets", [])],
-            # per-GPU-class images (docs/SCHEDULING.md "Per-GPU images for runs"): the class chosen at submission picks one
-            **(
-                {"images": {k: normalise_image(v) for k, v in s["images"].items()}}
-                if isinstance(s.get("images"), dict) and s["images"]
-                else {}
-            ),
-        }
-        if s.get("args"):
-            job["args"] = s["args"]
-        if (fz := s.get("finalize")) is not None:
-            # the model-owned finalizer (docs/JOBS.md "Finalization by the application"): a fixed command in the model's
-            # own image that re-delivers from the kept work volume after the run's compute ended with one of
-            # `on_exit_codes`; never a caller-supplied executable, never a GPU
-            if not isinstance(fz, dict) or not str(fz.get("command") or "").strip():
+            if not d.get("pool"):
                 raise HTTPException(
                     400,
-                    "finalize: {command (required), on_exit_codes (default [75]), timeout_s (60..86400), cpu, memory}",
+                    f"nodes: no pool in {r} whose preset has {count} GPUs per node for classes {classes}"
+                    + (" with InfiniBand" if interconnect == "required" else ""),
                 )
-            codes = fz.get("on_exit_codes", [75])
-            if not isinstance(codes, list) or not codes or not all(isinstance(c, int) and 1 <= c <= 255 for c in codes):
-                raise HTTPException(
-                    400,
-                    "finalize.on_exit_codes: a non-empty list of exit codes 1..255 of the compute that mean 'delivery pending'",
-                )
-            timeout = int(fz.get("timeout_s", 1800))
-            if not 60 <= timeout <= 86400:
-                raise HTTPException(400, "finalize.timeout_s: 60..86400")
-            job["finalize"] = {
-                "command": str(fz["command"]),
-                "onExitCodes": codes,
-                "timeoutS": timeout,
-                "cpu": str(fz.get("cpu", "1")),
-                "memory": str(fz.get("memory", "2Gi")),
-            }
-        if s.get("pull_secret"):
-            job["imagePullSecret"] = s["pull_secret"]
-        if d := s.get("data"):
-            job.update(
-                {
-                    "data": d["path"],
-                    "dataMountPath": d.get("mount_path", "/data"),
-                    "dataReadOnly": bool(d.get("readonly", True)),
-                }
-            )
-        if w := s.get("weights"):
-            job.update({"weights": w["path"], "weightsMountPath": w.get("mount_path", "/weights")})
-        entry.update(
-            {
-                "mode": "run",
-                "protocol": "kubernetes-job",
-                "gpu": {"count": count, "classes": classes} if classes else "none",
-                "job": job,
-                "parameters": list(s.get("parameters") or []),
-                "deployments": {r: {} for r in regions},
-            }
+            pool = next((p for p in kube.fleet()["pools"].values() if p.get("pool") == d["pool"]), {})
+            if (pool.get("interconnect") or "none") == "infiniband" and interconnect != "none":
+                d["ib_devices"] = kube.ib_devices_per_node([d["pool"]])  # DRA claim of every fabric NIC (docs/JOBS.md)
+    return deployments
+
+
+def definition(
+    spec: dict, managed_by: str = "api", version: int | None = None, deployments: dict | None = None
+) -> dict:
+    """The one shape of a model (the module docstring): the validated spec flattened, under `spec` as the API echoes
+    it, the catalog's fields and the placement. `deployments` given = the placement frozen in a stored row (loaded
+    without the fleet checks); None = resolved against the fleet now (a registration, a pinned revision). A run class
+    is the catalog's entry (`_run_class`, catalog.normalise), as the bundled classes are."""
+    s = validate(spec, fleet=deployments is None)
+    mid, kind = s["id"], s["kind"]
+    classes = list((s.get("gpu") or {}).get("classes") or [])
+    count = gpu_count(s)
+    image = normalise_image(s.get("image") or (s.get("images") or {}).get("default"))
+    if kind == "job":
+        import catalog  # the file-catalog shape of run classes (catalog imports this module lazily)
+
+        entry = _run_class(s, image, count, classes, managed_by)
+        entry["deployments"] = (
+            deployments if deployments is not None else {r: {} for r in regions_for(classes, s.get("regions"))}
         )
-    return entry
+        return catalog.normalise({**entry, **({"version": version} if version is not None else {})})
+    if deployments is None:
+        deployments = _placement(s, classes, count)
+    protocol = s.get("protocol", "http")
+    path = s.get("path") or PROTOCOL_PATH[protocol]
+    return {
+        **s,
+        "spec": s,
+        "name": mid,
+        "k8s_name": mid,
+        "display_name": s.get("display_name") or mid,
+        "description": s.get("description", ""),
+        "task": s.get("task", "custom"),
+        "managed_by": managed_by,
+        **({"version": version} if version is not None else {}),
+        "mode": "sync",
+        "modes": ["sync", "async"],
+        "namespace": MODELS_NAMESPACE,
+        "image": image,
+        "protocol": protocol,
+        "port": int(s.get("port", 8080)),
+        "endpoints": {"chat" if protocol == "openai" else "invoke": path},
+        "endpoint_path": path,
+        # OpenAI endpoints need the served model name in the request body (`model`): `served_model`, or what the
+        # server registers under `--model_name=<name>` (KServe huggingfaceserver); the API injects it when a caller
+        # omits `model`, so tenants only know the model id
+        "served_model": s.get("served_model")
+        or next((str(a).split("=", 1)[1] for a in (s.get("args") or []) if str(a).startswith("--model_name=")), None),
+        "gpu": f"{count}x {'/'.join(classes)}" if classes else "none",
+        "gpu_classes": classes,
+        "nodes": int(s.get("nodes") or 1),
+        "native_lease": s.get("native_lease") or "optional",  # docs/API.md "Native execution leases"
+        "parameters": [],
+        "deployments": deployments,
+        "regions": [HUB_REGION if c == "hub" else c for c in deployments],
+        "endpoint_host": f"http://{mid}-predictor.{MODELS_NAMESPACE}.svc.cluster.local",  # on this cluster only
+    }
+
+
+def load(row: dict) -> dict:
+    """The definition of a stored row (db.list_models, a pending change of db.pending_changes): its spec with the
+    placement frozen at its write."""
+    return definition(row["spec"], row.get("managed_by") or "api", row.get("version"), row["deployments"])
 
 
 # ---- persistence: the fleet database ------------------------------------------------------------------------
@@ -669,10 +762,10 @@ def to_entry(spec: dict, managed_by: str = "api") -> dict:
 
 
 def list_runtime() -> dict[str, dict]:
-    """Runtime catalog entries: {id: entry}, from the database (empty without one: the bundled classes only)."""
+    """The definitions of the fleet database, {id: definition} (empty without one: the bundled classes only)."""
     if not db.enabled():
         return {}
-    return {mid: {**row["entry"], "version": row["version"]} for mid, row in db.list_models().items()}
+    return {mid: load(row) for mid, row in db.list_models().items()}
 
 
 # ---- rendering: the endpoint's objects (render_endpoint.py), applied with server-side apply --------------
@@ -680,22 +773,27 @@ def list_runtime() -> dict[str, dict]:
 PLURALS = {
     "InferenceService": ("serving.kserve.io", "v1beta1", "inferenceservices"),
     "SecurityPolicy": ("gateway.envoyproxy.io", "v1alpha1", "securitypolicies"),
-    "LocalModelCache": ("serving.kserve.io", "v1alpha1", "localmodelcaches"),
-    # multi-node endpoints (runtime.nodes > 1): the replica group, its leader Service's route to the gateway
+    # multi-node endpoints (nodes > 1): the replica group, its leader Service's route to the gateway
     "LeaderWorkerSet": kube.LWS,
     "HTTPRoute": ("gateway.networking.k8s.io", "v1", "httproutes"),
+    # opt-in declared-port ingress isolation of an endpoint's pods (docs/API.md "Ingress isolation")
+    "CiliumNetworkPolicy": ("cilium.io", "v2", "ciliumnetworkpolicies"),
 }
+# the core objects (the multi-node leader Service, the trust bundle ConfigMap): the CoreV1Api methods that apply and delete them
+CORE = {"Service": "namespaced_service", "ConfigMap": "namespaced_config_map"}
 
 
 def variants(entry: dict, cluster: str) -> list[dict]:
     """The deployments of an endpoint on a cluster in priority order: [{name, object, pool, min, max, image}]; a
-    plain deployment is one variant named "primary" under the model's own name (docs/API.md "Variants")."""
+    plain deployment is one variant named "primary" under the model's own name (docs/API.md "Variants"). The
+    placement is keyed by the fleet's cluster ids; `cluster` may name the cluster or its region."""
     deps = entry.get("deployments") or {}
-    d = (
-        deps.get(cluster) or deps.get(kube.cluster_region(cluster)) or {}
-    )  # entries store cluster ids, normalised ones region names
+    d = deps.get(cluster) or next(
+        (x for c, x in deps.items() if kube.cluster_region(c) == kube.cluster_region(cluster)), None
+    )
+    d = d or {}
     vs = d.get("variants") or [
-        {"name": "primary", "pool": d.get("pool"), "min": None, "max": None, "image": d.get("image")}
+        {"name": "primary", "pool": d.get("pool"), "min": d.get("min"), "max": d.get("max"), "image": d.get("image")}
     ]
     return [{**v, "object": entry["id"] if i == 0 else f"{entry['id']}-{v['name']}"} for i, v in enumerate(vs)]
 
@@ -725,40 +823,10 @@ def apply(entry: dict, cluster: str, region: str = REGION) -> list[str]:
         ns, name = md.get("namespace", "models"), md["name"]
         if kind in PLURALS:
             g, v, plural = PLURALS[kind]
-            retry(
-                kube.api(region).patch_namespaced_custom_object,
-                g,
-                v,
-                ns,
-                plural,
-                name,
-                doc,
-                field_manager=FIELD_MANAGER,
-                force=True,
-                _content_type="application/apply-patch+yaml",
-            )
-        elif kind == "PersistentVolumeClaim":
-            retry(
-                kube.core(region).patch_namespaced_persistent_volume_claim,
-                name,
-                ns,
-                doc,
-                field_manager=FIELD_MANAGER,
-                force=True,
-                _content_type="application/apply-patch+yaml",
-            )
-        elif kind == "Service":
-            retry(
-                kube.core(region).patch_namespaced_service,
-                name,
-                ns,
-                doc,
-                field_manager=FIELD_MANAGER,
-                force=True,
-                _content_type="application/apply-patch+yaml",
-            )
+            target = (kube.api(region).patch_namespaced_custom_object, g, v, ns, plural, name, doc)
         else:
-            raise HTTPException(500, f"endpoint renderer produced an unexpected kind {kind}")
+            target = (getattr(kube.core(region), f"patch_{CORE[kind]}"), name, ns, doc)
+        retry(*target, field_manager=FIELD_MANAGER, force=True, _content_type="application/apply-patch+yaml")
         applied.append(f"{kind}/{ns}/{name}")
     return applied
 
@@ -812,10 +880,8 @@ def _delete(docs: list[dict], region: str) -> list[str]:
             if kind in PLURALS:
                 g, v, plural = PLURALS[kind]
                 retry(kube.api(region).delete_namespaced_custom_object, g, v, ns, plural, name)
-            elif kind == "PersistentVolumeClaim":
-                retry(kube.core(region).delete_namespaced_persistent_volume_claim, name, ns)
-            elif kind == "Service":
-                retry(kube.core(region).delete_namespaced_service, name, ns)
+            else:
+                retry(getattr(kube.core(region), f"delete_{CORE[kind]}"), name, ns)
         except ApiException as e:
             if e.status != 404:
                 raise HTTPException(502, f"{kind} {name}: {e.reason}")
@@ -849,9 +915,7 @@ def sync_certificate(region: str, entries: dict[str, dict]) -> list[str]:
     domain = endpoint_domain(region)
     if not domain:
         return []
-    hosts = sorted(
-        {h for e in entries.values() if e.get("mode") != "run" and e.get("runtime") for h in variant_hosts(e, region)}
-    )
+    hosts = sorted({h for e in entries.values() if e.get("mode") != "run" for h in variant_hosts(e, region)})
     spec = (
         {"issuerRef": {"name": MODELS_ISSUER, "kind": "ClusterIssuer"}, "commonName": hosts[0], "dnsNames": hosts}
         if hosts
@@ -899,8 +963,6 @@ def endpoint_domain(region: str) -> str:
     ids answered 503 on every real endpoint call before."""
     if region in ENDPOINT_DOMAINS:
         return ENDPOINT_DOMAINS[region]
-    import kube
-
     mapped = kube.cluster_region(region) if region else region
     return ENDPOINT_DOMAINS.get(mapped) or (ENDPOINT_DOMAIN if REGION in (region, mapped) else "")
 
@@ -920,7 +982,7 @@ def litellm_group_upsert(entry: dict, cluster: str, region: str = REGION) -> str
     import httpx
 
     mid = entry["id"]
-    served = entry.get("servedModel") or mid
+    served = entry.get("served_model") or mid
     try:
         with httpx.Client(timeout=20) as c:
             headers = {"Authorization": f"Bearer {LITELLM_MASTER_KEY}"}
@@ -987,13 +1049,13 @@ def litellm_deployments_delete(ids: list[str]) -> str | None:
 
 # ---- offline rendering for the quality gate -----------------------------------------------------------
 if __name__ == "__main__":
-    # `python models.py entry --pools <pools.json> < spec.json` prints the catalog entry of a spec against a
-    # given fleet; `python models.py render <cluster> [--domain <domain>] < entry.yaml` prints the entry's objects
-    # on that cluster (tools/check.sh renders the example model this way, no cluster needed).
-    if len(sys.argv) >= 2 and sys.argv[1] == "entry":
+    # `python models.py definition --pools <pools.json> < spec.json` prints the definition of a spec against a
+    # given fleet; `python models.py render <cluster> [--domain <domain>] < definition.yaml` prints its objects on
+    # that cluster (tools/check.sh renders the example model this way, no cluster needed).
+    if len(sys.argv) >= 2 and sys.argv[1] == "definition":
         pools = json.load(open(sys.argv[sys.argv.index("--pools") + 1])) if "--pools" in sys.argv else {}
         kube.fleet = lambda: {"pools": pools}
-        print(yaml.safe_dump(to_entry(json.load(sys.stdin)), sort_keys=False))
+        print(yaml.safe_dump(definition(json.load(sys.stdin)), sort_keys=False))
     elif len(sys.argv) >= 3 and sys.argv[1] == "render":
         kube.cluster_region = lambda c: c
         ENDPOINT_DOMAINS[sys.argv[2]] = sys.argv[sys.argv.index("--domain") + 1] if "--domain" in sys.argv else ""

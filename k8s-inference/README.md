@@ -66,7 +66,7 @@ terraform.tfvars ──▶ ./stack.sh ──▶ cloud      one state: clusters, 
 - **Region clusters** (one per Nebius region, one project each): GPU pools, Knative/KServe endpoints, an
   Envoy gateway with key checks against the control cluster's API, the image cache, DCGM, OpenCost, Loki, the weights filesystem.
 
-`docs/ARCHITECTURE.md` has the component diagram and the request paths; `docs/SECURITY.md` the security controls
+`docs/ENGINEERING.md` has the rules every change follows (size budget, what may not be added); `docs/ARCHITECTURE.md` has the component diagram and the request paths; `docs/SECURITY.md` the security controls
 and their limits.
 
 ## Prerequisites
@@ -153,7 +153,7 @@ through the API only.
 | `prices` | USD per GPU-hour per platform: the scheduling order and the cost reports |
 | `edge` | public or internal gateways, optional domain, allowed source CIDRs, ACME email, API rate limit |
 | `observability` | retention, alert webhook, cost export |
-| `secrets` | the names of the environment variables that carry NGC, Hugging Face and registry credentials (`""` = that feature off; an unset named variable stops `stack.sh`) |
+| `secrets` | the names of the environment variables that carry NGC, Hugging Face and registry credentials, and the image cache's static key (`registry_key_env`, issued once per fleet by `stack/scripts/registry-static-key.sh`; required while the cache is on) (`""` = that feature off; an unset named variable stops `stack.sh`) |
 | `tenants.<name>` | regions, output retention, keys with budgets, optional GPU quota, fair share, dedicated pools, image allow-list |
 | `acceptance` | the probe `tools/verify.sh` runs after the apply (or, with `probe = true`, a Job at apply time): one run of a built-in class and, by default, the example endpoint `llm-example` created through the API and called once |
 
@@ -322,13 +322,13 @@ The platform images are tagged `<registry>/serverless2/<component>:<tag>` with t
 
 | Component | Current version |
 |---|---|
-| `services/api` image | 0.11.39 |
-| `services/dispatcher` image | 0.2.12 |
-| `services/jobs` image | 0.1.15 |
+| `services/api` image | 0.11.131 |
+| `services/dispatcher` image | 0.2.13 |
+| `services/jobs` image | 0.1.28 |
 | `services/ops` image | 0.1.12 |
-| `charts/fleet` | 0.1.7 |
-| `charts/platform` | 0.1.3 |
-| `charts/tenant` | 0.3.2 |
+| `charts/fleet` | 0.1.14 |
+| `charts/platform` | 0.1.15 |
+| `charts/tenant` | 0.3.4 |
 
 ## License
 

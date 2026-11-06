@@ -2,15 +2,12 @@
 whole-node pods behind a Service and an HTTPRoute that carry a KServe predictor's name, so the SecurityPolicy, the
 certificate and the LiteLLM entry are the same as for a one-pod endpoint; scaling.min 1 | 0 starts and stops it."""
 
-import os
-import subprocess
-
 import pytest
-import yaml
 from fastapi import HTTPException
 
 import kube
 import models
+import render_endpoint
 
 POOLS = {
     "pools": {
@@ -88,94 +85,30 @@ def test_pool_for_takes_whole_nodes_and_honours_the_interconnect():
     assert models.pool_for("us-central1", ["b200"], 8, nodes=2, interconnect="required") is None
 
 
-def test_entry_of_a_two_node_endpoint():
-    e = models.to_entry(SPEC)
-    assert e["nodes"] == 2 and e["runtime"]["nodes"] == 2 and e["runtime"]["interconnect"] == "none"
-    assert e["runtime"]["workerCommand"] == ["/bin/sh", "-c", SPEC["worker_command"]]
-    assert e["runtime"]["idleSeconds"] == 1800 and e["runtime"]["scaling"]["minReplicas"] == 0
-    assert e["deployments"] == {"us-central1": {"pool": "b200-ondemand-8x"}}
-    ib = models.to_entry(
+def test_definition_of_a_two_node_endpoint():
+    d = models.definition(SPEC)
+    assert d["nodes"] == 2 and d["spec"].get("interconnect", "none") == "none"
+    assert render_endpoint.command(d["worker_command"]) == ["/bin/sh", "-c", SPEC["worker_command"]]
+    assert d["scaling"]["idle_s"] == 1800 and d["scaling"]["min"] == 0
+    assert d["deployments"] == {"us-central1": {"pool": "b200-ondemand-8x"}}
+    ib = models.definition(
         {**SPEC, "id": "ib", "gpu": {"count": 8, "classes": ["h100"]}, "regions": ["hub"], "interconnect": "required"}
     )
-    assert ib["deployments"] == {"hub": {"pool": "h100-spot-8x-ib", "ibDevices": 8}}
+    assert ib["deployments"] == {"hub": {"pool": "h100-spot-8x-ib", "ib_devices": 8}}
 
 
 def test_validation_of_multi_node_fields():
     with pytest.raises(HTTPException) as e:
-        models.to_entry({**SPEC, "gpu": {"count": 4, "classes": ["b200"]}})
+        models.definition({**SPEC, "gpu": {"count": 4, "classes": ["b200"]}})
     assert "no pool" in e.value.detail
     with pytest.raises(HTTPException):
-        models.to_entry({**SPEC, "interconnect": "fabric"})
+        models.definition({**SPEC, "interconnect": "fabric"})
     with pytest.raises(HTTPException):
-        models.to_entry(
+        models.definition(
             {**SPEC, "scaling": {"min": 1, "max": 1, "buffer": 1}}
         )  # not a scaling field any more (stored ones are ignored on read)
-    one = models.to_entry({**SPEC, "nodes": 1, "gpu": {"count": 1, "classes": ["b200"]}})
-    assert "nodes" not in one and "nodes" not in one["runtime"]  # a plain endpoint is unchanged
-
-
-def test_chart_renders_a_leaderworkerset_behind_a_predictor_route():
-    chart = os.path.join(os.path.dirname(__file__), "..", "..", "..", "charts", "endpoint")
-    if not os.path.isdir(chart) or subprocess.run(["helm", "version"], capture_output=True).returncode:
-        pytest.skip("helm or the chart is not available here")
-    e = models.to_entry(SPEC)
-    values = os.path.join(os.path.dirname(__file__), "_lws_entry.yaml")
-    with open(values, "w") as f:
-        yaml.safe_dump(e, f, sort_keys=False)
-    try:
-        r = subprocess.run(
-            [
-                "helm",
-                "template",
-                "kimi-k3",
-                chart,
-                "-f",
-                values,
-                "--set",
-                "cluster=us-central1",
-                "--set",
-                "domain=203.0.113.1.sslip.io",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=60,
-        )
-    finally:
-        os.unlink(values)
-    assert r.returncode == 0, r.stderr
-    docs = {(d["kind"], d["metadata"]["name"]): d for d in yaml.safe_load_all(r.stdout) if d}
-    assert set(docs) == {
-        ("LeaderWorkerSet", "kimi-k3"),
-        ("Service", "kimi-k3-predictor"),
-        ("HTTPRoute", "kimi-k3-predictor"),
-        ("SecurityPolicy", "kimi-k3-authorization"),
-    }
-    lws = docs[("LeaderWorkerSet", "kimi-k3")]
-    assert lws["spec"]["replicas"] == 0 and lws["spec"]["leaderWorkerTemplate"]["size"] == 2
-    leader = lws["spec"]["leaderWorkerTemplate"]["leaderTemplate"]["spec"]
-    worker = lws["spec"]["leaderWorkerTemplate"]["workerTemplate"]["spec"]
-    assert leader["nodeSelector"] == {"serverless2.nebius/pool": "b200-ondemand-8x"}
-    assert leader["containers"][0]["resources"]["limits"]["nvidia.com/gpu"] == "8"
-    assert leader["containers"][0]["command"][2].startswith("vllm serve") and worker["containers"][0]["command"][
-        2
-    ].startswith("ray start")
-    env = {v["name"]: v.get("value") for v in leader["containers"][0]["env"]}
-    assert (
-        env["NNODES"] == "2"
-        and env["GPUS_PER_NODE"] == "8"
-        and env["WORLD_SIZE"] == "16"
-        and env["MASTER_ADDR"] == "kimi-k3-0.kimi-k3"
-        and env["HF_HOME"] == "/weights"
-    )
-    assert env["NCCL_IB_DISABLE"] == "1"  # Ethernet: no InfiniBand transport
-    assert "readinessProbe" in leader["containers"][0] and "readinessProbe" not in worker["containers"][0]
-    assert "resourceClaims" not in leader  # Ethernet: no DRA claim
-    route = docs[("HTTPRoute", "kimi-k3-predictor")]
-    assert route["spec"]["hostnames"] == ["kimi-k3-predictor.models.203.0.113.1.sslip.io"]
-    assert (
-        route["metadata"]["labels"]["serving.knative.dev/route"] == "kimi-k3-predictor"
-    )  # the SecurityPolicy's selector
-    assert docs[("Service", "kimi-k3-predictor")]["spec"]["selector"]["leaderworkerset.sigs.k8s.io/worker-index"] == "0"
+    one = models.definition({**SPEC, "nodes": 1, "gpu": {"count": 1, "classes": ["b200"]}})
+    assert one["nodes"] == 1 and "worker_command" in one["spec"]  # a plain endpoint keeps its spec, renders one pod
 
 
 def test_leaderworkerset_reads_use_the_namespace_before_the_plural(monkeypatch):
@@ -219,14 +152,13 @@ def test_example_request_travels_with_the_definition():
         "gpu": {"count": 1, "classes": ["b200"]},
         "example": {"messages": [{"role": "user", "content": "hi"}]},
     }
-    e = models.to_entry(spec)
-    assert e["example"] == spec["example"]
-    m = catalog.normalise(e)
+    m = models.definition(spec)
+    assert m["example"] == spec["example"]
     assert catalog.to_public(m)["example"] == spec["example"]
     pub = ep.to_public(m, {"kind": "InferenceService", "metadata": {}, "spec": {"predictor": {}}}, "us-central1")
     assert pub["example"] == spec["example"]
     with pytest.raises(HTTPException):
-        models.to_entry({**spec, "example": "not an object"})
+        models.definition({**spec, "example": "not an object"})
 
 
 def test_lws_public_shape_and_stopped_invoke(monkeypatch):

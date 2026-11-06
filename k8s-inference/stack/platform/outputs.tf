@@ -43,6 +43,11 @@ output "tenant_keys" {
   sensitive   = true
   value       = local.role.control ? { for tn, t in local.tenants : tn => { for kn, k in t.keys : kn => "sk-${random_password.key["${tn}-${kn}"].result}" } } : null
 }
+output "fleet_operator_keys" {
+  description = "Fleet-operator login keys by name (control cluster); separate from tenant/customer keys."
+  sensitive   = true
+  value       = local.role.control ? { for name in local.f.fleet_operator_keys : name => "sk-${random_password.key["platform-operator-${name}"].result}" } : null
+}
 output "acceptance" {
   description = "Inputs of tools/verify.sh (control cluster): the API, the first tenant key, the first admin key, the run class and the example model's definition."
   sensitive   = true

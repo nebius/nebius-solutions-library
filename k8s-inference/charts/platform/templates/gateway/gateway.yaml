@@ -36,6 +36,19 @@ spec:
                 matchLabels: { gateway.envoyproxy.io/owning-gateway-name: serverless2-external }
       envoyPDB:
         minAvailable: 1
+  # Access logs without query strings or credentials (docs/EDGE.md "Access logs"): a signed download URL, an api_key
+  # query parameter or a token in a path never reaches Loki; method, status, timing, request id, authority and upstream
+  # stay. Envoy's REQ_WITHOUT_QUERY formatter; Envoy Gateway adds the formatter extension when the format names it.
+  telemetry:
+    accessLog:
+      settings:
+        - format:
+            type: Text
+            text: {{ include "platform.accessLogFormat" . | quote }}
+          sinks:
+            - type: File
+              file:
+                path: /dev/stdout
 ---
 apiVersion: gateway.envoyproxy.io/v1alpha1
 kind: EnvoyProxy
@@ -60,6 +73,19 @@ spec:
                 matchLabels: { gateway.envoyproxy.io/owning-gateway-name: serverless2-internal }
       envoyPDB:
         minAvailable: 1
+  # Access logs without query strings or credentials (docs/EDGE.md "Access logs"): a signed download URL, an api_key
+  # query parameter or a token in a path never reaches Loki; method, status, timing, request id, authority and upstream
+  # stay. Envoy's REQ_WITHOUT_QUERY formatter; Envoy Gateway adds the formatter extension when the format names it.
+  telemetry:
+    accessLog:
+      settings:
+        - format:
+            type: Text
+            text: {{ include "platform.accessLogFormat" . | quote }}
+          sinks:
+            - type: File
+              file:
+                path: /dev/stdout
 ---
 apiVersion: gateway.networking.k8s.io/v1
 kind: Gateway

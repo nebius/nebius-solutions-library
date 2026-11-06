@@ -20,11 +20,16 @@ edge:
   caConfigMap: ""                       # internal mode: ConfigMap (namespace api, key ca.crt) that validates that hostname; empty = system roots
 images:                        # the platform images (terraform.tfvars images.versions): through the logical registry host with the cache, from the registry without
   host: registry.serverless2.local   # the logical registry host (images.host); the node-config component is rendered only with the cache
-  api: registry.serverless2.local/nebius/serverless2/api:0.11.39
+  api: registry.serverless2.local/nebius/serverless2/api:0.11.131
   dispatcher: registry.serverless2.local/nebius/serverless2/dispatcher:0.2.12
   ops: registry.serverless2.local/nebius/serverless2/ops:0.1.12
 api:                           # the control cluster only (clusters/common/apps/api.yaml)
   rateLimitPerMinute: 600      # edge.api_rate_limit_per_minute, per API key
+  # a proxied synchronous call may run this long (docs/API.md "Synchronous calls": the public route's request and
+  # backend timeouts); a stopping pod finishes its calls: terminationGracePeriodSeconds and the image's graceful
+  # shutdown stay above it (services/api/Dockerfile: 2460)
+  syncRequestTimeoutSeconds: 2400
+  terminationGracePeriodSeconds: 2460
   env:                         # the API container's environment, complete (services/api/config.py)
     - { name: LITELLM_URL, value: http://litellm.litellm.svc:4000 }
     - { name: LITELLM_MASTER_KEY, valueFrom: { secretKeyRef: { name: litellm-master, key: masterkey } } }
@@ -37,6 +42,7 @@ trust:                         # the CA bundle ConfigMap `trust` (stack/platform
   mounts: [{ name: trust, mountPath: /etc/ssl/msp, readOnly: true }]
 knative:
   skipTagResolving: [registry.serverless2.local, nvcr.io]   # registries Knative never resolves tags on (the logical host resolves on nodes only)
+  maxRevisionTimeoutSeconds: 3600   # the longest endpoint timeout_s (Knative max-revision-timeout-seconds); the API refuses definitions above it (KNATIVE_MAX_REVISION_TIMEOUT_S, the same value)
 gateway:
   wildcardSecret: hub-wildcard-tls   # the TLS Secret of the cluster's public hostnames (Certificate <cluster id>-wildcard, platform stage)
   serviceAnnotations: {}             # on the external Envoy Service: the static address's allocation id, the internal load-balancer type

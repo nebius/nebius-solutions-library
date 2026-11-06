@@ -80,8 +80,12 @@ fleet = {
           max_nodes = 2
         }
       }
-      # CPU-only pools for pre/post-processing run classes (gpu: 0): optional
-      # cpu_pools = { prep = { platform = "cpu-d3", preset = "16vcpu-64gb", max_nodes = 4 } }
+      # CPU-only pools for pre/post-processing run classes (gpu: 0), docs/FLEET.md "CPU pools": a Kueue flavor after
+      # `system` (quota = max_nodes x preset minus the per-node reserve), scaled from zero, the shared filesystem mounted
+      cpu_pools = {
+        prep         = { platform = "cpu-d3", preset = "16vcpu-64gb", max_nodes = 2 }                            # mounts the filesystem (default)
+        scratch-only = { platform = "cpu-d3", preset = "8vcpu-32gb", max_nodes = 1, shared_filesystem = false } # no mount: never for a run that needs it
+      }
     }
     # A second region: its own project and subnet; the fleet queues span both and the dispatcher sends
     # every run to the cheapest region that has a free pool of the model's GPU class (docs/SCHEDULING.md).
@@ -146,10 +150,21 @@ fleet = {
     ngc_api_key_env          = "NGC_API_KEY"          # NIM images through the cache, NGC-hosted weights
     hf_token_env             = "HF_TOKEN"             # gated Hugging Face weights
     registry_credentials_env = "REGISTRY_CREDENTIALS" # JSON {"<host>": {"username": "...", "password": "..."}}
+    registry_key_env         = "REGISTRY_STATIC_KEY"  # the image cache's static key of the hub ops SA: stack/scripts/registry-static-key.sh issues it once per fleet
+  }
+
+  # Restricted assets (docs/JOBS.md "Restricted assets"): operator-registered files or pinned trees on the weights
+  # filesystem, mounted read-only on a run's main container only by the run classes that name them, for the tenants
+  # granted them (tenants.<name>.assets). The operator publishes the file (0440 root:<gid>, parents 0550 or tighter).
+  assets = {
+    example-weights = { kind = "file", host_path = "/mnt/weights/private/example/model.bin", gid = 65532, sha256 = "0000000000000000000000000000000000000000000000000000000000000000", size = 1 }
   }
 
   # Tenants: namespace tenant-<name> on every cluster, a bucket + identity per region, LiteLLM API keys
   # (`./stack.sh output platform control -json tenant_keys`).
+  # Optional separate fleet-operator logins for cross-tenant key/usage management.
+  # Sensitive values: ./stack.sh output platform control -json fleet_operator_keys
+  fleet_operator_keys = [] # e.g. ["rene"]; never elevates a tenant admin
   tenants = {
     demo = {
       lifecycle_days = 90                  # run outputs expire after N days (0 = keep)
@@ -161,6 +176,7 @@ fleet = {
       # fair_share_weight = 2             # Kueue weighted fair sharing when the fleet is full
       # dedicated_pools   = ["h200-reserved-8x"]
       # allowed_images    = ["registry.serverless2.local/nebius/", "registry.serverless2.local/nvcr/nim/"]
+      assets = ["example-weights"]        # restricted assets this tenant's run classes may mount (fleet `assets`)
     }
   }
 
