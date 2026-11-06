@@ -12,5 +12,9 @@ resource "nebius_applications_v1alpha1_k8s_release" "this" {
       "operator.resources.limits.memory"          = var.limit_memory
       "operator.ofedDriver.livenessProbe.enabled" = false
     }
+    values = var.values
+    version = var.values == null ? null : sha256(jsonencode([
+      var.values, var.limit_cpu, var.limit_memory
+    ]))
   }
 }

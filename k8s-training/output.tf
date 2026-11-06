@@ -57,3 +57,8 @@ output "nat_gateway" {
   description = "NAT gateway public IP pool for allowlisting and prepared worker route-table ID for routing cutover; null when disabled."
   value       = one(module.nat-gateway)
 }
+
+output "runai_url" {
+  description = "Run:ai control-plane or regional worker HTTPS endpoint."
+  value       = one(module.runai[*].url)
+}

@@ -19,3 +19,9 @@ variable "limit_memory" {
   type        = string
   default     = "1280Mi"
 }
+
+variable "values" {
+  description = "Optional native Helm values YAML content for the Marketplace application."
+  type        = string
+  default     = null
+}

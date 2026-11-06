@@ -19,5 +19,10 @@ resource "nebius_applications_v1alpha1_k8s_release" "this" {
       "mig.strategy"                                               = var.mig_strategy != null ? var.mig_strategy : null
       "cdi.enabled"                                                = var.cdi_enabled
     }
+    values = var.values
+    version = var.values != null ? sha256(jsonencode([
+      var.values,
+      var.enable_dcgm_exporter, var.enable_dcgm_service_monitor, var.relabel_dcgm_exporter, var.mig_strategy, var.cdi_enabled
+    ])) : null
   }
 }

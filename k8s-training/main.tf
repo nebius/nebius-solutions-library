@@ -153,7 +153,7 @@ resource "nebius_mk8s_v1_node_group" "cpu-only" {
 # GPU NODE GROUPS
 #################
 data "nebius_billing_v1_pricing_policy" "gpu_spot" {
-  count = var.gpu_node_groups > 0 && var.gpu_nodes_preemptible && var.gpu_nodes_spot_pricing_policy_id != null && !local.gb300_enabled ? 1 : 0
+  count = var.gpu_node_groups > 0 && anytrue([for pool in local.gpu_groups : pool.preemptible]) && var.gpu_nodes_spot_pricing_policy_id != null && !local.gb300_enabled ? 1 : 0
 
   id = var.gpu_nodes_spot_pricing_policy_id
 }
@@ -164,25 +164,24 @@ resource "terraform_data" "gpu_spot_pricing_validation" {
 
   lifecycle {
     precondition {
-      condition     = var.gpu_nodes_preemptible
-      error_message = "gpu_nodes_spot_pricing_policy_id requires gpu_nodes_preemptible = true."
+      condition     = anytrue([for pool in local.gpu_groups : pool.preemptible])
+      error_message = "gpu_nodes_spot_pricing_policy_id requires at least one preemptible GPU pool."
     }
 
     precondition {
-      condition = var.gpu_nodes_preemptible ? (
+      condition = anytrue([for pool in local.gpu_groups : pool.preemptible]) ? (
         data.nebius_billing_v1_pricing_policy.gpu_spot[0].parent_id == var.parent_id
       ) : true
       error_message = "gpu_nodes_spot_pricing_policy_id must reference a pricing policy in parent_id."
     }
 
     precondition {
-      condition = var.gpu_nodes_preemptible ? (
-        try(
-          data.nebius_billing_v1_pricing_policy.gpu_spot[0].compute_instance_spec.v1.platform == local.gpu_nodes_platform,
-          false
-        )
-      ) : true
-      error_message = "gpu_nodes_spot_pricing_policy_id must reference a pricing policy for the selected GPU platform."
+      condition = anytrue([for pool in local.gpu_groups : pool.preemptible]) ? alltrue([
+        for pool in local.gpu_groups : try(
+          data.nebius_billing_v1_pricing_policy.gpu_spot[0].compute_instance_spec.v1.platform == pool.platform, false
+        ) if pool.preemptible
+      ]) : true
+      error_message = "gpu_nodes_spot_pricing_policy_id must match every preemptible GPU pool's platform."
     }
   }
 }
@@ -194,17 +193,17 @@ resource "nebius_mk8s_v1_node_group" "gpu" {
 
   lifecycle {
     precondition {
-      condition     = !local.enable_gpu_cluster || startswith(local.gpu_nodes_preset, "8gpu-")
-      error_message = "GPU clustering requires an 8-GPU preset. Leave 'infiniband_fabric' empty for single-GPU presets such as '${local.gpu_nodes_preset}'."
+      condition     = !local.gpu_groups[count.index].attach_gpu_cluster || (local.enable_gpu_cluster && startswith(local.gpu_groups[count.index].preset, "8gpu-"))
+      error_message = "GPU clustering requires an 8-GPU preset. Leave 'infiniband_fabric' empty for single-GPU presets such as '${local.gpu_groups[count.index].preset}', or disable fabric attachment for that pool."
     }
   }
 
-  autoscaling = var.gpu_nodes_autoscaling.enabled ? {
-    min_node_count = var.gpu_nodes_autoscaling.min_size == null ? var.gpu_nodes_autoscaling.max_size : var.gpu_nodes_autoscaling.min_size
-    max_node_count = var.gpu_nodes_autoscaling.max_size
+  autoscaling = local.gpu_groups[count.index].autoscaling.enabled ? {
+    min_node_count = local.gpu_groups[count.index].autoscaling.min_size == null ? local.gpu_groups[count.index].autoscaling.max_size : local.gpu_groups[count.index].autoscaling.min_size
+    max_node_count = local.gpu_groups[count.index].autoscaling.max_size
   } : null
 
-  fixed_node_count = var.gpu_nodes_autoscaling.enabled ? null : var.gpu_nodes_fixed_count_per_group
+  fixed_node_count = local.gpu_groups[count.index].autoscaling.enabled ? null : local.gpu_groups[count.index].fixed_count
 
   parent_id = nebius_mk8s_v1_cluster.k8s-cluster.id
   name      = "${var.cluster_name}-ng-gpu-${count.index}"
@@ -215,14 +214,15 @@ resource "nebius_mk8s_v1_node_group" "gpu" {
   strategy = var.node_group_strategy
   template = {
     metadata = {
-      labels = var.mig_parted_config != null ? {
+      labels = merge(local.gpu_groups[count.index].labels, var.mig_parted_config != null ? {
         "nvidia.com/mig.config" = var.mig_parted_config
-      } : {}
+      } : {})
     }
+    taints = local.gpu_groups[count.index].taints
 
     boot_disk = {
-      size_gibibytes = var.gpu_disk_size
-      type           = var.gpu_disk_type
+      size_gibibytes = local.gpu_groups[count.index].disk_size
+      type           = local.gpu_groups[count.index].disk_type
     }
 
     service_account_id = var.enable_k8s_node_group_sa ? nebius_iam_v1_service_account.k8s_node_group_sa[0].id : null
@@ -234,8 +234,8 @@ resource "nebius_mk8s_v1_node_group" "gpu" {
       }
     ]
     resources = {
-      platform = local.gpu_nodes_platform
-      preset   = local.gpu_nodes_preset
+      platform = local.gpu_groups[count.index].platform
+      preset   = local.gpu_groups[count.index].preset
     }
     filesystems = var.enable_filestore ? [
       {
@@ -246,14 +246,14 @@ resource "nebius_mk8s_v1_node_group" "gpu" {
         }
       }
     ] : null
-    gpu_cluster  = local.enable_gpu_cluster ? nebius_compute_v1_gpu_cluster.fabric_2[0] : null
+    gpu_cluster  = local.enable_gpu_cluster && local.gpu_groups[count.index].attach_gpu_cluster ? nebius_compute_v1_gpu_cluster.fabric_2[0] : null
     gpu_settings = var.gpu_nodes_driverfull_image ? { drivers_preset = local.device_preset } : null
-    preemptible  = var.gpu_nodes_preemptible ? {} : null
+    preemptible  = local.gpu_groups[count.index].preemptible ? {} : null
     follows_spot_price = (
-      var.gpu_nodes_preemptible && var.gpu_nodes_spot_pricing_policy_id == null
+      local.gpu_groups[count.index].preemptible && var.gpu_nodes_spot_pricing_policy_id == null
     ) ? {} : null
     spot_pricing_policy = (
-      var.gpu_nodes_preemptible && var.gpu_nodes_spot_pricing_policy_id != null
+      local.gpu_groups[count.index].preemptible && var.gpu_nodes_spot_pricing_policy_id != null
       ) ? {
       id = var.gpu_nodes_spot_pricing_policy_id
     } : null
@@ -267,7 +267,7 @@ resource "nebius_mk8s_v1_node_group" "gpu" {
       }
     } : null
 
-    reservation_policy = var.gpu_nodes_reservation_policy
+    reservation_policy = local.gpu_groups[count.index].preemptible ? null : local.gpu_groups[count.index].reservation_policy
     underlay_required  = false
     cloud_init_user_data = templatefile("${path.module}/../modules/cloud-init/k8s-cloud-init.tftpl", {
       enable_filestore         = var.enable_filestore ? "true" : "false",

@@ -1,4 +1,22 @@
 locals {
+  gpu_group_defaults = {
+    platform           = local.gpu_nodes_platform
+    preset             = local.gpu_nodes_preset
+    attach_gpu_cluster = local.enable_gpu_cluster
+    fixed_count        = var.gpu_nodes_fixed_count_per_group
+    autoscaling        = var.gpu_nodes_autoscaling
+    labels             = {}
+    taints             = null
+    preemptible        = var.gpu_nodes_preemptible
+    disk_size          = tonumber(var.gpu_disk_size)
+    disk_type          = var.gpu_disk_type
+    reservation_policy = var.gpu_nodes_reservation_policy
+  }
+  gpu_group_overrides = concat(var.gpu_node_group_overrides, [for index in range(var.gpu_node_groups) : { labels = {} }])
+  gpu_groups = [for index in range(var.gpu_node_groups) : merge(
+    local.gpu_group_defaults,
+    { for key, value in local.gpu_group_overrides[index] : key => value if value != null }
+  )]
   release-suffix = random_string.random.result
   ssh_public_key = var.ssh_public_key.key != null ? var.ssh_public_key.key : (
   fileexists(var.ssh_public_key.path) ? file(var.ssh_public_key.path) : null)
@@ -66,12 +84,12 @@ locals {
     }
   }
 
-  current_region_defaults = local.regions_default[var.region]
+  current_region_defaults = lookup(local.regions_default, var.region, {})
 
-  cpu_nodes_preset     = coalesce(var.cpu_nodes_preset, local.current_region_defaults.cpu_nodes_preset)
-  cpu_nodes_platform   = coalesce(var.cpu_nodes_platform, local.current_region_defaults.cpu_nodes_platform)
-  gpu_nodes_platform   = coalesce(var.gpu_nodes_platform, local.current_region_defaults.gpu_nodes_platform)
-  gpu_nodes_preset     = coalesce(var.gpu_nodes_preset, local.current_region_defaults.gpu_nodes_preset)
+  cpu_nodes_preset     = var.cpu_nodes_preset != null && var.cpu_nodes_preset != "" ? var.cpu_nodes_preset : local.current_region_defaults.cpu_nodes_preset
+  cpu_nodes_platform   = var.cpu_nodes_platform != null && var.cpu_nodes_platform != "" ? var.cpu_nodes_platform : local.current_region_defaults.cpu_nodes_platform
+  gpu_nodes_platform   = var.gpu_nodes_platform != null && var.gpu_nodes_platform != "" ? var.gpu_nodes_platform : local.current_region_defaults.gpu_nodes_platform
+  gpu_nodes_preset     = var.gpu_nodes_preset != null && var.gpu_nodes_preset != "" ? var.gpu_nodes_preset : local.current_region_defaults.gpu_nodes_preset
   infiniband_fabric    = var.infiniband_fabric != null ? var.infiniband_fabric : try(local.current_region_defaults.infiniband_fabric, null)
   enable_gpu_cluster   = local.infiniband_fabric != null ? trimspace(local.infiniband_fabric) != "" : false
   device_preset        = "cuda13.0"

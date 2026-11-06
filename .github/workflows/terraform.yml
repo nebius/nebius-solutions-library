@@ -79,6 +79,7 @@ jobs:
       uses: hashicorp/setup-terraform@v3
       with:
         terraform_version: "v1.11.4"
+        terraform_wrapper: false
 
     - name: Test observability access keys with mocked providers
       run: python3 modules/o11y/tests/check_access_keys.py
@@ -88,6 +89,21 @@ jobs:
       run: |
         for solution in k8s-training vm-instance dsvm bastion wireguard; do
           cp "$solution/terraform.tfvars.example" "$solution/terraform.tfvars"
+        done
+
+    - name: Validate regional Terraform without cloud access
+      run: |
+        terraform -chdir=k8s-training init -backend=false -input=false
+        terraform -chdir=k8s-training validate
+
+    - name: Check regional hardware plans without cloud access
+      run: |
+        terraform -chdir=k8s-training test -filter=tests/runai-dynamo.tftest.hcl
+
+    - name: Format Kubernetes profiles
+      run: |
+        for profile in k8s-training/*.tfvars.example; do
+          terraform fmt -check - < "$profile"
         done
 
     # Checks that all Terraform configuration files adhere to a canonical format
