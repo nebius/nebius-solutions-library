@@ -6,12 +6,17 @@ VictoriaMetrics; `alert_engine.py` compares ranks against their peers and prints
 naming the host, GPU and process. Pure-Python pipeline, no third-party packages.
 
 **Platform**: This pipeline runs on **two platforms** — Slurm/soperator (original) and **plain Kubernetes** (K8s, added
-2026-11). Select your platform below. The detection logic (Inspector plugin, aggregators, alert engine, CPU pinning
-mechanism, DCGM integration) is identical on both platforms; only the launcher and topology-discovery layer differ.
+2026-11). Select your platform below. The detection code is shared by both platforms; only the launcher and topology-discovery layer differ. Verification
+status differs: Slurm is verified (see Known limitations); Kubernetes is pending re-verification.
 
 ---
 
 ## Quickstart — Platform: Kubernetes (plain K8s)
+
+> **Kubernetes status: PENDING re-verification.** The K8s detection claims made earlier for the tiered mean check
+> (including "3/3 detections") were produced with, or reported against, code that contained the bugs described in the
+> Slurm validation below (a `NameError` in the pushed code, among others) and are unverified. Which code version produced
+> them is unresolved. Do not rely on the tiered check on K8s until it is re-run with the fixed code.
 
 Requires: `kubectl` configured to a cluster with at least 2 GPU nodes (H200 tested), `nfs` StorageClass, github.com
 access from pods. GPU nodes must be schedulable (not exclusively allocated to Slurm). On soperator clusters, scale
@@ -47,7 +52,7 @@ the Slurm worker NodeSet to 0 first: `kubectl scale nodeset worker -n soperator 
   to avoid Cilium's hairpin NAT restriction on this cluster.
 - `/dev/shm` is overridden to 32Gi (K8s default 64MB is insufficient for NCCL with 8 GPUs).
 - DCGM cause-classification is unavailable (the alert engine cannot SSH to K8s node internal hostnames from the
-  control machine). The Inspector-based timing detection (CV/mean checks) works identically to Slurm.
+  control machine). The Inspector-based timing detection (CV/mean checks) is the same code as on Slurm; K8s behaviour is unverified for the tiered check.
 - **Detection threshold calibration**: the Slurm-validated thresholds (`CV_Z_THRESH=60`, `MEAN_MM_THRESH=2.0`)
   detect 100ms faults on Slurm within 50-56s. On K8s, the same fault produces lower z-scores due to higher
   baseline InfiniBand timing variability in containers; the thresholds need K8s-specific calibration before
@@ -132,6 +137,14 @@ Run everything from the login node. Allow about 30 minutes plus the NCCL build (
 - **CPU pinning is new code**, validated on both platforms at 16 GPUs. Overhead (Slurm): full pinning +0.64%,
   dump-only +6.4%, unpinned +11.5%. Overhead (K8s, nanoGPT shape): `mfu=76.77%` full, `mfu=75.32%` dump.
   Untested: single-NUMA, 4-GPU nodes, SMT off, ARM, small CPU masks.
+- **Tiered mean check (`_check_mean_tiered`), Slurm status:** verified on one shape only (2 nodes / 16 GPUs, Megatron
+  TP4/PP2/DP2, 100 ms fault on rank 8, 3 healthy + 3 fault trials on the final code). Healthy: 0 tiered incidents and 0
+  `CHECK-FAILED`. Fault: true rank named in 3/3 at 167, 167 and 169 s (wait-induced path: 65, 55, 54 s; one earlier trial
+  took 223 s), each with a complete `[ALERT]` that is `UNCONFIRMED` / `LOG-ONLY` (does not page). Live testing found and
+  fixed three bugs (NameError, persistence state shared across groups, classifier KeyError) and added a minimum message
+  size of 512 B (`TIERED_MIN_BUCKET_BYTES`) because healthy runs false-fired on 4 B and 99 B collectives. That floor rests on
+  one shape and 6 trials, is not a general constant, and leaves collectives below 512 B uncovered. Untested: other node
+  counts, other communicator layouts, other fault sizes or ranks. Details: DESIGN_NOTES.md 6.5.
 - **Noise path:** the main-path `mean` check is gated off for 4-member communicators (`MEAN_CHECK_GATED_ROLE_N=4`; set it to `""` to restore). It produced about 64% of healthy-run alerts on the TP4/PP2/DP2 shape and never named the faulted rank. After the gate, 2 healthy runs went from 18 and 24 total alerts to 9 and 6 (mean-check alerts 12 and 16 down to 0, no PAGE), and 3 fault runs still named the true rank in 51, 50 and 56 s. The criterion comes from one shape, so a 4-member communicator in another job is gated too. Remaining LOG-ONLY noise is from other paths.
 - **Memory growth:** aggregators about +5 to +7 MB/hour and the alert engine about +4 MB/hour over a 107-minute soak;
   cause not found. Restart them between very long campaigns.

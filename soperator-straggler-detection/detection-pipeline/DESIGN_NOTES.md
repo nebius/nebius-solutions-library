@@ -2478,7 +2478,14 @@ unchanged):
    consecutive-window requirement) so the existing `mean_tracker` state is
    never touched.
 
-**Validation results (100 ms sleep, rank 1, 2-node 16-GPU H200 K8s cluster)**:
+> **STATUS NOTE (added after live Slurm testing, see 6.5): the K8s validation table below is UNVERIFIED.**
+> It was reported as "ALERT WOULD FIRE" (the qualifying condition `mm > 10` was met), not as emitted
+> `stat=mean_tiered` incidents. The code pushed in commits `b479a481` and `4668d2f9` raises `NameError` at the
+> `_emit` call once persistence is met, so it cannot have produced those incidents. Which code version produced the
+> K8s numbers is unresolved (6.5.6). Treat the table as an observation of the raw timing signal, not as a validation
+> of the shipped check.
+
+**Validation results (100 ms sleep, rank 1, 2-node 16-GPU H200 K8s cluster) -- UNVERIFIED, see note above**:
 
 | Trial | mm | 3/3 qualifying | Result |
 |---|---|---|---|
@@ -2491,11 +2498,10 @@ Healthy run: all 16 ranks at 409–576 μs (40.7% spread < 80% threshold → no
 split → `_check_mean_tiered` exits at the unimodal check → never reaches
 qualifying condition).
 
-**Backward compatibility with Slurm**: with flat ring AllReduce, all non-straggler
-ranks have similar timing (unimodal, spread < 80%) → no tier split → function
-exits silently. The fix is a no-op on Slurm. Live Slurm regression validation
-is a separate step; static code analysis confirms the new code paths share no
-state with existing detection logic.
+**Backward compatibility with Slurm (corrected)**: the original text here claimed the check is a silent no-op on
+Slurm because flat-ring timings are unimodal. Live Slurm testing showed that is false for the TP4/PP2/DP2 shape: the
+communicators are 4 members each and nearly every group splits into tiers (mostly 1 + 3) even when healthy. The check
+is NOT a no-op on Slurm; it was made safe there by the fixes in 6.5, and that safety is evidenced on one shape only.
 
 ### 6.4 CPU pinning on K8s (unchanged mechanism, different topology source)
 
@@ -2512,3 +2518,73 @@ Full pinning overhead on K8s (H200, nanoGPT 85M, 2-node):
 
 Consistent with the Slurm finding that full pinning is marginally faster (fewer
 thread scheduling conflicts when Inspector threads are dedicated).
+
+### 6.5 Live Slurm validation of the tiered check (2026-11): three bugs, one new threshold
+
+Scope: Slurm (soperator) only, 2 nodes / 16 GPUs, Megatron TP4/PP2/DP2, NCCL 2.32.3, full CPU pinning, 100 ms
+sleep fault on rank 8 and healthy runs, 300 iterations each. Kubernetes was NOT re-tested in this pass.
+
+**6.5.1 Bug 1 -- NameError.** `_check_mean_tiered` called `_emit(..., member, ...)` but the loop variable is
+`smember` (it unpacks `(shost, smember)`); `member` is undefined. Any incident that met persistence raised
+`NameError`. Fix: pass `smember`. Found by AST scan and a synthetic run before any live test.
+
+**6.5.2 Bug 2 -- shared persistence state across groups.** `_tiered_active_keys` was one set shared by every
+(comm, bucket, coll) group, but the check runs once per group per poll cycle. Each group's call recorded "not
+qualifying" for every other group's active key, so no streak could reach 3. Live symptom: 0 tiered incidents in 3
+fault trials although an independent observer saw the true rank qualify for 17, 43 and 48 consecutive polls. Fix:
+`_reset_tiered_keys` is scoped to the current (comm, bucket, coll). Proven offline with the real method and stubbed
+queries (two interleaved groups: no emit before, emit after).
+
+**6.5.3 Bug 3 -- classifier crash after the incident header.** `_emit` prints the `[STRAGGLER-INCIDENT]` line, then
+`build_finding_for_alert` passed `stat_name="mean_tiered"` to `classifier.py`, whose `STAT_TO_TIMESCALE` and threshold
+tables only know `mean`, `cv`, `outlier_count`. Result: `KeyError: 'mean_tiered'` logged as `[CHECK-FAILED]`, and no
+`[ALERT]` body was built (7, 8 and 10 per fault trial, equal to the incident counts). Fix, scoped to the adapter:
+map `mean_tiered` to `mean` for the classifier call only; the printed `stat=` label stays `mean_tiered`.
+`classifier.py` is unchanged. Consequence for earlier results: any "clean" result obtained before this fix came from
+code that could not build alerts.
+
+**6.5.4 New threshold -- minimum message size (`TIERED_MIN_BUCKET_BYTES`, default 512, env-overridable).**
+Replaying the real per-member series (VictoriaMetrics raw samples, the engine's 90 s freshness rule) through the
+patched check on the healthy runs showed false fires on 4 B and 99 B collectives (16-member communicators): on a tiny
+synchronising collective the last-arriving rank is persistently near-zero (about 1-4 us against about 1000 us for the
+rest), which the check cannot tell apart from a fault. My first hypothesis (80% gap too loose) was tested and refuted:
+those false fires have gaps of about 245x and the real fault has 23-76x, so no gap threshold separates them (gap 50:
+fault lost; gap 300: healthy clean but fault lost). A minimum bucket size does separate them. Sweep (3 healthy + 3
+fault replays): any floor from 512 B to 16 MiB gives 0 healthy false members and the true rank in 3/3. The data holds no
+collective sizes between 99 B and 8 KiB, so every floor in (99 B, 8 KiB] is equivalent; 512 B is the smallest round
+value above the largest false-firing size. **Evidence base: one workload shape, Slurm only, 6 trials. This is not a
+general constant.** Collectives below the floor are not covered by the tiered check.
+
+**6.5.5 Platform label.** `_detect_platform()` is log-only (read at one `print`; gates nothing). Inside a real Slurm
+job it now returns `slurm` (SLURM_* checked first: soperator pods carry a K8s service-account token even inside Slurm
+jobs). Outside a job (the engine runs under the supervisor on the login node) it returns `indeterminate (supervisory
+process ...)`; only the `KUBERNETES_SERVICE_HOST` env var counts as a positive Kubernetes signal, not the token file.
+
+**6.5.6 K8s provenance -- UNRESOLVED.** `alert_engine.py` is byte-identical in `b479a481` and `4668d2f9` (SHA-256
+`38a18866da2caeeb7332926a255f43ceca54b1e005eb93d340df09ec1ae33600`) and contains the NameError. No other copy of the
+tiered check exists on the Slurm machine. Requested from the K8s side (information only): tested commit hash, SHA-256
+of the executing `alert_engine.py`, and raw `stat=mean_tiered` lines. Until answered, the K8s "3/3" is unreconciled.
+
+**6.5.7 Final verification on the complete fix set (engine `alert_engine.py` SHA-256 starts `2460f6f4`, gate
+`MEAN_CHECK_GATED_ROLE_N=""` so `_check_mean` is active):**
+
+| Trial | wait-induced named true rank | `mean_tiered` named true rank | tiered incidents | CHECK-FAILED |
+|---|---|---|---|---|
+| final_healthy1-3 | no alert | no alert | 0, 0, 0 | 0, 0, 0 |
+| final_fault1 | 65 s | 167 s | 5 (6 in full engine log) | 0 |
+| final_fault2 | 55 s | 167 s | 6 (7 in full engine log) | 0 |
+| final_fault3 | 54 s | 169 s | 5 (5 in full engine log) | 0 |
+
+Every tiered incident has a matching complete `[ALERT]` (confidence UNCONFIRMED, severity LOG-ONLY, so none pages).
+No Traceback, KeyError or NameError after the final engine launch. All 18 tiered incidents in the engine log name the
+true rank. Reference points: a single earlier verification trial took 223 s; the campaign run before the classifier
+fix took 169, 180 and 171 s. The tiered check is about 110 s slower than the wait-induced path on this shape.
+`_check_mean` (active) never named the true rank in any fault trial, and the healthy runs still show 5-7 `stat=mean`
+incidents per trial from that path; those are not the tiered check.
+
+**6.5.8 Limits of this evidence.** 3 healthy + 3 fault trials, one shape, 16 GPUs, one fault (100 ms, rank 8). The
+healthy "0 incidents" result is a small sample. Tier structures other than the 4-member 1+3 splits seen here (other node
+counts, other communicator layouts) are untested. Back-to-back jobs: the 90 s freshness window can carry a previous
+job's series into the next; this appeared in offline replay (negative latencies) but was not seen as a live tiered
+incident.
+

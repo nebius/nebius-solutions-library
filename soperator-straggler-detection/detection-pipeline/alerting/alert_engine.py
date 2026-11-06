@@ -1220,7 +1220,12 @@ def build_finding_for_alert(vm_url, hostname, comm, member, bucket, stat_name, z
     # agg_cv_exec_time present in the same freshness window).
     mm_safe = mm if mm is not None else float("nan")
     result = {"z_node": z, "maxmed_node": mm_safe, "worst_val": worst_val, "peer_mean": peer_mean}
-    stat_hits = [(stat_name, result)]
+    # classifier.py's STAT_TO_TIMESCALE / threshold tables only know the original stat names; "mean_tiered"
+    # (a variant of the sustained mean signal) raised KeyError there, after the incident header was already
+    # printed, so no full alert was built. Map it to "mean" for the classifier call ONLY; the printed
+    # stat= label stays mean_tiered. classifier.py itself is unchanged.
+    classifier_stat = "mean" if stat_name == "mean_tiered" else stat_name
+    stat_hits = [(classifier_stat, result)]
     real_slot = _query_gpu_slot(vm_url, hostname, member)
     slot_known = real_slot is not None and real_slot >= 0
     slot = real_slot if slot_known else 0
@@ -1467,20 +1472,28 @@ def format_alert(finding, coverage):
     return f"{header}{cascade_line}\n\n{body}\n{cov_line}{severity_line}"
 
 
+TIERED_MIN_BUCKET_BYTES = int(os.environ.get("TIERED_MIN_BUCKET_BYTES", "512"))  # see _check_mean_tiered
+
+
 def _detect_platform():
     """Detect whether this alert engine is running on Kubernetes or Slurm.
     Used for startup logging only -- the tiered mean check runs
     unconditionally on both platforms (it is a silent no-op when the
     timing distribution is unimodal, which is the typical Slurm flat-
     ring AllReduce case)."""
-    if os.environ.get("KUBERNETES_SERVICE_HOST"):
-        return "kubernetes"
-    if os.path.exists("/var/run/secrets/kubernetes.io/serviceaccount/token"):
-        return "kubernetes"
+    # Slurm job context first: soperator runs Slurm inside Kubernetes pods, so
+    # KUBERNETES_SERVICE_HOST and the service-account token exist inside a real
+    # Slurm job too and must not win.
     if any(os.environ.get(k) for k in
            ("SLURM_JOB_ID", "SLURM_NODEID", "SLURM_PROCID", "SLURM_STEP_ID")):
         return "slurm"
-    return "slurm"  # backward-compatible default for unrecognised environments
+    # No Slurm job context. The engine itself is a supervisory process, never a training rank, so a missing
+    # SLURM_* is expected here (e.g. launched from the login node by run.sh). On soperator a K8s
+    # service-account token file exists on every node, so the file alone proves nothing: only the
+    # KUBERNETES_SERVICE_HOST env var (set in a real K8s pod) counts as a positive Kubernetes signal.
+    if os.environ.get("KUBERNETES_SERVICE_HOST"):
+        return "kubernetes"
+    return "indeterminate (supervisory process: no SLURM_* job context, no KUBERNETES_SERVICE_HOST)"
 
 
 class AlertEngine:
@@ -1597,8 +1610,8 @@ class AlertEngine:
         self.tiered_tracker = CVPersistenceTracker(0.5, T.PERSIST_WINDOW, T.PERSIST_REQUIRED)
         self._tiered_active_keys = set()  # tracks keys seen in the last poll's straggler tiers
         self._platform = _detect_platform()
-        print(f"[PLATFORM] Detected: {self._platform} -- tiered mean check active "
-              f"(no-op when distribution is unimodal; fixes K8s hierarchical AllReduce gap)", flush=True)
+        print(f"[PLATFORM] Detected: {self._platform} -- tiered mean check active on all platforms "
+              f"(log label only; it does not gate any check)", flush=True)
         # P27-hotfix9 -- rolling pool of recently-fired timing-fallback
         # alerts, for _correlate_firing_timing_alerts. NOT scoped to a
         # single poll cycle: confirmed this session that two real,
@@ -5437,9 +5450,20 @@ class AlertEngine:
                         m.get("slurm_job_id", ""),
                     )
 
+        # Minimum message size. NEW, NARROWLY-EVIDENCED THRESHOLD -- not a general constant.
+        # Evidence: Slurm TP4/PP2/DP2 on 16 GPUs, 6 trials (3 healthy, 3 fault, 100 ms). Replaying the real
+        # per-member series, healthy runs false-fired on 4 B / 99 B collectives (16-member comms): on a tiny
+        # synchronising collective the last-arriving rank is always near-zero and persistently the same rank,
+        # so this check cannot tell that from a fault. The fault was on a 16 MiB collective. No bucket exists
+        # in the data between 99 B and 8 KiB, so every floor in that range replays identically; 512 B is the
+        # smallest round value above the largest false-firing bucket. Gap-threshold changes did not help.
+        if int(bucket) < TIERED_MIN_BUCKET_BYTES:
+            self._reset_tiered_keys(set(), now_ts, comm, bucket, coll)
+            return
+
         # Need at least 3 ranks for meaningful tier detection
         if len(all_timing) < 3:
-            self._reset_tiered_keys(set(), now_ts)
+            self._reset_tiered_keys(set(), now_ts, comm, bucket, coll)
             return
 
 
@@ -5461,7 +5485,7 @@ class AlertEngine:
 
         if not split_indices:
             # Unimodal: single tier -- existing _check_mean handles this.
-            self._reset_tiered_keys(set(), now_ts)
+            self._reset_tiered_keys(set(), now_ts, comm, bucket, coll)
             return
 
         # --- Step 3: Build tiers from split indices ---
@@ -5473,7 +5497,7 @@ class AlertEngine:
         tiers.append(sorted_members[prev:])
 
         if len(tiers) < 2:
-            self._reset_tiered_keys(set(), now_ts)
+            self._reset_tiered_keys(set(), now_ts, comm, bucket, coll)
             return
 
         # The LOWEST timing tier = candidate straggler group.
@@ -5488,12 +5512,12 @@ class AlertEngine:
         # Allow at most 25% of total ranks, minimum 1. Guards against treating
         # a legitimately faster NUMA group as the "straggler tier".
         if len(straggler_tier) > max(1, n_total // 4):
-            self._reset_tiered_keys(set(), now_ts)
+            self._reset_tiered_keys(set(), now_ts, comm, bucket, coll)
             return
 
         # Guard 2: reference tier needs >= 2 members for a meaningful stdev.
         if len(reference_tier) < 2:
-            self._reset_tiered_keys(set(), now_ts)
+            self._reset_tiered_keys(set(), now_ts, comm, bucket, coll)
             return
 
         # --- Step 4: Compute reference tier statistics ---
@@ -5522,7 +5546,7 @@ class AlertEngine:
                 break
 
         if not has_coverage:
-            self._reset_tiered_keys(set(), now_ts)
+            self._reset_tiered_keys(set(), now_ts, comm, bucket, coll)
             return
 
         # --- Step 6: Evaluate each potential straggler against reference tier ---
@@ -5563,7 +5587,7 @@ class AlertEngine:
                 # everyone was waiting, so its NCCL time is minimal.
                 self._emit(
                     "mean_tiered",
-                    hostname, comm, member, bucket, coll,
+                    hostname, comm, smember, bucket, coll,
                     z_tiered, mm_tiered,
                     timing_us,       # worst_val = the straggler's own exec time
                     ref_median,      # peer_mean = reference tier median
@@ -5576,15 +5600,19 @@ class AlertEngine:
                 )
 
         # Reset streak for any keys that are no longer in the straggler tier
-        self._reset_tiered_keys(new_active_keys, now_ts)
+        self._reset_tiered_keys(new_active_keys, now_ts, comm, bucket, coll)
 
-    def _reset_tiered_keys(self, new_active_keys, now_ts):
+    def _reset_tiered_keys(self, new_active_keys, now_ts, comm, bucket, coll):
         """Record 0.0 (not qualifying) for any straggler keys seen in a previous
-        poll cycle that are absent from the current one, so their persistence
-        streak resets cleanly rather than freezing at the last observed value."""
-        for stale_key in self._tiered_active_keys - new_active_keys:
+        poll cycle FOR THIS (comm, bucket, coll) that are absent from the current
+        one, so their persistence streak resets cleanly. Scoped to the group:
+        this check runs once per group per cycle, so a global set would reset
+        every other group's streak on each call and nothing could persist."""
+        mine = {k for k in self._tiered_active_keys
+                if k[1] == comm and k[4] == bucket and k[5] == coll}
+        for stale_key in mine - new_active_keys:
             self.tiered_tracker.observe(stale_key, 0.0, now_ts)
-        self._tiered_active_keys = new_active_keys
+        self._tiered_active_keys = (self._tiered_active_keys - mine) | new_active_keys
 
     def _check_cv(self, hostname, comm, bucket, coll):
         # P22.2 -- coll filter added: without it this query would match

@@ -1236,13 +1236,37 @@ Mitigations:
 The alert engine cannot SSH to K8s node internal hostnames from the control
 machine. `[DCGM-HOSTENGINE-DOWN]` warnings are expected and harmless — DCGM-
 sourced cause classification is unavailable on K8s via the current SSH-based path.
-The Inspector-based timing detection (CV/mean/tiered) works identically to Slurm.
+The Inspector-based timing detection (CV/mean) runs on K8s too; the tiered check's K8s behaviour is PENDING re-verification (see DESIGN_NOTES.md 6.3 status note and 6.5).
 
-### Tiered detection threshold calibration
+### Tiered detection (`_check_mean_tiered`): Slurm-verified state, thresholds, what to re-check
 
-The `TIERED_MM_THRESH = 10.0` threshold in `_check_mean_tiered` was set based
-on the gap between healthy-run mm (< 1.5) and 100 ms fault mm (~25). If the
-cluster's hierarchical AllReduce topology changes (different node count, IB switch
-configuration), re-verify by running a healthy job and confirming the tiered check
-never splits (all ranks within the 80% gap threshold). The 80% threshold itself
-has an 8× safety margin over the maximum observed healthy jitter.
+Status: verified on Slurm only (2 nodes / 16 GPUs, Megatron TP4/PP2/DP2, 3 healthy + 3 fault trials on the final code);
+Kubernetes pending re-verification. Full history and evidence: DESIGN_NOTES.md 6.5.
+
+Bugs fixed (all in `alerting/alert_engine.py`; `classifier.py` and `_check_mean` unchanged):
+1. NameError: `member` undefined at the `_emit` call (use `smember`).
+2. Persistence state shared across (comm, bucket, coll) groups reset every other group's streak
+   (`_reset_tiered_keys` now scoped per group).
+3. `classifier.py` has no entry for stat `mean_tiered`: KeyError after the incident header, so no `[ALERT]` body.
+   The classifier call now receives `mean` (printed `stat=` stays `mean_tiered`).
+
+Thresholds and their evidence:
+- `GAP_RATIO_THRESH = 0.8` (tier split): unchanged. Raising it does NOT remove healthy false fires and loses the fault above
+  about 50 (replay on real data).
+- `TIERED_MM_THRESH = 10.0`: unchanged. Real Slurm fault mm was 23-76.
+- `TIERED_MIN_BUCKET_BYTES = 512` (env-overridable): NEW, narrowly evidenced (one shape, Slurm, 6 trials). Collectives
+  smaller than this are skipped, because on tiny synchronising collectives the last-arriving rank is always near zero and
+  the check cannot tell that from a fault. The data had no sizes between 99 B and 8 KiB, so the true boundary is not
+  pinned down within that range. Faults on collectives below 512 B are not covered by this check.
+
+Operational notes:
+- Expect tiered alerts to be `UNCONFIRMED` / `LOG-ONLY` (they do not page) and to arrive about 110 s after the
+  wait-induced path on this shape (167-169 s vs 54-65 s in the final campaign; one earlier trial took 223 s).
+- To tell the check's output apart, grep `stat=mean_tiered` in `[STRAGGLER-INCIDENT]` lines. Any `[CHECK-FAILED] mean_tiered`
+  line is a defect, not noise.
+- The engine startup line `[PLATFORM] Detected: ...` is a label only and gates nothing. Under the supervisor on the login
+  node it reads `indeterminate (supervisory process ...)`; inside a Slurm job it reads `slurm`.
+- Re-verify after any change to topology (node count, communicator layout) or NCCL: run healthy trials and require zero
+  `stat=mean_tiered` incidents and zero `CHECK-FAILED`; run a fault trial and require the true rank plus a complete `[ALERT]`.
+- The offline replay used for the threshold work (VictoriaMetrics raw export, 90 s freshness, real `_check_mean_tiered`
+  with stubbed queries) is not in this repository; it lives with the validation record outside git.
