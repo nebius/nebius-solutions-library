@@ -166,7 +166,6 @@ resources:
               version: ${vmstack_crds_version}
               %{~ endif ~}
             interval: 5m
-            timeout: 5m
             %{~ if vmstack_version != "" ~}
             version: ${vmstack_version}
             %{~ endif ~}
@@ -836,7 +835,6 @@ resources:
           slurmClusterStorage:
             enabled: true
             interval: 5m
-            timeout: 5m
             overrideValues:
               volume:
                 controllerSpool:
@@ -971,7 +969,6 @@ resources:
           kruise:
             enabled: true
             interval: 5m
-            timeout: 5m
             version: 1.9.1-custom
             overrideValues:
               manager:
@@ -1010,7 +1007,6 @@ resources:
           nodeConfigurator:
             enabled: true
             interval: 5m
-            timeout: 5m
             values:
               rebooter:
                 resources:
