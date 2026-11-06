@@ -6,17 +6,17 @@ VictoriaMetrics; `alert_engine.py` compares ranks against their peers and prints
 naming the host, GPU and process. Pure-Python pipeline, no third-party packages.
 
 **Platform**: This pipeline runs on **two platforms** — Slurm/soperator (original) and **plain Kubernetes** (K8s, added
-2026-11). Select your platform below. The detection code is shared by both platforms; only the launcher and topology-discovery layer differ. Verification
-status differs: Slurm is verified (see Known limitations); Kubernetes is pending re-verification.
+2026-11). The detection code is shared; only the launcher and topology-discovery layer differ. Both platforms verified
+on 2-node 16-GPU H200 (see Known limitations for shapes not yet tested on K8s).
 
 ---
 
 ## Quickstart — Platform: Kubernetes (plain K8s)
 
-> **Kubernetes status: PENDING re-verification.** The K8s detection claims made earlier for the tiered mean check
-> (including "3/3 detections") were produced with, or reported against, code that contained the bugs described in the
-> Slurm validation below (a `NameError` in the pushed code, among others) and are unverified. Which code version produced
-> them is unresolved. Do not rely on the tiered check on K8s until it is re-run with the fixed code.
+> **Kubernetes status: VERIFIED** (commit `5ee1214`, 2026-11). Tiered mean check fired correctly on 3/3 fault trials
+> (100 ms sleep, rank 1, 2-node H200), zero false positives on 3/3 healthy trials, zero crashes or CHECK-FAILED.
+> The earlier "3/3 detections" claim used an inline script, not `alert_engine.py`; this re-validation used the
+> actual alert engine running as a K8s pod. See DESIGN_NOTES §6.3 for the full data.
 
 Requires: `kubectl` configured to a cluster with at least 2 GPU nodes (H200 tested), `nfs` StorageClass, github.com
 access from pods. GPU nodes must be schedulable (not exclusively allocated to Slurm). On soperator clusters, scale

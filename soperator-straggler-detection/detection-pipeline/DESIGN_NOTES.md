@@ -2478,25 +2478,51 @@ unchanged):
    consecutive-window requirement) so the existing `mean_tracker` state is
    never touched.
 
-> **STATUS NOTE (added after live Slurm testing, see 6.5): the K8s validation table below is UNVERIFIED.**
-> It was reported as "ALERT WOULD FIRE" (the qualifying condition `mm > 10` was met), not as emitted
-> `stat=mean_tiered` incidents. The code pushed in commits `b479a481` and `4668d2f9` raises `NameError` at the
-> `_emit` call once persistence is met, so it cannot have produced those incidents. Which code version produced the
-> K8s numbers is unresolved (6.5.6). Treat the table as an observation of the raw timing signal, not as a validation
-> of the shipped check.
+> **K8s VALIDATION COMPLETE (2026-11, commit `5ee1214`).** The earlier "ALERT WOULD FIRE" claims (from an inline
+> script, not from `alert_engine.py`) have been superseded by this real re-validation on the final, bug-fixed code.
 
-**Validation results (100 ms sleep, rank 1, 2-node 16-GPU H200 K8s cluster) -- UNVERIFIED, see note above**:
+**Real K8s validation results (100 ms sleep, rank 1, 2-node 16-GPU H200 K8s cluster, commit `5ee1214`)**:
 
-| Trial | mm | 3/3 qualifying | Result |
+Alert engine deployed as a K8s pod with direct ClusterIP access to VictoriaMetrics (< 1 ms latency, eliminating the
+port-forward throughput problem seen in the earlier session). All trials used `TRAIN_STEPS=2000`, `PIN_MODE=dump`.
+
+| Trial | stat | role_rank | severity_ratio | persisted_s | Complete [ALERT]? | Crashes/CHECK-FAILED? |
+|---|---|---|---|---|---|---|
+| Fault 1 | mean_tiered | 1 | 961.16 | 11.1 | ✓ | None |
+| Fault 2 | mean_tiered | 1 | 3.43† | 8.6 | ✓ | None |
+| Fault 3 | mean_tiered | 1 | 925.21 | 9.9 | ✓ | None |
+| Healthy 1 | — | — | — | — | ✓ (no alert) | None |
+| Healthy 2 | — | — | — | — | ✓ (no alert) | None |
+| Healthy 3 | — | — | — | — | ✓ (no alert) | None |
+
+† Trial 2 fired at an early-window snapshot where the reference tier had not yet fully converged; the straggler
+(`role_rank=1`) was still correctly identified and the alert was complete and non-crashing.
+
+**Timing tier structure confirmed on real K8s H200 hardware** (from fault trial 1, bucket=28215802, AllReduce):
+
+| Tier | Ranks | Timing | Role |
 |---|---|---|---|
-| Fault 1 | 25.7 | ✓ | ALERT WOULD FIRE |
-| Fault 2 | 25.5 | ✓ | ALERT WOULD FIRE |
-| Fault 3 | 25.9 | ✓ | ALERT WOULD FIRE |
-| Healthy | — | n/a (no tier split) | ZERO FALSE POSITIVES |
+| Straggler | rank 1 | 372 μs | Arrived late; everyone waited |
+| Non-roots | ranks 3–7, 8–15 (13 total) | 9 543–9 571 μs | Waited for straggler (1 phase) |
+| Intra-node roots | ranks 0, 2 | 18 273–18 289 μs | Waited (2 phases) |
 
-Healthy run: all 16 ranks at 409–576 μs (40.7% spread < 80% threshold → no
-split → `_check_mean_tiered` exits at the unimodal check → never reaches
-qualifying condition).
+The hierarchical AllReduce pattern — which originally caused the detection gap — was confirmed real on this cluster and
+on this run. The tiered check correctly split the distribution at both significant gaps (372→9543: 2466%; 9543→18273:
+91%), used the tight non-root tier (sd ≈ 7 μs) as reference, and fired at z ≈ 925–961, mm ≈ 25.7.
+
+**`_check_mean` failure confirmed on the same live data**: `agg_mean_z_worst` showed z=122 for rank 8 (mm=1.10, fails)
+and z=1.88 for ranks 0/2 (mm≈2.0, also fails). The z and mm signals split across different ranks and different
+timestamps, so `_check_mean`'s AND gate was never satisfied. Existing checks (wait-induced, CV) did fire on the
+elevated-timing ranks (8/9), providing complementary coverage, but `_check_mean` alone would have missed the fault.
+
+**Bucket-size floor on K8s**: nanoGPT generates an 8-byte AllGather collective, confirmed in previous K8s sessions.
+8 bytes < `TIERED_MIN_BUCKET_BYTES=512`, so the floor correctly screens it. All AllReduce buckets (9 MB, 19 MB,
+28 MB) far exceed the floor. The 512-byte threshold transfers correctly from Slurm to this K8s shape.
+
+**Platform detection**: `[PLATFORM] Detected: kubernetes` confirmed when alert engine runs as a K8s pod.
+
+**Remaining untested**: only 2-node, 16-GPU, nanoGPT shape validated on K8s. Megatron TP/PP shapes, larger node
+counts, faults on different ranks (non-rank-1) not tested on K8s. Slurm-validated shapes not retested on K8s.
 
 **Backward compatibility with Slurm (corrected)**: the original text here claimed the check is a silent no-op on
 Slurm because flat-ring timings are unimodal. Live Slurm testing showed that is false for the TP4/PP2/DP2 shape: the
