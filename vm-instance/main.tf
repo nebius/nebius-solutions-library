@@ -31,4 +31,6 @@ module "instance-module" {
   aws_access_key_id       = var.aws_access_key_id
   aws_secret_access_key   = var.aws_secret_access_key
   preemptible             = var.preemptible
+  reservation_ids         = var.reservation_ids
+  reservation_policy      = var.reservation_policy
 }
