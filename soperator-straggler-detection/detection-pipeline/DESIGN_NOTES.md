@@ -2614,3 +2614,89 @@ counts, other communicator layouts) are untested. Back-to-back jobs: the 90 s fr
 job's series into the next; this appeared in offline replay (negative latencies) but was not seen as a live tiered
 incident.
 
+
+---
+
+### 6.6 K8s production-shape validation — 2-node constraint (2026-11)
+
+**Scope and hard constraint**: validated on 2 nodes / 16 H200 GPUs only. Behavior at 4+ nodes is completely untested.
+Tier structure at larger node counts is a genuine unknown — do not extrapolate from these results.
+
+#### 6.6.1 Megatron-LM TP/PP on K8s: HPC-X NCCL incompatibility (confirmed root cause)
+
+Megatron-LM with TP>1 or PP>1 fails with `NCCL Error 2: unhandled system error` and a segfault in
+`/opt/hpcx/nccl_rdma_sharp_plugin/lib/libnccl-net.so(ncclIbDeregMr+0x1f)` during NCCL communicator setup.
+
+Evidence:
+- TP=4/PP=1, TP=4/PP=2, TP=2/PP=2: all fail identically
+- `NCCL_SHARP_DISABLE=1`, `NCCL_NET_GDR_DISABLE=1`, `NCCL_NET=Socket`: none resolved the segfault
+- Root cause: HPC-X SHARP/IB RDMA plugin (bundled in pytorch:25.01-py3 at `/opt/hpcx/`) segfaults in `ncclIbDeregMr`
+  when multiple NCCL process groups are created concurrently, as Megatron TP+PP+DP requires
+- nanoGPT works because it creates only ONE NCCL process group
+- Megatron TP=1/PP=1 (pure DP, one process group) works
+
+This is an HPC-X/NCCL plugin compatibility issue in the pytorch:25.01-py3 container on this cluster. It is NOT
+a straggler detection pipeline issue. Workaround: use a container without HPC-X, or use TP=1/PP=1 (pure DP).
+
+**TP/PP on K8s is untested for straggler detection purposes until this container issue is resolved.**
+
+#### 6.6.2 Megatron DP (TP=1/PP=1) on K8s: validated shape
+
+Shape: `TP=1 PP=1 DP=16` on 2 nodes × 8 GPUs = 16 GPUs. Same single-AllReduce pattern as nanoGPT 85M validation.
+
+**Straggler signal behavior** (100 ms sleep on rank 1, 5000 steps):
+- Large gradient AllReduce buckets (7 MB, 3.5 MB): NO straggler signal visible. DDP's async gradient overlap
+  appears to hide the sleep-before-backward injection effect on the main gradient AllReduces.
+- Small post-backward AllReduces (8-byte gradient norm/loss scale sync): 100ms straggler signal IS visible here.
+  The 100ms sleep delays rank 1's post-backward arrival, causing other ranks to wait 100ms on each
+  gradient norm AllReduce.
+- The existing `_check_mean` detects the signal on the 8-byte bucket (186-677× ratio, z=212-253) correctly.
+  Attribution is to the WAITING rank (rank 0), not the STRAGGLING rank (rank 1) — this is the expected
+  cross-rank detection pattern documented elsewhere.
+- The tiered check correctly skips the 8-byte bucket (< `TIERED_MIN_BUCKET_BYTES=512`).
+- The tiered check processes the 7MB bucket but sees only natural hierarchical tier variation (4.8×) below
+  the `TIERED_MM_THRESH=10` threshold → no false alert. Correct behavior.
+
+| Trial | Existing check fired? | Bucket | z | Tiered check fired? | CHECK-FAILED? |
+|---|---|---|---|---|---|
+| Healthy 1-3 | No | — | — | No | 0 |
+| Fault 1 | Yes | 8 B | 212 | No (8B < 512B floor) | 0 |
+| Fault 2 | Yes | 8 B | 253 | No (8B < 512B floor) | 0 |
+| Fault 3 | Yes | 8 B | 253 | No (8B < 512B floor) | 0 |
+
+**Key finding**: for Megatron DP, the 100ms-sleep-before-backward fault injection does not create the
+same hierarchical AllReduce straggler signal (fast outlier vs slow tier) that nanoGPT produces. It creates
+a signal on the small post-backward synchronization collectives instead. The tiered check is not triggered
+on this workload with this injection method. The existing `_check_mean` does detect the fault (albeit with
+wrong rank attribution), and the bucket-size floor correctly prevents false fires on small collectives.
+
+**To test the tiered check specifically on Megatron**: a fault injection that delays the NCCL AllReduce call
+itself (not just the Python-level backward start) would be needed. The current sleep-before-backward method
+relies on DDP's synchronous blocking — which appears to be fully async for large Megatron gradient AllReduces.
+
+#### 6.6.3 Operational findings (K8s-specific, 2026-11)
+
+- The deploy script (`k8s/deploy.sh`) deploys the full pipeline in one command. Alert engine runs as a K8s
+  Deployment with direct ClusterIP access to VictoriaMetrics (< 1 ms, eliminates the port-forward slowness
+  that made earlier iterations unworkable).
+- Megatron K8s trains need a 20s startup stagger per rank (`sleep $((15 + RANK * 20))`) before torchrun,
+  to allow headless service DNS to propagate. nanoGPT's natural delay (pin_resolve.py) provides this
+  stagger automatically; Megatron with PIN_MODE=off starts in < 2s without it.
+- The job-boundary "JOB NOT CONFIRMED STILL RUNNING" message appears on every K8s alert because the
+  Slurm squeue guard is unavailable (expected, documented, reduces alert confidence to UNCONFIRMED).
+- DCGM SSH-based cause classification unavailable in K8s pods (SSH not installed, nodes not DNS-resolvable
+  as internal hostnames from within pods). All alerts show confidence=UNCONFIRMED.
+
+#### 6.6.4 NOT YET VALIDATED (must not be claimed for production POC)
+
+| Item | Status |
+|---|---|
+| Node counts > 2 | **NOT VALIDATED** — tier structure at 4+/8+ nodes is unknown |
+| Megatron TP/PP on K8s | **NOT VALIDATED** — HPC-X NCCL incompatibility blocks testing |
+| tiered check on Megatron workload | **NOT VALIDATED** — fault injection does not trigger tiered signal |
+| Faults on ranks other than rank 1 | Tested only for rank 1 on K8s |
+| Longer-running jobs / production checkpointing | Not tested |
+
+**The mandatory next step before any customer-facing K8s POC claim**: resolve the HPC-X NCCL multi-communicator
+incompatibility (use a container without HPC-X, or a later pytorch image), then validate Megatron TP/PP straggler
+detection at 4+ nodes where hierarchical AllReduce creates genuine inter-tier signals at scale.

@@ -13,52 +13,77 @@ on 2-node 16-GPU H200 (see Known limitations for shapes not yet tested on K8s).
 
 ## Quickstart — Platform: Kubernetes (plain K8s)
 
-> **Kubernetes status: VERIFIED** (commit `5ee1214`, 2026-11). Tiered mean check fired correctly on 3/3 fault trials
-> (100 ms sleep, rank 1, 2-node H200), zero false positives on 3/3 healthy trials, zero crashes or CHECK-FAILED.
-> The earlier "3/3 detections" claim used an inline script, not `alert_engine.py`; this re-validation used the
-> actual alert engine running as a K8s pod. See DESIGN_NOTES §6.3 for the full data.
+> **Kubernetes verification status** (commit `691c296` + this task, 2026-11):
+> - **nanoGPT 85M (DDP)**: tiered mean check fires 3/3 fault trials, zero false positives 3/3 healthy. ✓
+> - **Megatron DP (TP=1/PP=1)**: existing `_check_mean` detects straggler signal (8-byte post-backward AllReduces);
+>   tiered check correctly silent (small bucket below 512-byte floor). 3/3 healthy trials clean. ✓
+> - **Megatron TP/PP (TP>1 or PP>1)**: BLOCKED by HPC-X NCCL multi-communicator segfault in pytorch:25.01-py3.
+>   Unresolved. See DESIGN_NOTES §6.6.1.
+> - **Node counts > 2**: NOT TESTED. Tier structure at 4+ nodes is an unknown.
 
-Requires: `kubectl` configured to a cluster with at least 2 GPU nodes (H200 tested), `nfs` StorageClass, github.com
-access from pods. GPU nodes must be schedulable (not exclusively allocated to Slurm). On soperator clusters, scale
-the Slurm worker NodeSet to 0 first: `kubectl scale nodeset worker -n soperator --replicas=0`.
+**Prerequisites** (cluster-agnostic; substitute your cluster's values where shown):
+- `kubectl` >= 1.27 configured to your cluster
+- At least 2 GPU nodes schedulable (not exclusively reserved for other workloads)
+- A `ReadWriteMany` StorageClass (shown as `<RWX_STORAGECLASS>` below; `nfs` and similar work)
+- github.com reachable from pods (for initial workspace clone)
+- Container image `nvcr.io/nvidia/pytorch:25.01-py3` pullable from pods
+
+**On soperator (Slurm-on-K8s) clusters**: GPU nodes are exclusively allocated to Slurm workers. Free them first:
+```bash
+kubectl scale nodeset worker -n soperator --replicas=0   # confirm no active Slurm jobs first
+# After K8s testing: kubectl scale nodeset worker -n soperator --replicas=<original>
+```
 
 1. **Clone** (on the control machine where kubectl runs)
    ```bash
    git clone -b add/straggler-detection-v1-beta https://github.com/nebius/nebius-solutions-library.git
    cd nebius-solutions-library/soperator-straggler-detection/detection-pipeline
    ```
-2. **Install** (creates namespace, NFS workspace, builds Inspector plugin + NCCL 2.32.3 in a GPU pod)
+
+2. **One-command deploy** (creates namespace, workspace PVC, VictoriaMetrics, alert engine)
    ```bash
-   k8s/install_k8s.sh
-   # For full CPU pinning (builds NCCL 2.32.3, ~15 min extra): INSTALL_K8S_BUILD_NCCL=1 k8s/install_k8s.sh
+   # With your cluster's RWX storage class (default: nfs):
+   STORAGE_CLASS=<RWX_STORAGECLASS> k8s/deploy.sh
+   # Optional flags:
+   #   --gpu-label nebius.com/gpu=true   (default; override for other clusters)
+   #   --build-nccl                      (builds NCCL 2.32.3 for full CPU pinning, ~15 min)
    ```
-   Success = `install_k8s.sh completed` and `cluster_k8s.env` written with real node/GPU counts.
-3. **Launch the pipeline** (VictoriaMetrics already deployed by install; this starts aggregator sidecars + alert engine)
+   Success = last line `=== Deploy complete ===` and `cluster_k8s.env` written.
+   Alert engine starts automatically inside the cluster (direct ClusterIP access to VM, no port-forward needed).
+
+3. **Smoke test** (nanoGPT 85M, 2 nodes, verify Inspector + aggregator + tiered detection)
    ```bash
    source cluster_k8s.env
-   k8s/run_k8s.sh [steps] [port] [pin_mode]   # defaults: 300 steps, port 29500, pin_mode=auto
+   k8s/run_k8s.sh 300    # 300 training steps, ~90s
+   # Watch alerts: kubectl logs -n straggler-detection deployment/alert-engine -f | grep -v DCGM
+   # Inject fault (100ms sleep on rank 1) for a live detection test:
+   SLEEP_MS=100 TARGET_RANKS=1 k8s/run_k8s.sh 2000
+   # Expected: [STRAGGLER-INCIDENT] stat=mean_tiered + [ALERT] within 2-3 min of training start
    ```
-   Exits after confirming aggregator heartbeats from both GPU nodes in VictoriaMetrics.
-4. **Verify CPU pinning** (check PIN-PREFLIGHT line in training pod logs)
-   ```bash
-   kubectl logs -n straggler-detection -l straggler.nebius.ai/component=training -c training | grep PIN-PREFLIGHT
-   # Expected: resolved=full nccl=2.32.3 (if NCCL 2.32.3 built) or resolved=dump
-   ```
-5. **Monitor**: alerts appear in `var/alert_engine_k8s_supervised.log`. Full-pinning overhead on K8s: `mfu=76.77%`
-   (full pinning) vs `75.32%` (dump-only); the full-pinning mode is marginally faster, same as Slurm.
 
-**K8s-specific notes**:
-- Rendezvous uses headless Service + pod DNS (K8s 1.27+ sets pod hostname to `<job>-<index>`), not ClusterIP,
-  to avoid Cilium's hairpin NAT restriction on this cluster.
-- `/dev/shm` is overridden to 32Gi (K8s default 64MB is insufficient for NCCL with 8 GPUs).
-- DCGM cause-classification is unavailable (the alert engine cannot SSH to K8s node internal hostnames from the
-  control machine). The Inspector-based timing detection (CV/mean checks) is the same code as on Slurm; K8s behaviour is unverified for the tiered check.
-- **Detection threshold calibration**: the Slurm-validated thresholds (`CV_Z_THRESH=60`, `MEAN_MM_THRESH=2.0`)
-  detect 100ms faults on Slurm within 50-56s. On K8s, the same fault produces lower z-scores due to higher
-  baseline InfiniBand timing variability in containers; the thresholds need K8s-specific calibration before
-  production use. The raw timing signal IS captured correctly (rank 1 at 377μs vs 182,000μs for all others in
-  the 2000ms fault test), and the aggregator's window-level z-scores spike correctly (z=4080 briefly).
-- When done testing, return GPU nodes to Slurm: `kubectl scale nodeset worker -n soperator --replicas=2`
+4. **Megatron TP/PP run** (requires resolving HPC-X NCCL incompatibility first — see Known Limitations)
+   ```bash
+   source cluster_k8s.env
+   k8s/run_megatron_k8s.sh 100   # TP=2/PP=2/DP=4, tiny model, 100 steps
+   # NOTE: fails on pytorch:25.01-py3 due to HPC-X multi-communicator segfault. Use a container
+   # without HPC-X, or TP=1/PP=1 (Megatron DP), until this is resolved. See DESIGN_NOTES §6.6.1.
+   ```
+
+**K8s-specific notes** (confirmed on-cluster, 2026-11):
+- **Rendezvous**: headless Service + pod DNS (`<job>-<index>.<headless-svc>.<ns>.svc.cluster.local`).
+  ClusterIP routing-to-self is blocked by Cilium on this cluster (hairpin NAT).
+- **`/dev/shm`**: overridden to 32Gi in pod spec. K8s default 64MB is too small for NCCL with 8 GPUs.
+- **Alert engine**: runs as a K8s Deployment (direct ClusterIP to VM). Do NOT use port-forward for the
+  alert engine — queries are 0.5s each through port-forward, making cycles > 3 minutes; inside the
+  cluster they are < 1ms.
+- **DCGM**: SSH-based cause classification unavailable in pods. All K8s alerts show `confidence=UNCONFIRMED`.
+  This is a known, documented limitation, not a bug.
+- **Job boundary message**: "JOB NOT CONFIRMED STILL RUNNING AT ALERT TIME" appears on every K8s alert
+  (squeue unavailable). This is correct behavior — it conservatively reduces confidence at job exit.
+- **Megatron startup**: train_node_megatron_k8s.sh adds a rank-staggered sleep before torchrun
+  (`15 + rank * 20` seconds) to allow headless service DNS to propagate. This is not needed for
+  nanoGPT because pin_resolve.py provides a natural equivalent delay.
+- When done: `kubectl scale nodeset worker -n soperator --replicas=<N>` to restore Slurm workers.
 
 ---
 
@@ -154,11 +179,14 @@ Run everything from the login node. Allow about 30 minutes plus the NCCL build (
 - **DCGM clock fallback** now needs a sustained signal before it pages, so a real sustained clock fault pages
   about 10-60 s later than before.
 - Only `PAGE` alerts page a human; `LOG-ONLY` alerts are recorded for the dashboard and logs.
-- **K8s platform**: DCGM SSH-based cause classification unavailable (control machine cannot SSH to K8s node
-  internal hostnames). Detection thresholds (`CV_Z_THRESH=60`, `MEAN_MM_THRESH=2.0`) validated on Slurm need
-  K8s-specific calibration: K8s InfiniBand timing variability in containers raises the noise floor, making the
-  same 100ms sleep fault produce lower z-scores than on Slurm. The timing signal IS captured (raw difference
-  confirmed); the ALERT doesn't fire for small faults without threshold recalibration.
+- **K8s — node counts > 2**: validated on 2 nodes (16 GPUs) only. Tier structure at 4+ nodes is completely
+  untested. Do not claim production readiness for K8s without validating at the target node count.
+- **K8s — Megatron TP/PP**: HPC-X NCCL multi-communicator segfault in pytorch:25.01-py3 blocks testing.
+  Any TP>1 or PP>1 shape fails. Use a container without HPC-X. See DESIGN_NOTES §6.6.1.
+- **K8s — tiered check on Megatron**: sleep-before-backward injection does not create a detectable fast-
+  straggler signal on large Megatron gradient AllReduces (DDP async overlap). The signal appears on small
+  post-backward collectives (< 512 B, below the floor); `_check_mean` detects it. See DESIGN_NOTES §6.6.2.
+- **K8s — DCGM**: SSH-based cause classification unavailable in pods. All K8s alerts are UNCONFIRMED.
 
 ## Further reading
 
