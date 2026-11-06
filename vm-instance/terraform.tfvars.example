@@ -1,6 +1,3 @@
-parent_id = "" # The project-id in this context
-
-
 #preset = "16vcpu-64gb"
 #platform = "cpu-d3"
 #preset = "8gpu-128vcpu-1600gb"
