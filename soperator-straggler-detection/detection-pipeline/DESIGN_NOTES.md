@@ -3237,3 +3237,56 @@ produces on its 16-member AllReduce — and both the tiered check and z-score de
 **Recommendation for K8s POC**: use 4+ GPU nodes to get role_n ≥ 4 on gradient sync communicators.
 On the current 2-node hardware, nanoGPT DDP (confirmed working) is the only validated workload.
 
+
+### 6.12 Shape/strategy validation (2026-11): MoE instability finding, deep-PP, FSDP, fault-position diversity
+
+Scope: extensive shape/strategy coverage beyond the 6.6/6.7 TP4/PP4/DP3 production shape, at full 6-node/48-GPU
+scale, prioritized by what this project's history shows is most likely to surface a real gap (MoE first, per the
+known Falcon-side MoE/Stage-1-autocorrelation risk). No core detection logic touched; this section documents
+findings only unless stated otherwise.
+
+**6.15.1 MoE: a real, intermittent cluster-stability hang -- the headline finding of this round.** Two 150-step
+healthy MoE trials (`moe_healthy1`, `moe_healthy2`, `workloads/moe/run_moe_nanogpt.sh`, 48 ranks/6 nodes) completed
+cleanly, `TORCHRUN_EXIT: 0` on all 6 workers each time. A third, otherwise identical trial (`moe_healthy3`) HUNG:
+5 of 6 nodes (40/48 ranks) froze permanently at round 1 of MoE's token-routing diagnostic, while the 6th node
+(worker-3, ranks 24-31) kept running alone and reached round 49 -- 48 rounds ahead of every other node. Two nodes
+eventually self-reported `TORCHRUN_EXIT: 1` with zero traceback; three others never exited at all. No OOM, no
+CUDA/NCCL error string anywhere in any of the 6 worker logs.
+
+This is a genuine collective-participation divergence, not a crash, not an OOM, and not a detection-pipeline bug --
+no fault was injected in this trial, and `_check_mean_tiered` was never exercised against this incident (nothing
+at the detection layer failed; the training job itself stopped making collective progress on 5/6 nodes). Reproduced
+at a 1-in-3 rate in this limited sample (1 of 3 planned healthy trials, before cluster resources were needed
+elsewhere). Not root-caused in this pass. This is a real, intermittent stability risk in the MoE shape itself at
+48-GPU/6-node scale, independent of and prior to anything the straggler detector does -- worth flagging for POC
+planning on its own merits, separate from detection-logic readiness.
+
+Given this hang rate on HEALTHY runs alone, forcing 3 full MoE fault trials (as originally planned) was judged not
+worth the cluster-time cost of a predictable rate of hung 6-node allocations; one additional, bounded fault-trial
+attempt was made (see 6.15.2) rather than three.
+
+**6.15.2 MoE fault-injection attempt and the autocorrelation-lock question (code-review based, not fully
+empirically confirmed).** `_check_mean_tiered`'s persistence mechanism (`self.tiered_tracker`, keyed by
+`(comm, member, bucket, coll)`, requiring N consecutive qualifying polls scoped per-group via
+`_reset_tiered_keys`) is architecturally different from Falcon's Stage 1 mechanism that MoE broke on the Falcon
+side of this project: Falcon's Stage 1 uses a BOCD (Bayesian online changepoint detection) model that learns and
+locks onto an autocorrelation structure, which MoE's dynamic expert routing disrupted by forcing spurious
+recalibration resets. `_check_mean_tiered` has no learned autocorrelation model to disrupt -- it is a simple
+streak counter with no memory of prior timing distributions beyond the current streak. On that basis, the SPECIFIC
+Falcon failure mode (BOCD recalibration-reset under dynamic routing) does not directly transfer.
+
+However, a DIFFERENT, analogous risk does plausibly exist and was not able to be empirically confirmed this round:
+MoE's dynamic expert routing could change which ranks are actively participating in a given `(comm, bucket, coll)`
+group from poll to poll (different experts activated, different communicator membership), which could prevent the
+SAME rank from appearing as the tier outlier for the required N consecutive polls even under a genuine, sustained
+fault -- not because the detection math is wrong, but because the persistence key's membership stability
+assumption may not hold under MoE's routing dynamics. This is a real, named, OPEN question, not a confirmed bug:
+it requires actual fault-trial data against a stable (non-hanging) MoE run to verify, which this round's hang
+finding (6.15.1) made too costly to pursue further without risking most of the remaining cluster-time budget on a
+1-in-3 chance of a hung allocation. Flagged precisely as unresolved, not rounded up to either "confirmed safe" or
+"confirmed broken."
+
+**Reproducibility:** `workloads/moe/run_moe_nanogpt.sh 150 <outdir> <port> "$(pwd)/var/dump"` (must write directly
+to `var/dump`, not a per-run subdir -- `node_aggregator_ref.py` instances watch `var/dump/$node` specifically).
+Clean runs: `var/runs/moe_healthy1`, `var/runs/moe_healthy2`. Hung run (preserved, do not overwrite):
+`var/runs/moe_healthy3`.
