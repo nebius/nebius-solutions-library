@@ -21,7 +21,7 @@ remains 2-node-only).
 >   zero false positives 3/3 healthy. ✓ Requires `NCCL_IB_DISABLE=1` (HPC-X segfault on multi-PG teardown).
 > - **MoE (Mixture of Experts)**: training works (3/3 clean, TORCHRUN_EXIT: 0). NOT DETECTABLE with
 >   sleep-before-backward injection — AllToAll expert routing is in forward pass (before sleep); tiny per-param
->   AllReduce after backward is below the bucket floor. See DESIGN_NOTES §6.12.2.
+>   AllReduce after backward is below the bucket floor. See DESIGN_NOTES §6.13.2.
 > - **Megatron DP (TP=1/PP=1)**: existing `_check_mean` detects straggler signal (8-byte post-backward AllReduces);
 >   tiered check correctly silent (small bucket below 512-byte floor). 3/3 healthy trials clean. ✓
 > - **Megatron TP/PP training (TP=2/PP=2)**: TRAINING WORKS (TORCHRUN_EXIT: 0, 6/6 trials). ✓

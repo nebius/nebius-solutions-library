@@ -7,9 +7,18 @@
 # Any failure degrades to running the training command UNPINNED with a loud warning; it never blocks the job.
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MODE="${PIN_MODE:-auto}"
-[ "$MODE" = "off" ] && exec "$@"
+# Saved BEFORE any function definition: unpinned() below takes a message
+# argument, so a bare "$@" inside it would resolve to the function's OWN
+# positional params (the message), not this script's original training
+# command -- confirmed live (this session): a real rank_setup.py failure
+# (CPU-core contention) hit unpinned("rank_setup failed"), which then ran
+# `exec "rank_setup failed"` instead of the real training command, turning
+# an intended graceful unpinned-fallback into a hard job failure. Every
+# call site below must exec this saved array, never the bare "$@".
+ORIG_ARGS=("$@")
+[ "$MODE" = "off" ] && exec "${ORIG_ARGS[@]}"
 LOGD="${PIN_LOG_DIR:-/tmp}"; mkdir -p "$LOGD" 2>/dev/null
-unpinned() { echo "[PIN][WARN] host=$(hostname) pid=$$ local_rank=${LOCAL_RANK:-?} $1 -- running UNPINNED; this run is NOT dedicated" | tee -a "$LOGD/launch_$(hostname).log" >&2; exec "$@"; }
+unpinned() { echo "[PIN][WARN] host=$(hostname) pid=$$ local_rank=${LOCAL_RANK:-?} $1 -- running UNPINNED; this run is NOT dedicated" | tee -a "$LOGD/launch_$(hostname).log" >&2; exec "${ORIG_ARGS[@]}"; }
 # resolve (skipped when pin_env.sh already did it and exported a concrete mode)
 if [ "$MODE" = "auto" ] || [ "$MODE" = "full" ]; then
   _R="$(PIN_MODE="$MODE" python3 -I "$HERE/pin_resolve.py")" || unpinned "pin_resolve failed"
