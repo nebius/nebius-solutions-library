@@ -38,7 +38,22 @@ mkdir -p "$DUMPDIR" "$OUTDIR"
 # PVC mounts the full pipeline tree at /workspace, so the .so is at the same
 # relative path regardless of where it was built.
 _PKG_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-export NCCL_PROFILER_PLUGIN="$_PKG_ROOT/inspector-plugin/libnccl-profiler-inspector.so"
+# NFS stale-cache fix: stat the plugin file before export to force the NFS client
+# to fetch fresh directory metadata from the server. Without this, a fresh workspace
+# (init build just completed) can show a stale cached listing without the .so, causing
+# NCCL to silently skip the plugin (confirmed on a fresh-clone README self-run).
+_PLUGIN_PATH="$_PKG_ROOT/inspector-plugin/libnccl-profiler-inspector.so"
+# NFS stale-cache fix: poll until the plugin file is visible (NFS ac-cache can lag
+# behind a fresh init build by up to 30s on newly mounted PVCs). Without this,
+# NCCL silently skips the plugin (dlopen ENOENT → no dumps → no detection).
+_pi=0
+while [ $_pi -lt 30 ] && [ ! -f "$_PLUGIN_PATH" ]; do sleep 1; _pi=$((_pi+1)); done
+if [ -f "$_PLUGIN_PATH" ]; then
+    export NCCL_PROFILER_PLUGIN="$_PLUGIN_PATH"
+    echo "[STARTUP] Inspector plugin found after ${_pi}s: $_PLUGIN_PATH" >&2
+else
+    echo "[STARTUP] [WARN] Inspector plugin not visible after 30s (NFS stale cache?); running without plugin" >&2
+fi
 export NCCL_INSPECTOR_ENABLE=1
 export NCCL_INSPECTOR_DUMP_VERBOSE="${NCCL_INSPECTOR_DUMP_VERBOSE:-0}"
 export NCCL_INSPECTOR_DUMP_THREAD_INTERVAL_MICROSECONDS=500

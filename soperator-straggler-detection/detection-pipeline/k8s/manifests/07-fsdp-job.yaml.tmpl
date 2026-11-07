@@ -1,0 +1,143 @@
+# K8s job template for FSDP (Fully Sharded Data Parallel) straggler-detection validation.
+# Variables substituted by run_fsdp_k8s.sh via envsubst before kubectl apply.
+# Required env vars: JOB_RUN_NAME TRAIN_STEPS TRAIN_PORT TRAIN_NUM_NODES
+#   TRAIN_GPUS VM_URL_SVC PIN_MODE SLEEP_MS TARGET_RANKS STRAGGLER_MODE STRAGGLER_PHASE
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: ${JOB_RUN_NAME}
+  namespace: straggler-detection
+  labels:
+    straggler.nebius.ai/component: training
+    straggler.nebius.ai/run: ${JOB_RUN_NAME}
+    straggler.nebius.ai/workload: fsdp
+spec:
+  completions: ${TRAIN_NUM_NODES}
+  parallelism: ${TRAIN_NUM_NODES}
+  completionMode: Indexed
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        straggler.nebius.ai/component: training
+        straggler.nebius.ai/run: ${JOB_RUN_NAME}
+        straggler.nebius.ai/workload: fsdp
+    spec:
+      restartPolicy: Never
+      subdomain: ${JOB_RUN_NAME}-headless
+      tolerations:
+        - key: nvidia.com/gpu
+          value: "8"
+          effect: NoSchedule
+      nodeSelector:
+        nebius.com/gpu: "true"
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              straggler.nebius.ai/run: ${JOB_RUN_NAME}
+      volumes:
+        - name: workspace
+          persistentVolumeClaim:
+            claimName: straggler-workspace
+        - name: inspector-dumps
+          emptyDir: {}
+        - name: outdir
+          emptyDir: {}
+        - name: sys
+          hostPath:
+            path: /sys
+            type: Directory
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: "32Gi"
+      containers:
+        - name: training
+          image: nvcr.io/nvidia/pytorch:25.01-py3
+          imagePullPolicy: IfNotPresent
+          resources:
+            requests:
+              cpu: "120"
+              memory: 400Gi
+            limits:
+              nvidia.com/gpu: ${TRAIN_GPUS}
+          volumeMounts:
+            - name: workspace
+              mountPath: /workspace
+            - name: inspector-dumps
+              mountPath: /inspector-dumps
+            - name: outdir
+              mountPath: /outdir
+            - name: sys
+              mountPath: /sys
+              readOnly: true
+            - name: dshm
+              mountPath: /dev/shm
+          env:
+            - name: TRAINING_NUM_NODES
+              value: "${TRAIN_NUM_NODES}"
+            - name: TRAINING_RDZV_HOST
+              value: "${JOB_RUN_NAME}-0.${JOB_RUN_NAME}-headless.straggler-detection.svc.cluster.local"
+            - name: TRAINING_GPUS_PER_NODE
+              value: "${TRAIN_GPUS}"
+            - name: TRAINING_NCCL_LIB_PATH
+              value: ""
+            - name: NCCL_INSPECTOR_DUMP_DIR
+              value: /inspector-dumps
+            - name: PIN_MODE
+              value: "${PIN_MODE}"
+            # NCCL_IB_DISABLE=1: required workaround for HPC-X SHARP RDMA plugin
+            # segfault with multiple NCCL process groups (FSDP sharding groups)
+            # on pytorch:25.01-py3. startup_checks.sh will also set
+            # NCCL_NET_PLUGIN to a non-existent path to prevent HPC-X teardown
+            # segfault. See DESIGN_NOTES §6.9.1 for the full diagnosis.
+            - name: NCCL_IB_DISABLE
+              value: "1"
+            - name: STRAGGLER_MODE
+              value: "${STRAGGLER_MODE}"
+            - name: STRAGGLER_PHASE
+              value: "${STRAGGLER_PHASE}"
+            - name: STRAGGLER_SLEEP_MS
+              value: "${SLEEP_MS}"
+            - name: STRAGGLER_TARGET_RANKS
+              value: "${TARGET_RANKS}"
+            - name: NCCL_INSPECTOR_DUMP_VERBOSE
+              value: "0"
+          command:
+            - bash
+            - -c
+            - |
+              set -e
+              exec bash /workspace/nebius-solutions-library/soperator-straggler-detection/detection-pipeline/workloads/fsdp/train_node_fsdp_k8s.sh \
+                ${TRAIN_STEPS} /outdir ${TRAIN_PORT} /inspector-dumps
+        - name: aggregator
+          image: python:3.11-slim
+          imagePullPolicy: IfNotPresent
+          resources:
+            requests:
+              cpu: "2"
+              memory: 4Gi
+          volumeMounts:
+            - name: workspace
+              mountPath: /workspace
+            - name: inspector-dumps
+              mountPath: /inspector-dumps
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: VM_URL
+              value: "http://${VM_URL_SVC}"
+          command:
+            - bash
+            - -c
+            - |
+              set -e
+              _AGGSCRIPT=/workspace/nebius-solutions-library/soperator-straggler-detection/detection-pipeline/k8s/run_aggregator_k8s.sh
+              for i in $(seq 1 30); do [ -f "$_AGGSCRIPT" ] && break; echo "[aggregator] waiting ($i/30)"; sleep 5; done
+              exec bash "$_AGGSCRIPT" /inspector-dumps "http://${VM_URL_SVC}" "${JOB_RUN_NAME}"

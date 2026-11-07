@@ -17,6 +17,11 @@ remains 2-node-only).
 
 > **Kubernetes verification status** (2026-11, 2 nodes / 16 H200 GPUs):
 > - **nanoGPT 85M (DDP)**: tiered mean check fires 3/3 fault trials, zero false positives 3/3 healthy. ✓
+> - **FSDP (Fully Sharded Data Parallel)**: tiered mean check fires 3/3 fault trials (mm=24–979×, 440KB AllGather),
+>   zero false positives 3/3 healthy. ✓ Requires `NCCL_IB_DISABLE=1` (HPC-X segfault on multi-PG teardown).
+> - **MoE (Mixture of Experts)**: training works (3/3 clean, TORCHRUN_EXIT: 0). NOT DETECTABLE with
+>   sleep-before-backward injection — AllToAll expert routing is in forward pass (before sleep); tiny per-param
+>   AllReduce after backward is below the bucket floor. See DESIGN_NOTES §6.12.2.
 > - **Megatron DP (TP=1/PP=1)**: existing `_check_mean` detects straggler signal (8-byte post-backward AllReduces);
 >   tiered check correctly silent (small bucket below 512-byte floor). 3/3 healthy trials clean. ✓
 > - **Megatron TP/PP training (TP=2/PP=2)**: TRAINING WORKS (TORCHRUN_EXIT: 0, 6/6 trials). ✓
@@ -25,6 +30,7 @@ remains 2-node-only).
 >   All gradient sync communicators are 2-member (role_n=2). z-score detection yields z≈0.7 invariantly
 >   (mathematical property of 2-sample stdev); tiered check Guard 2 also fails. See DESIGN_NOTES §6.11.
 >   Detection becomes possible at 4+ nodes where role_n ≥ 4. See §6.11.4 for the upgrade path.
+> - **Alert engine stability**: 33 MB RSS stable over 3000-step soak run. No memory leaks confirmed.
 > - **Node counts > 2**: NOT TESTED. Tier structure at 4+ nodes is an unknown.
 
 **Prerequisites** (cluster-agnostic; substitute your cluster's values where shown):

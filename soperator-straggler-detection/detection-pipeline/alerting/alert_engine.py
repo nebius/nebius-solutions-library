@@ -3903,7 +3903,10 @@ class AlertEngine:
         sig = self._job_workload_sig(data["hostname"], job_id) if job_id else None
         rb_status = reliability_reference.check_status(self._reliability_ref, sig, "role_baseline")
         validated = (rb_status == "KNOWN_RELIABLE")
-        header_tag = "[ROLE-BASELINE-ALERT]" if validated else "[ROLE-BASELINE-ALERT-UNVALIDATED]"
+        # Log-audit fix: UNVALIDATED form renamed [ROLE-BASELINE-INFO] so grep-based
+        # tooling and on-call engineers do not mistake it for an actionable [ALERT].
+        # Validated form retains [ROLE-BASELINE-ALERT] since it IS actionable.
+        header_tag = "[ROLE-BASELINE-ALERT]" if validated else "[ROLE-BASELINE-INFO]"
         unvalidated_note = (
             [] if validated else [
                 "",
@@ -3916,10 +3919,11 @@ class AlertEngine:
                 f"example found live: TP4-standalone's own regression-sweep investigation).",
             ]
         )
+        action_note = "" if validated else " action=NONE"
         lines = [
             f"{header_tag} rank={member} gpu_slot={slot} role_rank={data['role_rank']} "
             f"role_n={data['role_n']} comm={comm} node={data['hostname']} type=compute "
-            f"confidence={tier} severity={severity}",
+            f"confidence={tier} severity={severity}{action_note}",
             "",
             f"ROLE-BASELINE DEVIATION: this member's current reading (current_mean_us="
             f"{data['current']:.0f}) is {data['ratio']:.3f}x its OWN real historical baseline for "
@@ -4398,8 +4402,16 @@ class AlertEngine:
         if mm_valid and mm > T.MEAN_MM_THRESH:
             severity_ratio = mm if stat_name == "mean" else z
             dur_disp = f"{persist_duration_s:.1f}" if persist_duration_s is not None else "unknown"
+            # Log-audit improvement: add human-readable bucket size alongside raw bytes,
+            # and explain the severity_ratio field name (mm=min/max ratio for mean-based,
+            # z-score for cv-based). Additive only — no detection logic change.
+            try:
+                _bucket_mb = f" bucket_mb={int(bucket)/1e6:.2f}" if int(bucket) >= 1024 else ""
+            except (ValueError, TypeError):
+                _bucket_mb = ""
+            _ratio_label = "mm [min_max_ratio]" if stat_name in ("mean", "mean_tiered") else "z_score"
             header = (f"[STRAGGLER-INCIDENT] incident_id={incident_id} stat={stat_name} host={hostname} comm={comm} member={member} "
-                      f"gpu_slot={slot_disp} bucket={bucket} coll={coll} severity_ratio={severity_ratio:.2f} "
+                      f"gpu_slot={slot_disp} bucket={bucket}{_bucket_mb} coll={coll} severity_ratio={severity_ratio:.2f} [{_ratio_label}] "
                       f"persisted_s={dur_disp} role_rank={role_rank} role_n={role_n}{job_ctx_disp}")
             print(header, flush=True)
             self._append_alert_summary(header)
