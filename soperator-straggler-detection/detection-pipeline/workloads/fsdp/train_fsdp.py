@@ -284,7 +284,17 @@ while True:
     # gate needed here (unlike train_resnet.py/train_vit.py): FSDP2's
     # fully_shard units sync on every backward pass unconditionally.
     if STRAGGLER_IS_TARGET and STRAGGLER_SLEEP_S > 0 and STRAGGLER_PHASE == 'backward':
-        time.sleep(STRAGGLER_SLEEP_S)
+        if STRAGGLER_MODE == 'compute':
+            # Compute-bound fault: burn CPU cycles via matrix multiplication
+            # (not a sleep, actual computation -- distinct from the sleep proxy).
+            # ~12ms per 2000x2000 CPU matmul; loop to consume STRAGGLER_SLEEP_S.
+            _t0 = time.time()
+            while time.time() - _t0 < STRAGGLER_SLEEP_S:
+                _a = torch.randn(1000, 1000)
+                _b = torch.mm(_a, _a.T)
+                del _a, _b
+        else:
+            time.sleep(STRAGGLER_SLEEP_S)
     loss.backward()
     if grad_clip != 0.0:
         torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)

@@ -107,12 +107,21 @@ EOF
 info "=== Step 3: launching training Job ==="
 export JOB_RUN_NAME TRAIN_STEPS TRAIN_PORT TRAIN_NUM_NODES TRAIN_GPUS \
        NCCL_LIB_PATH PIN_MODE VM_URL_SVC
-export SLEEP_MS=0
-export TARGET_RANKS=""
+# SLEEP_MS/TARGET_RANKS: allow caller to override for fault injection.
+# STRAGGLER_MODE defaults to 'constant' so SLEEP_MS/TARGET_RANKS work directly
+# without needing a trigger file (file_trigger mode requires /outdir/trigger.json
+# to exist -- not documented in the README quickstart, so constant is the default).
+SLEEP_MS="${SLEEP_MS:-0}"
+TARGET_RANKS="${TARGET_RANKS:-}"
+# If SLEEP_MS > 0 and MODE not explicitly set, use constant (direct, no trigger file needed).
+if [ "${SLEEP_MS:-0}" -gt 0 ] && [ -z "${STRAGGLER_MODE:-}" ]; then
+    STRAGGLER_MODE="constant"
+fi
+export SLEEP_MS TARGET_RANKS STRAGGLER_MODE="${STRAGGLER_MODE:-constant}"
 
 # envsubst with explicit variable list to prevent substituting internal shell
 # variables in the YAML's bash command blocks (e.g. $PKG, $OUTDIR, $DUMPDIR).
-envsubst '${JOB_RUN_NAME} ${TRAIN_STEPS} ${TRAIN_PORT} ${TRAIN_NUM_NODES} ${TRAIN_GPUS} ${NCCL_LIB_PATH} ${PIN_MODE} ${VM_URL_SVC} ${SLEEP_MS} ${TARGET_RANKS} ${JOB_RUN_NAME}' \
+envsubst '${JOB_RUN_NAME} ${TRAIN_STEPS} ${TRAIN_PORT} ${TRAIN_NUM_NODES} ${TRAIN_GPUS} ${NCCL_LIB_PATH} ${PIN_MODE} ${VM_URL_SVC} ${SLEEP_MS} ${TARGET_RANKS} ${STRAGGLER_MODE} ${JOB_RUN_NAME}' \
     < "$MANIFESTS_DIR/04-training-job.yaml.tmpl" | kubectl apply -f -
 info "Job $JOB_RUN_NAME applied to namespace $NS."
 

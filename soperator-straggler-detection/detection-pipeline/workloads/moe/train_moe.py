@@ -77,6 +77,14 @@ exec(open('configurator.py').read())
 config = {k: globals()[k] for k in config_keys}
 # -----------------------------------------------------------------------------
 
+# STRAGGLER_SLEEP_MS: same software fault-injection convention as nanoGPT/FSDP.
+# Sleep placed before loss.backward() so it delays this rank's contribution
+# to both the AllToAll expert-routing calls (which occur during forward()) and
+# the post-backward AllReduce grad sync (sync_grads()), producing a detectable
+# single-rank straggler signal on both collective types.
+STRAGGLER_SLEEP_S = float(os.environ.get("STRAGGLER_SLEEP_MS", "0")) / 1000.0
+STRAGGLER_TARGET_RANKS = {int(r) for r in os.environ.get("STRAGGLER_TARGET_RANKS", "").split(",") if r.strip() != ""}
+
 ddp = int(os.environ.get('RANK', -1)) != -1
 if ddp:
     init_process_group(backend=backend)
@@ -227,6 +235,8 @@ while True:
     with ctx:
         logits, loss = model(X, Y)
     X, Y = get_batch('train')
+    if ddp and STRAGGLER_SLEEP_S > 0 and ddp_rank in STRAGGLER_TARGET_RANKS:
+        time.sleep(STRAGGLER_SLEEP_S)
     loss.backward()
     sync_grads()
     if grad_clip != 0.0:

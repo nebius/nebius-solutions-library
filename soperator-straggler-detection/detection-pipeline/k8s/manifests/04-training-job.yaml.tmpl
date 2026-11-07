@@ -134,9 +134,13 @@ spec:
             # CPU pinning mode
             - name: PIN_MODE
               value: "${PIN_MODE}"
-            # Fault injection (0 = healthy run, >0 = inject delay on TARGET_RANKS)
+            # Fault injection (0 = healthy run, >0 = inject delay on TARGET_RANKS).
+            # STRAGGLER_MODE=constant: SLEEP_MS applied directly every step (simple,
+            # works for validation runs). file_trigger: fault only fires when
+            # /outdir/trigger.json exists (useful for unannounced mid-run injection).
+            # Passed via ${STRAGGLER_MODE} so run_k8s.sh can override (default: constant).
             - name: STRAGGLER_MODE
-              value: "file_trigger"
+              value: "${STRAGGLER_MODE}"
             - name: STRAGGLER_TRIGGER_FILE
               value: "/outdir/trigger.json"
             - name: STRAGGLER_SLEEP_MS

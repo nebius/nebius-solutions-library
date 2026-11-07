@@ -611,7 +611,9 @@ ROLE_BASELINE_ALERT_STOPGAP_ACTIVE = True
 # on a workload shape whose reference-table entry for role_baseline is
 # not exactly KNOWN_RELIABLE still fires, still carries every real
 # value, just under a distinctly different header
-# ([ROLE-BASELINE-ALERT-UNVALIDATED], not [ROLE-BASELINE-ALERT]) with an
+# ([ROLE-BASELINE-INFO], not [ROLE-BASELINE-ALERT] -- renamed from
+# [ROLE-BASELINE-ALERT-UNVALIDATED] by a later log-readability fix so the
+# tag itself no longer reads as an actionable alert) with an
 # explicit note that this shape's role-baseline behavior has not been
 # characterized and the finding should be read with extra skepticism --
 # the same honest-degradation discipline this file already applies
@@ -4128,7 +4130,10 @@ class AlertEngine:
         sig = self._job_workload_sig(data["hostname"], job_id) if job_id else None
         rb_status = reliability_reference.check_status(self._reliability_ref, sig, "role_baseline")
         validated = (rb_status == "KNOWN_RELIABLE")
-        header_tag = "[ROLE-BASELINE-ALERT]" if validated else "[ROLE-BASELINE-ALERT-UNVALIDATED]"
+        # Log-audit fix: UNVALIDATED form renamed [ROLE-BASELINE-INFO] so grep-based
+        # tooling and on-call engineers do not mistake it for an actionable [ALERT].
+        # Validated form retains [ROLE-BASELINE-ALERT] since it IS actionable.
+        header_tag = "[ROLE-BASELINE-ALERT]" if validated else "[ROLE-BASELINE-INFO]"
         unvalidated_note = (
             [] if validated else [
                 "",
@@ -4147,6 +4152,10 @@ class AlertEngine:
         _rb_repeat_n = _record_and_count_repeat((data["hostname"], comm, member))
         _rb_pattern = f"REPEATED(n={_rb_repeat_n})" if _rb_repeat_n >= _REPEAT_THRESHOLD else "SINGLE"
         _rb_burst = _burst_label()
+        # Merged with the K8s-side log-audit fix (header_tag rename above):
+        # action=NONE makes explicit, in-line, that an -INFO line expects no
+        # response -- complements pattern=/burst= rather than duplicating them.
+        action_note = "" if validated else " action=NONE"
         lines = [
             # role_n= scoping fix: see format_alert's own comment -- comm=
             # moved next to role_rank=/role_n= so the triple reads as one
@@ -4154,7 +4163,7 @@ class AlertEngine:
             # different role_n under a different comm.
             f"{header_tag} role_rank={data['role_rank']} role_n={data['role_n']} comm={comm} "
             f"pid={member} gpu_slot={slot} node={data['hostname']} type=compute "
-            f"confidence={tier} severity={severity} pattern={_rb_pattern} burst={_rb_burst}",
+            f"confidence={tier} severity={severity} pattern={_rb_pattern} burst={_rb_burst}{action_note}",
             "",
             f"ROLE-BASELINE DEVIATION: this member's current reading (current_mean_us="
             f"{data['current']:.0f}) is {data['ratio']:.3f}x its OWN real historical baseline for "
@@ -4685,8 +4694,16 @@ class AlertEngine:
         if mm_valid and mm > T.MEAN_MM_THRESH:
             severity_ratio = mm if stat_name == "mean" else z
             dur_disp = f"{persist_duration_s:.1f}" if persist_duration_s is not None else "unknown"
+            # Log-audit improvement: add human-readable bucket size alongside raw bytes,
+            # and explain the severity_ratio field name (mm=min/max ratio for mean-based,
+            # z-score for cv-based). Additive only — no detection logic change.
+            try:
+                _bucket_mb = f" bucket_mb={int(bucket)/1e6:.2f}" if int(bucket) >= 1024 else ""
+            except (ValueError, TypeError):
+                _bucket_mb = ""
+            _ratio_label = "mm [min_max_ratio]" if stat_name in ("mean", "mean_tiered") else "z_score"
             header = (f"[STRAGGLER-INCIDENT] incident_id={incident_id} stat={stat_name} host={hostname} comm={comm} member={member} "
-                      f"gpu_slot={slot_disp} bucket={bucket} coll={coll} severity_ratio={severity_ratio:.2f} "
+                      f"gpu_slot={slot_disp} bucket={bucket}{_bucket_mb} coll={coll} severity_ratio={severity_ratio:.2f} [{_ratio_label}] "
                       f"persisted_s={dur_disp} role_rank={role_rank} role_n={role_n}{job_ctx_disp}")
             print(header, flush=True)
             self._append_alert_summary(header)
