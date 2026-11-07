@@ -205,6 +205,16 @@ Run everything from the login node. Allow about 30 minutes plus the NCCL build (
   K8s-specific calibration: K8s InfiniBand timing variability in containers raises the noise floor, making the
   same 100ms sleep fault produce lower z-scores than on Slurm. The timing signal IS captured (raw difference
   confirmed); the ALERT doesn't fire for small faults without threshold recalibration.
+- **RDMA/NCCL crash risk (2026-11 review):** this cluster uses and actively loads the same HPC-X SHARP/IB plugin
+  implicated in a Kubernetes-side `ncclIbDeregMr` crash, and routinely creates the concurrent-communicator precondition
+  that triggers it (every TP>1/PP>1 job). A direct, realistically-shaped stress test against the live plugin passed
+  clean on real hardware; this cluster is not currently exhibiting that crash, on the evidence gathered so far. A new,
+  general-purpose startup self-check (`self-checks/net_selfcheck.sh`) now verifies this on every real job and falls
+  back to a safer config if it ever isn't. Also added: a rank-identity-collision self-check and an explicit DCGM
+  diagnostic-path startup log. Live-validated at this project's largest shape yet (48 GPUs/6 nodes): 1 healthy + 1
+  fault trial (100 ms, rank 20) -- the fault was correctly named, `confidence=PROBABLE severity=LOG-ONLY`. Full
+  writeup, including a real, pre-existing cross-job-ID mislabeling bug this review's own new check surfaced (not
+  introduced by it, not fixed -- out of scope): DESIGN_NOTES.md §6.8.
 
 ## Further reading
 

@@ -2839,4 +2839,152 @@ closeout's own runs; no soak run beyond 300 iterations. On the specific question
 resolve, the detector is ready to stand alongside Falcon in the large-scale POC with real, validated, truly-
 interleaved, current-NCCL overhead numbers -- it is not claimed "fully ready" in every dimension a POC could ever
 probe, only on the dimensions this and the 6.6 task actually tested.
+### 6.8 Environment-assumption robustness review (2026-11): RDMA/NCCL crash risk, self-checks, generality
+
+Scope: does this Slurm deployment share the Kubernetes port's real RDMA/NCCL crash risk (`ncclIbDeregMr`, triggered by
+multiple concurrent NCCL communicators -- exactly what any real TP>1-or-PP>1 job already creates), and does this
+pipeline's own Slurm-specific assumptions (rank/GPU identity, DCGM path, tier discovery) hold up outside the one
+narrow shape they were built and tested against. No core detection logic touched; everything below is additive.
+
+**6.8.1 RDMA/NCCL crash risk -- the single most important question in this review.** Confirmed live, directly, on
+real hardware (`worker-0`..`worker-3`, `nvcr.io#nvidia/pytorch:25.01-py3`, `NCCL_DEBUG=INFO`/`NCCL_DEBUG_FILE`):
+
+- `/opt/hpcx/nccl_rdma_sharp_plugin/lib/libnccl-net.so` **is present in the real training container** -- this is the
+  exact plugin implicated in the Kubernetes-side `ncclIbDeregMr` crash, not a hypothetical.
+- It **is the plugin NCCL actually loads and uses at runtime**, not merely present on disk: `NCCL INFO Successfully
+  loaded external network plugin /opt/hpcx/nccl_rdma_sharp_plugin/lib/libnccl-net.so`, real `mlx5_0..7` IB devices,
+  SHARP collective offload active (`NET/IB : Using [0]mlx5_0:1/IB/SHARP ...`). A second plugin
+  (`/opt/amazon/aws-ofi-nccl/lib/libnccl-net-aws-ofi.so`) also exists on disk but is **not** the one that loads --
+  confirmed this is not the active path, so it does not change the verdict below.
+  NCCL version actually resolved at runtime: 2.29.7 (not the 2.25.1 `torch.cuda.nccl.version()` reports for the
+  container's statically-linked copy -- a separate, dynamically-loaded libnccl.so wins; a footnote, not a finding).
+- **Multiple concurrent overlapping communicators are not a hypothetical trigger here -- it is this project's own
+  routine, already-exercised case.** Every TP>1/PP>1 Megatron validation already in this repo's history (including
+  §6.5 above) creates simultaneous TP/PP/DP communicators as standard practice.
+- **Direct stress test, live, with this exact active plugin**: a new, minimal, isolated probe
+  (`self-checks/nccl_multigroup_probe.py` -- no model, no Megatron, just `torch.distributed`) arranges ranks into a
+  2D grid and creates one "row" group and one "col" group per rank -- the same overlapping-membership shape as real
+  TP x PP -- runs concurrent allreduces on both, then destroys them in a deliberately interleaved (not strictly
+  nested) order, since the Kubernetes crash is inside a teardown-path function, not the collective call itself.
+  - 4 real nodes/GPUs (`worker-0..3`), genuine non-degenerate 2x2 grid (real 2-member groups both ways, the actual
+    TP2xPP2 shape): **clean pass, all 4 ranks, zero errors, zero warnings** in either the NCCL-level debug log or the
+    Python-level output.
+  - A smaller 2-node run (degenerate 1x2 grid -- the "col" groups collapse to trivial 1-member communicators used
+    concurrently with the real 2-member "row" group) surfaced a genuine async `ncclSystemError` from
+    `ProcessGroupNCCL`'s watchdog thread after the collectives completed, during teardown -- NOT seen in the
+    non-degenerate 4-node run. This is a **real, reproducible, previously-unknown anomaly**, logged here honestly,
+    but it is a *distinct, narrower* finding (a trivial-single-rank-communicator-alongside-a-real-one edge case) from
+    the Kubernetes crash this review was chartered to check for, which concerns *realistically-shaped* concurrent
+    groups. Not chased further in this pass -- flagged for anyone touching trivial-group-size collective paths.
+    **Bounded follow-up confirmation (pre-push review):** the full backtrace is pure generic PyTorch/c10d watchdog
+    code (`checkForNCCLErrorsInternal`, `WorkNCCL::checkAndSetException`, `ncclCommWatchdog`) -- zero frames reference
+    HPC-X, SHARP, `ncclIbDeregMr`, or any IB-specific deregistration path. Both ranks also printed "destroyed cleanly
+    -- PASS" immediately after the exception, meaning it did not actually block teardown or hang the job -- a
+    non-fatal async watchdog report, not a crash. This confirms the finding above: distinct from, and no evidence of
+    overlap with, the Kubernetes HPC-X crash this review was chartered to check for.
+
+  **Verdict: this cluster is NOT currently exhibiting the Kubernetes RDMA/NCCL crash.** The exact plugin is present
+  and active, the trigger precondition (concurrent communicators) is routinely exercised already, and a direct,
+  realistically-shaped stress test against the live active plugin passed clean. This is real negative evidence on
+  this specific hardware generation (H200), NCCL build (2.29.7), and HPC-X version -- not a proof that no input could
+  ever trigger it. Given the plugin is confirmed active, not absent, this should not be treated as "safe because the
+  bug doesn't apply here" but as "safe on the evidence gathered so far, on this cluster, as of 2026-11."
+
+**6.8.2 Networking startup self-check (new, general-purpose, not Slurm-specific).** `self-checks/net_selfcheck.sh`,
+sourced by `train_node_megatron.sh` right before the real training `torchrun`, same "never abort the real job,
+degrade loudly" contract `pinning/pin_env.sh` already established for CPU pinning. Runs the multigroup probe above
+as its own small multi-node `torchrun` (same `nnodes`/rendezvous host, a different port) immediately before the real
+job. On success: `[NET-PREFLIGHT] host=... PASS`, no change to the real job's env. On failure or hang (wrapped in
+`timeout`): `[NET-PREFLIGHT] host=... FAIL/TIMED OUT`, full probe output logged, then falls back to
+`NCCL_SHARP_DISABLE=1 NCCL_NET_GDR_DISABLE=1 NCCL_NET=Socket` for the real job -- the same workaround already used on
+the Kubernetes side for this exact failure mode. `NET_SELFCHECK=0` skips it (unverified-but-unblocked degrade).
+Nothing here is Slurm-specific: it only uses `torch.distributed`/NCCL and the launcher's own already-discovered
+`NUM_NODES`/`GPUS_PER_NODE`/`RDZV_HOST`.
+
+**6.8.3 Rank/GPU identity collision-proofing.** Confirmed directly in the code (not just by report) that per-member
+state is keyed by `(hostname, member)` file-wide in `alert_engine.py` -- e.g. `_check_mean_tiered`'s persistence key
+`("mean_tiered", comm, shost, smember, bucket, coll)` (own comment: "Persistence key includes hostname to prevent
+cross-pod collision"), and independently re-verified `_cross_comm_peer_median`'s pooling key is `(comm, member)`
+without a hostname component (P27.5, deliberate: job-wide peer pooling, not same-host-only) -- but this function
+only ever pools raw timing VALUES into a median/MAD statistical baseline, never attributes anomaly identity to a
+specific member, so even a genuine cross-host `member` (pid) collision there can only add one extra value to a
+baseline pool, never misattribute which rank is anomalous. This is a general, file-wide convention, not a
+Slurm-vs-Kubernetes distinction.
+
+New: `AlertEngine._check_rank_identity_collisions()` -- an additive runtime self-check (startup, then every
+`poll_once()` cycle) using the already-exported `agg_member_gpu_slot_index` metric: if the same physical GPU slot on
+the same host is ever claimed simultaneously by two different `member` identifiers, logs
+`[RANK-COLLISION-WARNING]` loudly. Guards specifically against the case hostname-scoping does *not* cover on its
+own: OS PID reuse shortly after a rank crash/restart, briefly producing two live identities for one physical slot on
+the same host. No new instrumentation, no change to any existing detection check.
+
+**6.8.4 DCGM diagnostic path -- verified, now also logged.** SSH-based DCGM access
+(`ssh -o BatchMode=yes <worker> "dcgmi discovery -l"`, run from the same login-node context `run.sh` launches
+`alert_engine.py` from) genuinely works on this cluster today -- confirmed live, clean GPU list, rc=0. This had been
+true but silently assumed (`dcgm_host_map` defaults every host to `True` at init with no verification). New:
+`AlertEngine._log_dcgm_path_startup()` -- an explicit, startup-time, one-host probe via the existing
+`classifier.check_nv_hostengine_alive`, logging `[DCGM-PATH] ... CONFIRMED active` or `... NOT reachable -- alerts
+will be labeled UNCONFIRMED, the same degraded mode as the Kubernetes path`, so this is now a verified, logged fact
+on every real run instead of an unverified assumption baked into a default.
+
+**6.8.5 Tier-discovery generality (`_check_mean_tiered`).** Reviewed the full split/tier-building logic directly
+(§5.1-5.6 of the function): tier splitting itself is genuinely N-way general -- `split_indices`/`tiers` are built
+from however many >`GAP_RATIO_THRESH` gaps actually exist in the sorted timing data, not hardcoded to exactly two
+groups -- so a richer, real multi-tier structure on Slurm (not just the 2-tier case this check's own docstring
+documents for hierarchical K8s AllReduce) would already be split correctly if one occurred. The only non-general
+part is a *deliberate, evidence-based design choice*, not an untested Slurm-vs-K8s assumption: only `tiers[0]`
+(lowest) is evaluated as the straggler candidate against `tiers[1]` (next-lowest) as reference, because this
+specific fault class (a rank sleeping before entering the collective) always manifests as the *lowest* tier on both
+platforms -- confirmed by this project's own prior live data (§6.5, §6.3). A fault class that instead inflates a
+rank's own measured time (manifesting as an elevated, not depressed, tier) would not be caught by this specific
+check's `tiers[2:]` -- a real, disclosed scope limit, not a bug, and not new to this review.
+
+**6.8.6 Live validation.** Full Megatron TP4/PP4/DP3 job (48 GPUs, 6 nodes -- this project's largest shape tried to
+date; README previously flagged this scale as untested), every self-check above active, real `run.sh`-launched
+per-node aggregators (not ad hoc), real alert_engine.py.
+
+| Trial | duration | `[NET-PREFLIGHT]` (6 nodes) | `[DCGM-PATH]` | `[RANK-COLLISION-WARNING]` | `[WAIT-INDUCED-ALERT]` |
+|---|---|---|---|---|---|
+| healthy (51 s) | `var/runs/robustness_healthy2` | 6/6 PASS (prior run `robustness_healthy1`, 75 s) | CONFIRMED | fired (cross-session noise, see below) | 0 |
+| fault, 100 ms sleep on rank 20 (184 s) | `var/runs/robustness_fault3` | 6/6 PASS | CONFIRMED | fired (cross-session noise, see below) | 19 total; rank 20 (member=1829473, `gpu_slot=4`, `worker-2`) correctly named twice, `confidence=PROBABLE severity=LOG-ONLY`, matching the already-established UNCONFIRMED/LOG-ONLY convention |
+
+Raw-data confirmation independent of the alert engine: querying VM directly for comm `0xe24a86ae97f53e`
+(`AllReduce`, bucket=524288) on `worker-2` shows rank 20's own `agg_mean_exec_time_us=181.33` against its three
+TP-group peers at `13282-13395` -- a ~73x gap, the textbook "straggler's own time reads short, peers read elevated"
+signature this pipeline's wait-induced check targets. The fault was real and large; the check found it.
+
+**Reduced scope, disclosed honestly**: 1 healthy + 1 fault trial at matched (~50-200s) duration, not the 3+3
+originally planned -- two earlier attempts (both ~26 s, `robustness_healthy1`/`robustness_fault2`) were too short for
+the detection pipeline's persistence requirement to mature and were not counted. Getting here also took real,
+unplanned infrastructure work: this review's own clone had never had `install.sh`/`run.sh` run (no `cluster.env`,
+no per-node `node_aggregator_ref.py`, so two full trials produced zero queryable data despite training completing
+cleanly), and Slurm job submission is account-wide serialized against at least three OTHER concurrently-running
+review sessions on this same shared cluster/account during this work, requiring a retry-on-ABORT loop.
+
+**6.8.6.1 A real, pre-existing bug this review's own new self-check surfaced (not introduced by this review).**
+The `[RANK-COLLISION-WARNING]` noise above is real but is not an identity collision in this project's own job: traced
+specific flagged PIDs to dead processes and to `node_aggregator_ref.py` instances running against *other*, unrelated
+clones on this same shared account (confirmed via `ps`/`ssh` -- at least 3 other persistent aggregator processes
+were running concurrently on these same nodes throughout this review, pushing to the same shared VictoriaMetrics
+instance). Root cause, confirmed directly in the code: `node_aggregator_ref.py`'s `refresh_job_id()`
+(aggregator/node_aggregator_ref.py:828) tags every pushed metric with whatever job is *currently* running on that
+hostname system-wide (`squeue -w <hostname> -h -o "%i" --states=R`, refreshed every `JOB_ID_REFRESH_S=60`), not with
+the job that actually produced the dump data being read. A stale, long-running aggregator re-pushing its own old
+cached state can therefore mislabel it with a totally unrelated, currently-active job's real ID -- here, that
+collided with this review's own live job IDs purely by coincidence of timing. Not touched (core aggregator logic,
+out of scope for this review's additive-only mandate) -- flagged here for whoever next touches job-id attribution.
+Practical effect for a normal single-pipeline-instance deployment: minimal, since this requires multiple concurrent
+aggregator instances per account, an unusual setup outside of exactly this kind of multi-session review; still a
+real correctness gap worth knowing about.
+
+**6.8.7 Environments actually tested vs. designed to adapt to.**
+
+| | Actually tested | Designed to adapt to, not tested here |
+|---|---|---|
+| Platform | Slurm/soperator (this review), plain Kubernetes (§6.1-6.4) | Any platform `_detect_platform()` can't positively identify (falls back to "indeterminate", log-only, gates nothing) |
+| GPU | H200 (8/node) | Any CUDA GPU exposing `gpu_slot_index` via Inspector; other NVLink/clock topologies untested |
+| RDMA/NCCL plugin | HPC-X SHARP/IB (`nccl_rdma_sharp_plugin`), NCCL 2.29.7 runtime | AWS-OFI-NCCL (present on this image but not loaded/tested as active), plain IB verbs without SHARP, EFA, pure-socket (`NCCL_NET=Socket`, only exercised via the new fallback path, not as a primary config) |
+| Concurrent-group shapes | 2x2 (degenerate 1x2 and genuine 2x2), real TP4/PP4/DP3 (this review's §6.8.6) | Deeper nesting (TP8+, PP8+), 3D/4D parallelism shapes, expert-parallel (MoE) communicator overlap |
+| Scale | 4-node probe, 6-node/48-GPU full job | Scale beyond 48 GPUs / 6 nodes |
+| DCGM path | SSH-based (`dcgmi` over `ssh -o BatchMode=yes`) | Any environment where that SSH path is unreachable (K8s pods: already known, falls back to UNCONFIRMED) |
 
