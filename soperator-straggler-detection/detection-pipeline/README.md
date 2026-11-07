@@ -146,14 +146,18 @@ Run everything from the login node. Allow about 30 minutes plus the NCCL build (
   reference members after removing a candidate straggler) — a real, newly-confirmed coverage gap: a fault that only
   affects embedding-tie sync would not be caught by this check at this shape. TP/PP/DP groups above the floor are
   all correctly evaluated (confirmed live, see 6.6.2).
-- **CPU pinning**, validated on both platforms at 16 GPUs and now at 48 GPUs (Slurm). Overhead at 16 GPUs: full
-  pinning +0.64% (n.s.), dump-only +6.4%, unpinned +11.5%. **At 48 GPUs, full pinning vs. unpinned is a much larger,
-  highly significant effect: full-pin iterations are ~7.8% FASTER than unpinned (335.4ms vs. 363.8ms mean, Welch
-  t=-19.2, n=870/870 steady-state samples/arm)** — the benefit does not just "hold", it grows substantially at this
-  scale (see DESIGN_NOTES.md 6.6.4; the 3 ON vs. 3 OFF trials were run in two blocks, not strictly interleaved pair
-  by pair — a real methodological gap from the established interleaved-A/B convention, noted honestly, though the
-  effect size make a block-order confound unlikely to explain it). Full dedication verified via real `/proc` affinity
-  checks on 48/48 ranks across all 6 nodes (`[PIN-VERIFY] verdict=FULLY_DEDICATED ranks=8/8` on every node).
+- **CPU pinning**, validated on both platforms at 16 GPUs and now at 48 GPUs (Slurm), with a genuinely interleaved
+  re-measurement superseding the original two-block result. **Pinned vs. unpinned (Inspector on in both arms),
+  healthy: pinning saves 8.02% (77.84ms vs. 84.09ms, Welch t=-26.58, n=420/420, 3 truly-interleaved pairs, each
+  individually significant: +9.34%/+4.53%/+10.30% — confirms a real effect, not a block-order artifact). Under a
+  100ms/rank-8 fault: pinning still saves 0.59% (t=-12.49, n=420/420) — small because the fault's own ~390ms/iter
+  penalty dominates. Separately: Inspector-with-full-pinning vs. no Inspector at all (the total real-world cost
+  question): -0.58% (pinned is marginally faster, t=-2.32, p~0.02, n=420/420) — not practically distinguishable
+  from zero overhead at this scale.** Full dedication verified via real `/proc` affinity checks on 48/48 ranks
+  across all 6 nodes (`[PIN-VERIFY] verdict=FULLY_DEDICATED ranks=8/8` on every node) and via `INSPECTOR=off`
+  genuinely disabling the plugin (`[PIN-PREFLIGHT] mode=off`, no profiler-plugin load). See DESIGN_NOTES.md 6.7.3
+  for the full table. Not sampled at this scale: per-core CPU utilization (the 1-core/role sufficiency confirmation
+  still rests on the 16-GPU-scale sampling plus 48-GPU `/proc` affinity checks, not a fresh utilization sample).
   Untested: single-NUMA, 4-GPU nodes, SMT off, ARM, small CPU masks.
 - **Tiered mean check (`_check_mean_tiered`)**, Slurm status: verified on 2 nodes/16 GPUs (TP4/PP2/DP2, as before)
   AND now on **6 nodes/48 GPUs** (TP4/PP4/DP3, 100 ms fault on rank 8, 3 healthy + 3 fault + 1 storage-fault trial,

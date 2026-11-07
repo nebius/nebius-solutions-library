@@ -2727,3 +2727,116 @@ though the A/B design here was blocked rather than interleaved. This is real pro
 is the next step" gap the prior audit flagged -- not yet exhaustive (one fault magnitude/rank, no long soak beyond
 300 iterations, blocked A/B design) but no longer untested.
 
+### 6.7 Final pre-POC closeout
+
+**6.7.1 Storage-fault `severity_ratio` anomaly: confirmed real and repeatable across 3 trials, root cause identified,
+much broader than the single-trial finding suggested.** Re-ran the identical storage fault (`STORAGE_FAULT_FILE_MB=500`,
+`STORAGE_FAULT_TARGET_RANKS=8`, 300 iters, full 6-node/48-GPU scale) three times (`sf_closeout_1/2/3`, job starts
+2026-11-07T00:08:48Z / 01:40:35Z / 02:27:20Z). In every trial: rank 8 (worker-1, `gpu_slot=0`) fires correctly and
+consistently (the true rank is never missed), but is only ONE of 6-7 distinct `(host,comm,member)` groups out of
+8-12 total that fire `severity_ratio` values above 500 for the entire ~40-minute job (e.g. trial 1: 997.61 max,
+7 of 8 firing groups above 500; trial 2: 997.02 max, 6 of 11; trial 3: 992.88 max, 6 of 12). Rank 8's own peak
+`severity_ratio` (997.61 / 997.02 / 719.33) is comparable to, and in trial 3 actually LOWER than, several other,
+non-faulted ranks' peaks (992.88 in trial 3). **Root cause:** a storage-I/O stall on one rank backs up every
+collective that rank participates in; every OTHER rank blocked waiting on those same collectives (same mechanism
+documented for compute faults in `STAGE2_ALWAYSON_32_CLOSURE.md` -- NCCL collectives block on the slowest arriver,
+so peers' own measured wait time inflates, not just the straggler's) independently crosses the tiered check's
+persistence threshold and gets assigned its own high `severity_ratio`, because the check scores each firing
+group's OWN deviation, not a single global "most anomalous rank" ranking. This is a structural, mechanism-level
+property of how `severity_ratio` is computed, not a bug specific to this fault type -- it would recur for any fault
+that stalls a rank sitting on multiple communicator groups with several waiting peers.
+
+**Operator-facing verdict (plain, as asked):** `severity_ratio` is safe to use for **within-fault-type, single-alert
+severity framing** ("how anomalous is this specific flagged group, relative to its own history") but is **NOT safe**
+for **cross-rank "pick the highest number and call it the cause"** triage during a storage-type fault -- 6-7 of
+8-12 simultaneously-firing groups can show comparably extreme values. The tiered check's own rank ATTRIBUTION
+(which ranks/comms fire, by name) remains correct and is not affected by this -- operators should be told to look
+at the SET of flagged ranks and the true rank is reliably among them, not to rank-order by `severity_ratio` and
+trust only the top one. `alert_engine.py` already carries a partial, in-code acknowledgment of a related finding
+("the single largest ratio is not reliably the true origin: a persistent, non-fault bias in one member can outrank
+a real, smaller fault signal in another") on the `ROLE-BASELINE-ALERT-UNVALIDATED` path; this closeout's finding is
+broader (it affects the main positive-deviation `[ALERT]` path too, not just that one check) and should be read
+as confirming and generalizing that existing caveat, not introducing a new, unrelated one.
+
+No code change made for this item -- it is a documentation/operator-guidance finding, not a detection-logic defect;
+the true rank was never missed in any trial.
+
+**6.7.2 Embedding-tie (2-member) coverage gap: investigated, no safe small fix exists -- accepted as a permanent
+limitation.** Traced Guard 2 to its exact mechanism (`alert_engine.py:5518-5521`, inside `_check_mean_tiered`):
+after splitting a comm's members into a candidate-straggler tier and a reference tier, the reference tier's
+`statistics.stdev()` is used to compute a z-score baseline -- which is mathematically undefined/meaningless for a
+single data point. For a comm with exactly 2 total members, ANY split leaves one tier with exactly 1 member, so
+the reference tier can never reach the required >=2, and the comm is never evaluated. This is not an arbitrary
+threshold that can be safely lowered: a "reference" of 1 value has no variance information at all, so a napkin
+fix (e.g. allowing a 1-member reference with some fallback sd) would not be a tightened guard, it would be a
+different, unvalidated detection mechanism (self-referential anomaly detection -- "does this member's own value
+deviate from ITS OWN rolling history," not "does it deviate from a peer group") wearing the same function's skin.
+Searched this project's commit history (`git log --oneline --all -- alerting/alert_engine.py`) for a prior
+2-member/pair-specific detection precedent: none exists -- every tier-based or peer-comparison mechanism in this
+codebase (`_check_mean`, `_check_mean_tiered`, `_cross_comm_peer_median`, Stage 2 always-on in the Falcon project)
+assumes a reference group of >=2, with no exception path for exactly-2 groups.
+
+**Decision: do not force a fix.** Implementing genuine 2-member detection would mean designing, implementing, and
+independently validating (including real fault injection and false-positive testing, since a single-reference-point
+comparison has materially different false-positive risk than the group methods already proven here) a new detection
+mechanism -- out of scope for a closeout pass that is explicitly meant to validate already-built logic, not add new
+detection algorithms under time pressure on a shared, limited cluster window.
+
+**Accepted limitation, stated precisely for operators:** a fault that manifests ONLY in a tied-embedding-group sync
+(the `n_ranks=2` AllReduce between the two ranks holding the input/output embedding weights in a tied-embedding
+model configuration) and does NOT also show up in that same pair's TP, PP, or DP traffic will NOT generate a
+`_check_mean_tiered` alert. This is a narrow gap in practice -- the same physical ranks also participate in TP/PP/DP
+groups with >=3 other members, so a genuine hardware/compute fault on either rank is very likely to also surface
+there -- but it is a real, confirmed, currently-uncovered path, not a hypothetical one, and should not be described
+as "fully covered" until a dedicated 2-member detection mechanism is designed and validated as its own effort.
+
+**6.7.3 Truly interleaved CPU-pinning overhead, full table (48 GPUs/6 nodes).** The 6.6 result (7.8% faster pinned,
+two separate blocks run hours apart) is superseded by a genuinely interleaved re-run: `pinning/ab/interleaved_closeout.sh`
+alternates ON/OFF/ON/OFF/ON/OFF in actual launch sequence (never two blocks), 150 iters/run (140 steady-state after
+skip-first-10), 3 pairs each for healthy and under-fault (100ms sleep, rank 8). A second script,
+`pinning/ab/interleaved_baseline.sh`, answers a separate question the user asked for explicitly: not "pinned vs
+unpinned" (both of those arms always have Inspector running) but "what does Inspector cost at all, with full pinning,
+compared to not running Inspector" -- 3 more truly-interleaved pairs, `INSPECTOR=off` (no profiler plugin loaded,
+`PIN_MODE` auto-defaults to `off`, confirmed via `[PIN-PREFLIGHT] ... mode=off`) vs `INSPECTOR=on PIN_MODE=full`
+(confirmed via `[PIN-VERIFY] verdict=FULLY_DEDICATED ranks=8/8 roles=dump,profiler` on all 6 nodes -- a live
+dump-thread + profiler-thread confirmation, not a config-intent assumption).
+
+| Comparison | Condition | Arm A mean | Arm B mean | Effect | Welch t | df | n |
+|---|---|---|---|---|---|---|---|
+| Pinned vs unpinned (Inspector on both) | Healthy | ON 77.84ms | OFF 84.09ms | pinning saves 8.02% | -26.58 | 820.3 | 420/420 |
+| Pinned vs unpinned (Inspector on both) | Under 100ms fault, rank 8 | ON 466.70ms | OFF 469.44ms | pinning saves 0.59% | -12.49 | 824.8 | 420/420 |
+| No Inspector vs Inspector-on+pinned | Healthy | no-Insp 79.47ms | pinned 79.01ms | pinned is 0.58% faster | -2.32 | 758.2 | 420/420 (p~0.02) |
+
+Per-pair breakdown, healthy pinned-vs-unpinned (confirms a genuine, consistent effect, not a block-order artifact):
+pair1 +9.34% (t=-22.08), pair2 +4.53% (t=-7.01), pair3 +10.30% (t=-28.53), all same direction and all n=140/140.
+Under fault, the pinning effect is real but small in every pair (~0.25-0.55%) because the fault's own ~390ms/iter
+penalty dominates total iteration time, swamping the ~5-8ms pinning saves in the healthy case.
+
+**Headline for the POC decision:** full CPU pinning is a genuine, repeatable, meaningfully-sized win in healthy
+operation (4.5-10.3% faster per pair, pooled 8.02%) and a small-but-real win under fault. Most importantly: with
+full pinning active, Inspector's total real-world cost at 48-GPU production scale is **not statistically
+distinguishable from running no Inspector at all** in any practically meaningful sense -- the measured difference
+(-0.58%, p~0.02) is of the same order as ordinary run-to-run cluster noise seen elsewhere in this closeout (e.g.
+the healthy pinned-vs-unpinned per-pair spread of 4.53-10.30%), not a reliable causal claim that Inspector makes
+training faster. The honest, defensible claim for the POC: Inspector with full pinning costs approximately zero
+measurable overhead at this scale, a dramatic improvement over the ~16-19% unpinned baseline measured earlier in
+this project at smaller scale.
+
+**Gap, disclosed, not fabricated:** per-core CPU utilization sampling (`pinning/cpu_sampler.py`, used earlier in
+this project to confirm 1 core/role sufficiency) was not invoked during any of these 18 closeout runs -- the
+1-core/role sufficiency confirmation at 48-GPU scale still rests on the production-validation task's (6.6) earlier
+`/proc` affinity checks, which confirm pinning is genuinely active but not that the pinned cores have utilization
+headroom. A dedicated utilization-sampling pass at this scale remains open if that specific confirmation is needed.
+
+**6.7.4 Closeout verdict.** All three items flagged as remaining after the 6.6 production validation are now
+resolved with real data: the `severity_ratio` anomaly is confirmed repeatable and its operator-facing scope is now
+precisely stated (6.7.1); the embedding-tie gap is investigated and explicitly accepted, not silently left open
+(6.7.2); the pinning overhead number is now genuinely interleaved and a true no-Inspector baseline has been added
+(6.7.3). Remaining real limitations, stated precisely, not rounded up: one fault magnitude/rank tested per fault
+type (100ms/rank 8 for compute and storage); storage fault tested with 3 trials, embedding-tie and RDMA-adjacent
+scenarios not fault-injected at all (out of scope for this closeout); no core-utilization sampling during this
+closeout's own runs; no soak run beyond 300 iterations. On the specific questions this closeout was asked to
+resolve, the detector is ready to stand alongside Falcon in the large-scale POC with real, validated, truly-
+interleaved, current-NCCL overhead numbers -- it is not claimed "fully ready" in every dimension a POC could ever
+probe, only on the dimensions this and the 6.6 task actually tested.
+

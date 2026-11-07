@@ -1186,10 +1186,14 @@ vary.
   `DCGM_FALLBACK_CASCADE_RESAMPLE_INTERVAL_S` (5). Setting the first to 1 and the second to 0 restores the old
   single-snapshot behavior (which false-pages on pipeline-parallel jobs). See docs/DETAILED_REFERENCE.md 7.3.
 - **Known operational risk:** aggregator RSS grows early in a job and across jobs (107-minute soak: about 85 -> 106-109 MB, front-loaded and flattening; likely per-bucket lists filling to their caps plus per-communicator state never evicted; not confirmed by a heap profile). Restart the aggregators between very long multi-job campaigns; see docs/DETAILED_REFERENCE.md 7.0.
-- **48-GPU overhead result (2026-11):** full pinning is **~7.8% FASTER** than unpinned at this scale (335.4ms vs.
-  363.8ms mean iteration, Welch t=-19.2, n=870/870), a much larger effect than the 16-GPU reference (+0.64%, n.s.).
-  The 3-vs-3 trials were run as two blocks, not interleaved pair-by-pair -- re-run interleaved before treating as
-  fully conclusive. See DESIGN_NOTES.md 6.6.4.
+- **48-GPU overhead result, final closeout (2026-11):** genuinely interleaved re-measurement (`pinning/ab/interleaved_closeout.sh`,
+  `pinning/ab/interleaved_baseline.sh`) supersedes the earlier two-block result. Pinned vs. unpinned (Inspector on
+  both arms), healthy: pinning saves **8.02%** (77.84ms vs. 84.09ms, Welch t=-26.58, n=420/420; per-pair +9.34%/
+  +4.53%/+10.30%, all same direction). Under 100ms/rank-8 fault: pinning saves **0.59%** (t=-12.49, n=420/420) --
+  small, fault dominates iteration time. No-Inspector baseline vs. Inspector-on+pinned: **-0.58%** (pinned
+  marginally faster, t=-2.32, p~0.02, n=420/420) -- full-pinned Inspector costs approximately zero at this scale.
+  See DESIGN_NOTES.md 6.7.3. Not sampled this round: per-core utilization (`cpu_sampler.py` not invoked during
+  these 18 runs).
 - **Stale-supervisor trap (found live, 2026-11):** `run.sh`/`self_test.sh` detect an already-running
   `run_alert_engine_supervised.sh` by process name only and reuse its log, with no check that it's running the
   current checkout's code. If validating a code change, check the running process's actual script path (and
