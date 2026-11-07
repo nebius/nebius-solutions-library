@@ -30,10 +30,23 @@ cluster_topology_available_nodes
 _SCRIPT_DIR_FOR_MOUNT_FIX="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 _PKG_ROOT_FOR_MOUNT_FIX="$(cd "$_SCRIPT_DIR_FOR_MOUNT_FIX/../.." && pwd)"
 _NCCL_SRC_DIR_FOR_MOUNT_FIX="$(cd "$(dirname "$(dirname "$NCCL_LIB_PATH")")" && pwd)"
-for _p in "$_PKG_ROOT_FOR_MOUNT_FIX" "$_NCCL_SRC_DIR_FOR_MOUNT_FIX"; do
+# Real bug found live (2026-11, final stress-test round): this launcher was
+# missed when the OUTDIR/DUMPDIR_BASE-symlink mount-fix was added to
+# run_moe_nanogpt.sh/run_megatron_tp4pp4dp3.sh/run_fsdp_nanogpt.sh (see
+# DESIGN_NOTES.md storage-migration section) -- var/dump and var/runs are
+# now symlinks to a separate filesystem outside PKG_ROOT, so without this,
+# every rank's mkdir/log-file-open on a real non-/root clone location
+# failed inside the container ("mkdir: ... File exists" from the dangling-
+# symlink-target-not-mounted case, then "No such file or directory" on the
+# per-rank log open that followed). Confirmed live: identical fix as the
+# other three launchers closes it.
+_OUTDIR_REAL_FOR_MOUNT_FIX="$(readlink -f "$OUTDIR" 2>/dev/null || echo "$OUTDIR")"
+_DUMPDIR_REAL_FOR_MOUNT_FIX="$(readlink -f "$DUMPDIR_BASE" 2>/dev/null || echo "$DUMPDIR_BASE")"
+for _p in "$_PKG_ROOT_FOR_MOUNT_FIX" "$_NCCL_SRC_DIR_FOR_MOUNT_FIX" "$_OUTDIR_REAL_FOR_MOUNT_FIX" "$_DUMPDIR_REAL_FOR_MOUNT_FIX"; do
   case "$_p" in
     /root|/root/*) ;;  # already covered by the existing /root:/root mount
-    *) MOUNTS="$MOUNTS,$_p:$_p" ;;
+    "$_PKG_ROOT_FOR_MOUNT_FIX"/*) ;;
+    *) case ",$MOUNTS," in *",$_p:$_p,"*) ;; *) MOUNTS="$MOUNTS,$_p:$_p" ;; esac ;;
   esac
 done
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

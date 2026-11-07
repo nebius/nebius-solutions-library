@@ -1343,6 +1343,38 @@ CONFIDENCE_HEADER = {
 # emit is still emitted and visible.
 PAGE_WORTHY_TIERS = {"CONFIRMED"}
 
+# Log-readability fix (independent fresh-eyes review, 2026-11): confidence=
+# and severity= are correctly orthogonal to this -- they reflect whether a
+# hardware root cause (DCGM thermal/clock, eBPF storage) was CONFIRMED, which
+# every fault injected anywhere in this project's history (synthetic compute-
+# sleep faults) correctly never triggers (there is no real hardware cause to
+# confirm) -- confirmed directly this session: confidence=CONFIRMED has 0
+# occurrences across this entire project's alert history, confidence=PROBABLE
+# has 2000+. That is expected behavior for synthetic faults, not a gap. The
+# real, independently-confirmed gap this closes is different: an operator
+# reading confidence=PROBABLE severity=LOG-ONLY repeated hundreds of times has
+# no field telling them "this exact rank/comm just fired again" vs "this is
+# the first and only time." pattern= below is a presentation-only signal,
+# computed from alert emission itself (no new detection logic, no change to
+# whether/when an alert fires) -- a bounded, in-memory recency count per
+# (host, comm, rank), independent of confidence/severity/tier.
+_REPEAT_WINDOW_S = 60.0
+_REPEAT_THRESHOLD = 3
+_repeat_tracker = defaultdict(deque)
+
+
+def _record_and_count_repeat(key, window_s=_REPEAT_WINDOW_S, now=None):
+    """Records one fire for `key` now, prunes entries older than window_s,
+    returns the count still in the window (including this one). Pure
+    presentation bookkeeping -- never read by any detection/attribution
+    logic, only by format_alert() below."""
+    now = now if now is not None else time.time()
+    dq = _repeat_tracker[key]
+    dq.append(now)
+    while dq and now - dq[0] > window_s:
+        dq.popleft()
+    return len(dq)
+
 
 def severity_for_tier(tier):
     """Returns ('PAGE', ...) or ('LOG-ONLY', ...) -- see PAGE_WORTHY_TIERS
@@ -1391,9 +1423,16 @@ def format_alert(finding, coverage):
     gpu_slot_disp = finding.get("dcgm_gpu_slot_used") if finding.get("dcgm_gpu_slot_known") else "unknown"
     role_rank_disp = finding.get("role_rank", "na")
     role_n_disp = finding.get("role_n", "na")
+    # Log-readability fix (independent fresh-eyes review, 2026-11): pattern=
+    # distinguishes "this exact (host, comm, rank) has fired repeatedly in
+    # the last _REPEAT_WINDOW_S seconds" from a one-off -- orthogonal to
+    # confidence=/severity= (see _record_and_count_repeat's docstring).
+    # Presentation only: never gates, delays, or suppresses this alert.
+    repeat_n = _record_and_count_repeat((host, comm, rank))
+    pattern_disp = f"REPEATED(n={repeat_n})" if repeat_n >= _REPEAT_THRESHOLD else "SINGLE"
     header = (f"[ALERT] rank={rank} gpu_slot={gpu_slot_disp} role_rank={role_rank_disp} role_n={role_n_disp} "
               f"comm={comm} node={host} type={fault_type} confidence={tier} "
-              f"severity={severity}{incident_id_part}")
+              f"severity={severity} pattern={pattern_disp}{incident_id_part}")
     # P21.6 -- cascade-mislocalization fix: shown prominently, right after
     # the header, before any cause-evidence body -- either confirming a
     # real re-attribution (host/rank/comm above already reflect it) or
@@ -3668,10 +3707,20 @@ class AlertEngine:
                 f"role_n={od['role_n']} ratio={od['ratio']:.3f} current_mean_us={od['current']:.0f} "
                 f"(baseline_us={od['peer_median']:.0f}, source={od['baseline_source']}{mad_note})"
             )
+        # Log-readability fix (independent fresh-eyes review, 2026-11): this
+        # check is level-triggered by design (_check_wait_induced calls it
+        # once per real poll for as long as the condition holds, unlike
+        # _emit()'s persistence-gated, fires-once-per-onset tiered path) --
+        # a sustained fault legitimately produces several near-identical
+        # consecutive lines here, which a cold reader can misread as a
+        # logging bug/retry loop rather than "still happening." pattern=
+        # makes that explicit instead of leaving it to be inferred.
+        _wi_repeat_n = _record_and_count_repeat((culprit_host, comm, culprit))
+        _wi_pattern = f"REPEATED(n={_wi_repeat_n})" if _wi_repeat_n >= _REPEAT_THRESHOLD else "SINGLE"
         lines = [
             f"[WAIT-INDUCED-ALERT] rank={culprit} gpu_slot={slot} role_rank={d['role_rank']} "
             f"role_n={d['role_n']} comm={comm} node={culprit_host} type=compute "
-            f"confidence={tier} severity={severity}",
+            f"confidence={tier} severity={severity} pattern={_wi_pattern}",
             "",
             f"WAIT-INDUCED STRAGGLER ({len(per_member)}-member comm): this member's OWN current "
             f"reading (ratio={d['ratio']:.3f}x its own real historical baseline, "
@@ -3916,10 +3965,15 @@ class AlertEngine:
                 f"example found live: TP4-standalone's own regression-sweep investigation).",
             ]
         )
+        # Log-readability fix (independent fresh-eyes review, 2026-11): same
+        # reasoning as _emit_wait_induced_alert's pattern= -- this check is
+        # level-triggered too, so a sustained condition legitimately repeats.
+        _rb_repeat_n = _record_and_count_repeat((data["hostname"], comm, member))
+        _rb_pattern = f"REPEATED(n={_rb_repeat_n})" if _rb_repeat_n >= _REPEAT_THRESHOLD else "SINGLE"
         lines = [
             f"{header_tag} rank={member} gpu_slot={slot} role_rank={data['role_rank']} "
             f"role_n={data['role_n']} comm={comm} node={data['hostname']} type=compute "
-            f"confidence={tier} severity={severity}",
+            f"confidence={tier} severity={severity} pattern={_rb_pattern}",
             "",
             f"ROLE-BASELINE DEVIATION: this member's current reading (current_mean_us="
             f"{data['current']:.0f}) is {data['ratio']:.3f}x its OWN real historical baseline for "
@@ -4725,7 +4779,22 @@ class AlertEngine:
         net, err, used_buffer = net_check
         tier = net["tier"]
         severity, severity_reason = severity_for_tier(tier)
-        lines = [f"[ALERT] scope=cluster type=nvlink confidence={tier} severity={severity}", ""]
+        # Log-readability fix (independent fresh-eyes review, 2026-11): the
+        # per-host detail below (participation/errors per host) already
+        # existed but only ever reached the full alert text -- the summary
+        # log (_append_alert_summary) only ever stores this header line
+        # (splitlines()[0]), so a reader of the summary log alone saw no
+        # identifying detail at all and could not tell one nvlink finding
+        # apart from another. worst_host= puts the single most-implicated
+        # host (lowest link participation, ties broken by highest error
+        # delta) directly in the header -- computed from net['net'], which
+        # was already being computed, not a new query.
+        worst_host, worst_d = min(
+            net["net"].items(),
+            key=lambda kv: (kv[1]["participation_frac"], -kv[1]["errors_delta"]))
+        header_detail = (f"worst_host={worst_host} participation={worst_d['participation_frac']:.2f} "
+                          f"errors_delta={worst_d['errors_delta']}")
+        lines = [f"[ALERT] scope=cluster type=nvlink confidence={tier} severity={severity} {header_detail}", ""]
         lines.append(f"NVLink evidence across {sorted(net['net'].keys())} (live_query, "
                       f"no rolling buffer for NVLink yet):")
         for h, d in sorted(net["net"].items()):
@@ -6065,8 +6134,28 @@ class AlertEngine:
         poll_interval = poll_interval or self.poll_interval
         forever = duration_s <= 0
         t_end = None if forever else time.time() + duration_s
+        # Log-readability fix (independent fresh-eyes review, 2026-11): an
+        # empty stretch of the summary log was found to be genuinely
+        # ambiguous -- "nothing to report" and "this monitor silently died"
+        # look identical (no lines either way). A low-frequency, clearly-
+        # tagged liveness line closes that: [MONITOR-HEARTBEAT] on a fixed
+        # interval regardless of alert volume, cheap (self.alerts is just a
+        # len() check), and never confused with a real finding (distinct
+        # header, no confidence=/severity=/pattern= fields at all).
+        _heartbeat_interval_s = 60.0
+        _last_heartbeat_ts = time.time()
+        _last_heartbeat_alert_count = len(self.alerts)
         while forever or time.time() < t_end:
             self.poll_once()
+            now = time.time()
+            if now - _last_heartbeat_ts >= _heartbeat_interval_s:
+                _alerts_this_period = len(self.alerts) - _last_heartbeat_alert_count
+                hb = (f"[MONITOR-HEARTBEAT] alive=true alerts_this_period={_alerts_this_period} "
+                      f"total_alerts={len(self.alerts)}")
+                print(hb, flush=True)
+                self._append_alert_summary(hb)
+                _last_heartbeat_ts = now
+                _last_heartbeat_alert_count = len(self.alerts)
             time.sleep(poll_interval)
 
 

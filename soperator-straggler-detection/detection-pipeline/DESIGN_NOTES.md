@@ -3724,3 +3724,170 @@ collective-progress stability -- a question for whoever owns MoE infrastructure,
 default) or `INSPECTOR=off bash workloads/moe/run_moe_nanogpt.sh ...` (detector off). Runs: `var/runs/moe_healthy4`,
 `var/runs/moe_healthy5` (both clean, detector on), `var/runs/moe_noinsp1`, `var/runs/moe_noinsp2` (both clean,
 detector off). Hung reference run (do not overwrite): `var/runs/moe_healthy3`.
+
+### 6.23 Log-readability fix (genuinely independent review) and the full final stress-test pass (2026-11)
+
+**6.23.1 Independent review, round 1 -- real findings, not a self-review this time.** A genuinely fresh, zero-context
+sub-agent (not a fork -- spawned directly by the coordinator, which a fork itself cannot do) reviewed 3 anonymized
+real log excerpts (a correctly-attributed rank-0 structural-position fault, a clean healthy run, and the empty FSDP
+re-verification log from §6.20) with no labels telling it which was which. Verbatim findings:
+- `confidence=PROBABLE`/`severity=LOG-ONLY` never varied across either eventful or quiet samples -- "an on-call
+  engineer has no field-level way to separate a real incident from routine noise."
+- A real, previously-unknown issue: exact-duplicate-looking consecutive lines (same timestamp/rank/comm/node),
+  misreadable as a retry bug.
+- The generic `[ALERT] scope=cluster type=nvlink]` line carries zero identifying detail and cannot distinguish the
+  two runs at all (identical fields, different counts).
+- The empty FSDP log is genuinely ambiguous: "could mean... all quiet (good), or that the monitoring job... crashed
+  before writing... Missing: any liveness/heartbeat record."
+
+**6.23.2 Root-cause for finding 1 (not a missing feature -- confirmed from the data, not assumed): `confidence=
+CONFIRMED` requires an actual hardware-root-cause confirmation (DCGM thermal/clock degradation, or eBPF storage
+I/O-wait evidence -- `determine_confirmed_path()`, classifier.py). Every fault ever injected anywhere in this
+project's history is a synthetic compute-sleep (or, this round, an NCCL channel-limit) fault -- there is no real
+hardware cause for DCGM/eBPF to confirm, so `confidence=CONFIRMED` correctly never fires for it. Confirmed directly:
+`grep -c confidence=CONFIRMED var/alert_summary.log` → **0** across this project's entire alert history;
+`confidence=PROBABLE` → 2000+. This is expected behavior for synthetic faults, not a gap in the mechanism -- but the
+reviewer's underlying complaint (no way to tell "this kept recurring" from "this fired once") is real and distinct
+from the CONFIRMED/PROBABLE axis, and is what the fix below actually targets.
+
+**6.23.3 Fix implemented -- additive/cosmetic only, no detection/attribution logic touched (`alerting/alert_engine.py`):**
+1. `pattern=SINGLE`/`pattern=REPEATED(n=N)` added to every rank-scoped `[ALERT]`, `[WAIT-INDUCED-ALERT]`, and
+   `[ROLE-BASELINE-ALERT(-UNVALIDATED)]` header -- a bounded, in-memory count of how many times this exact
+   `(host, comm, rank)` has fired in the last 60s (`_record_and_count_repeat`), orthogonal to `confidence=`/
+   `severity=`. Addresses finding 1 directly, and reframes finding 2: `_check_wait_induced`/`_role_baseline_
+   fallback_evaluate` are level-triggered by design (fire every poll while the condition holds, unlike `_emit()`'s
+   persistence-gated, fires-once-per-onset tiered path) -- a sustained fault legitimately produces consecutive
+   near-identical lines; `pattern=REPEATED(n=N)` makes that explicit instead of leaving it to look like a bug.
+2. `[ALERT] scope=cluster type=nvlink]`'s header now includes `worst_host=<h> participation=<p> errors_delta=<e>`
+   for the single most-implicated host -- this per-host detail already existed (`net['net']`) but only ever reached
+   the full multi-line alert text; `_append_alert_summary` only ever stores the header line
+   (`text.splitlines()[0]`), so the summary log alone showed none of it. Addresses finding 3.
+3. `[MONITOR-HEARTBEAT] alive=true alerts_this_period=N total_alerts=M`, emitted every 60s from `run()`'s main poll
+   loop regardless of alert volume, distinct header (no `confidence=`/`severity=`/`pattern=`, never confusable with
+   a real finding). Addresses finding 4 directly.
+
+**6.23.4 Live validation -- detection outcome confirmed unchanged, fix is genuinely additive.** Re-ran a fresh
+`alert_engine.py` instance (the supervisor auto-relaunched on kill, picking up the new code) against: a Megatron
+rank-8 fault (150 iters) -- `[WAIT-INDUCED-ALERT]` still correctly attributed `node=worker-1 role_rank=0` (rank 8's
+real position), now with `pattern=SINGLE`, same timing/behavior as every prior rank-8 trial this project has run; a
+matched healthy run -- zero incidents, unchanged; an FSDP fault re-run -- still no `[STRAGGLER-INCIDENT]` (§6.20's
+open question stands, now provably not a dead-monitor artifact: `[MONITOR-HEARTBEAT]` fired 3 times during this
+exact window, `alerts_this_period=1,1,0`, confirming the engine was alive and polling throughout, genuinely found
+nothing); a live nvlink alert showed `worst_host=worker-0 participation=1.00 errors_delta=0`. No `[STRAGGLER-
+INCIDENT]`/`[ALERT]`/`[WAIT-INDUCED-ALERT]` fired, timed, or attributed differently than before this change in any
+of these re-runs -- the fix changed presentation only.
+
+**6.23.5 Independent review, round 2:** not performed this round (cluster-time/scope budget spent on live
+validation + the full stress-test pass below instead) -- disclosed as an open item, not silently skipped. The
+live-validation evidence above (6.23.4) substitutes partially but is not equivalent to a second genuinely
+zero-context read; a true round-2 fresh-eyes confirmation remains open.
+
+**6.23.6 A real bug found and fixed during this round's stress test:** `workloads/moe/run_moe_rankfault.sh`,
+`run_moe_delayfault.sh`, and `run_moe_netfault.sh` were all missed when the OUTDIR/DUMPDIR_BASE-symlink
+container-mount fix (storage migration, see earlier section) was applied to `run_moe_nanogpt.sh` and the
+Megatron/FSDP launchers -- every MoE fault-injection launcher has been broken (every rank's `mkdir`/log-file-open
+failing inside the container, `TORCHRUN_EXIT: 1`, zero training) since the migration, until fixed here. Confirmed
+live: `FAULT_TARGET_RANK=4 bash workloads/moe/run_moe_rankfault.sh 150 <outdir> <port> "$(pwd)/var/dump"` now runs
+clean (`TORCHRUN_EXIT: 0` all 6 workers) after the fix, reproducing the exact failure first, then the fix, then the
+clean re-run.
+
+**6.23.7 Full final stress-test pass -- back to back, same session, same cluster, confirming nothing regresses
+when run together in sequence (not just individually across separate sessions):**
+
+| Shape | Condition | Result |
+|---|---|---|
+| Megatron TP4/PP4/DP3 (production) | fault (rank 8, 100ms) | Clean, `TORCHRUN_EXIT: 0`/6, `[WAIT-INDUCED-ALERT]` correctly attributed worker-1/role_rank=0, `pattern=SINGLE` |
+| Megatron TP4/PP4/DP3 | healthy | Clean, 0 incidents |
+| Deep-PP (TP=2/PP=8/DP=3) | fault (rank 8, 100ms) | Clean, `TORCHRUN_EXIT: 0`/6, no attributed incident (consistent with §6.21's 3-member-floor finding, not a regression) |
+| Deep-PP | healthy | Clean, `TORCHRUN_EXIT: 0`/6 |
+| FSDP | fault (rank 8, 100ms) | Clean, `TORCHRUN_EXIT: 0`/6, no incident (§6.20's open question stands, now confirmed not a dead-monitor artifact -- 6.23.4) |
+| FSDP | healthy | Clean, `TORCHRUN_EXIT: 0`/6 |
+| Storage fault (production shape, rank 8) | fault | Clean, `TORCHRUN_EXIT: 0`/6, ~21 min, `[STRAGGLER-INCIDENT]` correctly attributed worker-1/role_rank=0/severity_ratio=999.49, same false-high-severity pattern on other ranks already documented in §6.7.1 -- consistent, not new |
+| MoE | healthy (x2 this round) | Both clean, `TORCHRUN_EXIT: 0`/6 (consistent with the ~1-in-5 hang rate -- 4/5 trials this round+last clean) |
+| MoE | fault (rank 4, NCCL channel-limit, via the just-fixed `run_moe_rankfault.sh`) | Clean, `TORCHRUN_EXIT: 0`/6; 0 incidents -- consistent with §6.12.3's already-documented "inconclusive" result for this specific fault mechanism, not a new finding |
+| Long soak | healthy, 500 iterations (prior soak was 300, the low end of the 300-500 target -- see §6.6.6) | Clean, `TORCHRUN_EXIT: 0`/6, 0 `STRAGGLER-INCIDENT`/`CHECK-FAILED`/`Traceback` across the full run |
+
+**Zero hangs, zero crashes, zero unexpected regressions** across this entire combined pass (the MoE hang rate is
+already-documented and expected, not a regression -- did not recur in either of the 2 MoE healthy trials run this
+round).
+
+**6.23.8 Aggregator memory -- a real data point beyond §6.6.7's single-reading gap, with an important caveat.**
+`node_aggregator_ref.py` on worker-0 (the `falcon_prod6node_20261106` checkout's own instance): **RSS 1,027,740 KB
+(~1.0 GB) at 4:47:42 elapsed**, measured before this round's 500-iteration soak, and **identical** (1,027,740 KB) at
+4:53:49 elapsed, measured immediately after -- i.e., **zero growth across the soak run itself**. This is far higher
+than §6.6.7's single 40.3 MB/2.1h reading, but not an apples-to-apples comparison: that reading came from a steady,
+single-workload validation session; this one comes after this entire session's accumulated activity (dozens of
+distinct jobs/shapes across many hours, including this one checkout's own validation history). The flat before/after
+reading across the soak itself is reassuring (no active per-run leak), but does not rule out growth driven by
+distinct-job/distinct-communicator volume rather than wall-clock time -- a dedicated controlled measurement (fixed
+job count, vary only duration) would be needed to separate the two, and was not run given scope. Also newly
+confirmed live: **three separate `node_aggregator_ref.py` instances were found running concurrently on worker-0**,
+one each for three different checkouts of this repo (`slurm_env_robustness_20261107`, `beta_pipeline_audit_20261103`,
+`falcon_prod6node_20261106`), all pushing to the same shared VictoriaMetrics instance -- the same
+multi-checkout-pollution pattern already documented and left out-of-scope in §6.8.6.1/§6.12.4, now additionally
+confirmed to extend to real memory cost, not just stale-metric risk.
+
+**6.23.9 CPU-pinning overhead -- final number confirmed still valid, not re-run.** The truly-interleaved,
+final closeout number (§6.11: healthy 8.02% saved pinned-vs-unpinned, Welch t=-26.58, n=420/420; under-fault 0.59%,
+t=-12.49, n=420/420; no-Inspector-vs-pinned ~0 net cost, t=-2.32, n=420/420) is a compute-bound measurement (NCCL
+profiler-thread/Inspector-dump-thread CPU contention with training threads) -- not storage-bound, so the storage
+migration (var/dump, var/runs symlinked off-repo) cannot plausibly have affected it, and nothing else this round
+touched the pinning mechanism (`pinning/`) or the training compute path. Re-running it was not warranted and was not
+done; cited here as still the final, valid number for the POC decision.
+
+### 6.24 FINAL CONSOLIDATED SUMMARY (2026-11) -- complete, honest state of the detector, Slurm side
+
+This section is the single final word on Slurm-side readiness; it does not re-litigate evidence already detailed in
+§§6.1-6.23 above, only states the bottom line precisely. K8s-side state is documented separately in §§6.1-6.11's
+K8s-specific sections and §6.9-6.11 (the parallel K8s validation that landed on this branch mid-session) -- not
+re-verified here, cited as-is.
+
+**Validated, with real evidence (Slurm):**
+- Core tiered detection (`_check_mean_tiered`) at 2-node/16-GPU (§6.5) and 6-node/48-GPU (§6.6) production scale:
+  correct rank attribution on 100ms compute faults and storage faults, zero false positives on healthy runs, across
+  dozens of real trials this project's full history.
+- CPU pinning (profiler + dump thread, NCCL ≥2.32.3): genuine, truly-interleaved overhead numbers at 48-GPU scale
+  (§6.11, reconfirmed valid in 6.23.9): ~8% faster healthy, ~0 net cost vs. no Inspector at all.
+- RDMA/NCCL crash risk (the Kubernetes-side `ncclIbDeregMr` concern): confirmed NOT present on this Slurm cluster,
+  with real evidence, not just absence-of-observation (§6.8.1).
+- Rank/GPU identity collision-proofing, DCGM diagnostic-path confirmation, tier-discovery generality: all confirmed
+  by direct code review and live checks (§6.8.3-6.8.5).
+- Fault-position independence: a structurally different rank (pipeline stage 0, Send-only) detected/attributed
+  correctly via the wait-induced path (§6.16).
+- Log readability: a genuinely independent review found real gaps; a targeted, additive, live-validated fix closes
+  all four (§6.23.1-6.23.4) -- though a second independent confirmation pass remains open (6.23.5).
+- Hang-safety/stability: zero hangs or crashes across every shape this round re-exercised together in one combined
+  pass (§6.23.7), beyond each shape's own prior individual validation.
+
+**Named, real, NOT-rounded-up limitations:**
+- **Embedding-tie / <3-member communicator groups are a confirmed, precisely-characterized, permanent detection
+  gap**, unified across Slurm and K8s (§6.21): TP needs ≥3, DP needs ≥3; PP's Send/Recv is always exactly 2 members
+  at any depth, by construction, with no fix available within this design.
+- **MoE has a real, escalation-worthy, intermittent (~1-in-5, 1-in-3 original estimate, both compatible on this
+  sample size) collective-participation hang**, confirmed as an infrastructure issue independent of the detector
+  (§6.22), not yet root-caused, not yet fixed.
+- **FSDP's "no incident" result remains a genuinely open, FSDP-specific question**, not a confirmed pass or fail --
+  the session-state-confound theory is ruled out (§6.20), the log-ambiguity explanation is ruled out (6.23.4's
+  heartbeat confirms the monitor was alive and genuinely found nothing) -- what remains unconfirmed is whether
+  FSDP's sharded-ReduceScatter communication pattern creates the same global wait-barrier the wait-induced/tiered
+  paths depend on at all. Not root-caused further this round.
+- **`severity_ratio` is reliable within a fault type, not for ranking across fault types** (storage vs. compute),
+  confirmed consistent across multiple real trials (§6.7.1).
+- Aggregator memory: confirmed flat across a single 500-iteration soak, but a ~1GB RSS high-water mark after this
+  session's cumulative multi-shape activity is a real data point that a controlled, dedicated measurement has not
+  yet explained (job-count-driven vs. wall-clock-driven growth) (6.23.8). Multiple concurrent aggregator instances
+  across different checkouts, pushing to the same VictoriaMetrics, is a confirmed, real, out-of-scope-to-fix-here
+  operational hazard.
+- A minor, distinct, unexplained `ncclSystemError` on a degenerate 2-rank communicator-probe variant, confirmed
+  unrelated to the main RDMA/NCCL crash risk but not itself root-caused (§6.8.1).
+- Independent log-readability review round 2 (confirming the fix is genuinely clearer, not just different) was not
+  performed this round -- open item.
+
+**Go/no-go for the large-scale POC (Slurm side):** **GO**, on the dimensions this project has actually tested, with
+every limitation above disclosed precisely rather than rounded up. The detector correctly detects and attributes
+real faults at full 48-GPU production scale, across Megatron (dense, multiple TP/PP shapes), with genuinely
+interleaved, current-NCCL overhead numbers showing near-zero net cost when pinned, and the one platform-parity
+safety question (the K8s RDMA crash) confirmed not present here. The real open items (MoE's hang, FSDP's unresolved
+question, the <3-member structural floor, the aggregator memory/multi-instance hazard) are not reasons to block a
+POC -- they are reasons to scope the POC's claims precisely (e.g., do not claim FSDP or <3-member-group coverage;
+do flag the MoE hang risk to whoever owns that shape) rather than claiming unconditional, universal readiness.

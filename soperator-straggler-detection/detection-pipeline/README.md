@@ -264,6 +264,23 @@ Run everything from the login node. Allow about 30 minutes plus the NCCL build (
   straggler signal on large Megatron gradient AllReduces (DDP async overlap). The signal appears on small
   post-backward collectives (< 512 B, below the floor); `_check_mean` detects it. See DESIGN_NOTES §6.9.2.
 - **K8s — DCGM**: SSH-based cause classification unavailable in pods. All K8s alerts are UNCONFIRMED.
+- **<3-member communicator groups (Slurm and K8s, unified finding)**: a confirmed, permanent detection gap, not
+  fixable within this design. TP needs ≥3, DP needs ≥3; PP's Send/Recv is always exactly 2 members at any depth,
+  by construction. See DESIGN_NOTES §6.21.
+- **MoE (Slurm, 6-node/48-GPU)**: a real, escalation-worthy, intermittent (~1-in-5) collective-participation hang
+  on healthy runs, confirmed as an infrastructure issue independent of this detector, not yet root-caused. See
+  DESIGN_NOTES §6.22.
+- **FSDP (Slurm)**: detection result remains genuinely open (not a confirmed pass or fail) — whether FSDP's
+  sharded-ReduceScatter pattern creates the wait-barrier the detector's wait-induced/tiered paths rely on is
+  unresolved. See DESIGN_NOTES §6.20/§6.24.
+- **Log readability**: `confidence=`/`severity=` alone cannot distinguish a repeated, consistent finding from a
+  one-off (both read `PROBABLE`/`LOG-ONLY` for every synthetic fault this project has ever injected, since
+  `CONFIRMED` requires real hardware evidence a synthetic fault correctly never produces). A new, additive
+  `pattern=SINGLE`/`REPEATED(n=N)` field, plus a `[MONITOR-HEARTBEAT]` liveness line and identifying detail on
+  cluster-wide nvlink alerts, closes the gaps found by a genuinely independent fresh-eyes review. See DESIGN_NOTES
+  §6.23.
+
+**Final, consolidated, honest state (Slurm side): DESIGN_NOTES §6.24.**
 
 ## Further reading
 
