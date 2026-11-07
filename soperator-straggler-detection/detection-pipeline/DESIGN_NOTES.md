@@ -3323,3 +3323,54 @@ apparently-common cause -- an operator seeing this in a real incident would have
 genuine collision without the kind of manual PID/dump-file cross-check done here. Not fixed in this pass (the root
 cause is the already out-of-scope aggregator bug); flagged for whoever eventually fixes §6.8.6.1, and for anyone
 improving this warning's own text to name this known confound explicitly.
+
+### 6.10 Deep pipeline-parallel shape (2026-11): a real, confirmed rank_launch.sh bug and a real, unresolved detection gap
+
+Scope: TP=2/PP=8/DP=3 (48 GPUs/6 nodes) -- deeper pipeline than any previously tested shape in this project (prior
+deepest: PP=4). Chosen to directly test whether `_check_mean_tiered`'s claimed N-tier generality holds at a PP depth
+never exercised before, per this task's own Step 4 charter.
+
+**6.10.1 Real bug found and fixed: `pinning/rank_launch.sh`'s `unpinned()` fallback crashed the job instead of
+degrading gracefully.** First smoke attempt failed outright (`TORCHRUN_EXIT: 1` on all 6 workers,
+`exec: rank_setup failed: not found`) due to a real, reproducible CPU-core contention condition on this shape
+(`rank_setup: NUMA node 0 needs 8 physical cores for pinning but only 7 available` -- plausibly accumulated
+resource fragmentation from many hours of back-to-back jobs this session). This should have triggered this script's
+own documented contract ("Any failure degrades to running the training command UNPINNED... it never blocks the
+job"), but `unpinned()`'s `exec "$@"` resolved to the FUNCTION's own positional parameter (the warning message
+string "rank_setup failed"), not the script's real training command -- a latent bug present since this code was
+written, never exercised until this exact contention condition first made `rank_setup.py` genuinely fail. Fixed by
+capturing the script's real argv as `ORIG_ARGS` before the function is defined and having both of its exec call
+sites use that saved array. Confirmed fixed live: the identical contention condition now correctly produces a
+genuine unpinned fallback (`TORCHRUN_EXIT: 0` on all 6 workers) instead of a hard crash. Launcher/pinning-layer fix
+only; no core detection logic touched.
+
+**6.10.2 Tier structure: no incident beyond `role_n=8`/`role_n=48` observed; TP groups structurally too small to
+evaluate.** With TP collapsed to 2 (from this shape's own TP=2 choice), every TP communicator has exactly 2
+members -- below `_check_mean_tiered`'s own hard-coded `len(all_timing) < 3: return` floor (needs >=3 ranks for
+"meaningful tier detection", same code path already governing the known 2-member embedding-tie gap in 6.6).
+Pipeline-parallel Send/Recv communicators are inherently 2-member regardless of PP depth (one sender, one
+receiver) -- not new to this shape, but newly confirmed to compound with TP=2's collapse: at this shape, TP, PP,
+AND the embedding-tie group are all below the 3-member floor, leaving only the DP=3 AllReduce groups structurally
+eligible to ever fire this check.
+
+**6.10.3 A real, unresolved detection gap: the 100ms/rank-8 fault was genuinely, strongly injected and measurable
+(ground truth), but produced no attributed `mean_tiered` incident.** Healthy run (`deeppp_healthy1`): ~78ms/iter.
+Fault run (`deeppp_fault1`, identical 100ms sleep on rank 8, same methodology as every other fault trial in this
+project): ~465ms/iter -- a ~387ms/iter increase, nearly identical in magnitude to the production shape's own
+confirmed fault signature (78->469ms, 6.6/6.7). The fault is real and dominant. No `[STRAGGLER-INCIDENT]
+stat=mean_tiered` with a `job_start` matching this run's actual window (`2026-11-07T06:00:46Z`) appears anywhere in
+the engine's log. Most likely explanation, consistent with 6.10.2: if rank 8's fault-induced delay propagates
+primarily through this shape's TP=2 and/or PP Send/Recv paths -- both structurally below the 3-member floor -- the
+only structurally-eligible comparison (DP=3 AllReduce) may not carry a strong enough or correctly-bucketed signal
+to trigger on its own. This is a REAL, CONFIRMED, UNRESOLVED gap at this shape: not proven root-caused to the
+3-member floor specifically (not exhaustively traced to every communicator this run created), but strongly
+consistent with it and not explained by any other factor checked (fault genuinely applied; pinning degraded
+gracefully after the 6.10.1 fix, not blocking the run; no CHECK-FAILED/Traceback in the engine log for this
+window). Flagged as the headline technical finding of this task's shape-coverage work: `_check_mean_tiered`'s
+N-tier generality does NOT yet have confirmed coverage at a shape where TP and PP both collapse below its 3-member
+floor simultaneously -- a real, named limitation for POC planning, not a formality.
+
+**Reproducibility:** `MEGA_TP=2 MEGA_PP=8 bash workloads/megatron/run_megatron_tp4pp4dp3.sh 150 <outdir> <port>
+"$(pwd)/var/dump" [100 8]` (last two positional args = sleep-ms/target-rank for the fault arm). Runs:
+`var/runs/deeppp_smoke` (pre-fix failure, preserved), `var/runs/deeppp_smoke3` (post-fix success),
+`var/runs/deeppp_healthy1`, `var/runs/deeppp_fault1`.
