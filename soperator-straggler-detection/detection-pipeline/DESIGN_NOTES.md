@@ -3290,3 +3290,36 @@ finding (6.15.1) made too costly to pursue further without risking most of the r
 to `var/dump`, not a per-run subdir -- `node_aggregator_ref.py` instances watch `var/dump/$node` specifically).
 Clean runs: `var/runs/moe_healthy1`, `var/runs/moe_healthy2`. Hung run (preserved, do not overwrite):
 `var/runs/moe_healthy3`.
+
+**6.9.3 MoE fault-trial attempts: inconclusive, honestly reported as such.** Two fault attempts were made (not
+three, given 6.9.1's hang rate): `moe_fault1` (channel-limit fault via `run_moe_rankfault.sh`, rank 4) and
+`moe_delayfault1` (100ms delay fault via `run_moe_delayfault.sh`, rank 4, matching this project's established
+magnitude). Both completed without hanging (`TORCHRUN_EXIT: 0` on all 6 workers). Neither produced a clear,
+freshly-timestamped `[STRAGGLER-INCIDENT] stat=mean_tiered` attributed to rank 4 within its own run's time window --
+the only `mean_tiered` incidents visible in the engine log at review time were stale, timestamped to an earlier,
+unrelated job (`job_start=2026-11-07T03:58:33Z`, well before either MoE fault attempt ran). This is reported
+honestly as INCONCLUSIVE, not as a confirmed detection miss: by this point in the session the shared VictoriaMetrics
+backend carries many hours of accumulated series from dozens of prior jobs (production validation, closeout,
+robustness-check, and this round's own MoE runs), making precise per-run attribution difficult to confirm cleanly
+without a longer, dedicated, single-purpose re-run. The autocorrelation/group-membership-stability question raised
+in 6.9.2 remains open and is NOT resolved by this inconclusive result either way.
+
+**6.9.4 A real, live finding while investigating 6.9.3: the new rank-identity-collision self-check (added in
+§6.8.3/6.8) fired during `moe_delayfault1`'s own job** (`[RANK-COLLISION-WARNING] host=worker-4 slurm_job_id=91299
+gpu_slot=6/7 claimed simultaneously by 5-6 different member identifiers`). Investigated: of the 5 flagged member
+PIDs for `gpu_slot=6`, only 1 had a corresponding live Inspector dump file from this job's own actual run window
+(`var/dump/worker-4/worker-4-pid2146312.log`, timestamped within the job's active window); the other 4 had no
+corresponding live dump file at all. The collision-check's own logic (scoping by `(hostname, slurm_job_id, slot)`
+plus `_is_fresh_row`) is sound and already defends against the single-job staleness pattern its own docstring
+describes. This strongly suggests the warning is a live, real-world manifestation of the ALREADY-DOCUMENTED,
+already out-of-scope aggregator job-ID mislabeling bug (§6.8.6.1: `node_aggregator_ref.py`'s job-ID tagging
+mislabels stale data under concurrent aggregator instances) -- not a new bug in the collision-check itself, and not
+a MoE-specific identity issue. Confirmed live: two independent `alert_engine.py`/aggregator process families are
+running concurrently against the same VictoriaMetrics backend from two different repo checkouts on this host,
+exactly the "concurrent aggregator instances" precondition §6.8.6.1 names. Operator-facing implication, relevant to
+the Step 8 log-readability audit: this warning's own text ("real identity collision, investigate immediately") does
+not currently hint that stale job-ID attribution from a concurrent/unrelated aggregator instance is a possible,
+apparently-common cause -- an operator seeing this in a real incident would have no way to distinguish it from a
+genuine collision without the kind of manual PID/dump-file cross-check done here. Not fixed in this pass (the root
+cause is the already out-of-scope aggregator bug); flagged for whoever eventually fixes §6.8.6.1, and for anyone
+improving this warning's own text to name this known confound explicitly.
