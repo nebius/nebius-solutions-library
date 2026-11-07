@@ -93,6 +93,15 @@ export PIN_MODE
 export PIN_LOG_DIR="${PIN_LOG_DIR:-$OUTDIR/pinlogs}"
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/../../pinning" && pwd)/pin_env.sh"
 pin_prepare            # sets PIN_WRAP (empty when pinning is off/unavailable); also starts the background verifier
+
+# Env-robustness closeout -- confirms the real, currently active NCCL/
+# RDMA networking config survives MULTIPLE concurrent communicators
+# (what every real TP>1-or-PP>1 job, including this one, already
+# creates) before trusting it with the real job. Same "never abort,
+# degrade loudly" contract as pin_prepare above. NET_SELFCHECK=0 skips it.
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")/../../self-checks" && pwd)/net_selfcheck.sh"
+net_selfcheck_run "$((PORT + 7))"
+
 # NCCL_VERSION_PROBE=1: each rank prints ncclGetVersion() of the NCCL actually loaded (runtime proof).
 torchrun --nnodes="$NUM_NODES" --nproc_per_node="$GPUS_PER_NODE" --node_rank=$RANK \
   --rdzv_id=megatron_run --rdzv_backend=c10d --rdzv_endpoint=$RDZV_HOST:$PORT \

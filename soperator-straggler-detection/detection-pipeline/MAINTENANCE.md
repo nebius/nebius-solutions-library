@@ -1169,7 +1169,7 @@ carefully rather than copying a working `cluster.env` from another cluster —
 every item above is a live probe specifically because it's been observed to
 vary.
 
-## CPU pinning operations (NEW, UNVALIDATED beyond 16 GPUs)
+## CPU pinning operations (validated at 16 AND 48 GPUs on Slurm, 2026-11)
 
 - **What runs where:** `workloads/megatron/train_node_megatron.sh` sources `pinning/pin_env.sh` (default `PIN_MODE=auto`
   with Inspector on). It resolves the mode from the NCCL really in use, builds `libthread_pin_new.so` on first use,
@@ -1186,6 +1186,24 @@ vary.
   `DCGM_FALLBACK_CASCADE_RESAMPLE_INTERVAL_S` (5). Setting the first to 1 and the second to 0 restores the old
   single-snapshot behavior (which false-pages on pipeline-parallel jobs). See docs/DETAILED_REFERENCE.md 7.3.
 - **Known operational risk:** aggregator RSS grows early in a job and across jobs (107-minute soak: about 85 -> 106-109 MB, front-loaded and flattening; likely per-bucket lists filling to their caps plus per-communicator state never evicted; not confirmed by a heap profile). Restart the aggregators between very long multi-job campaigns; see docs/DETAILED_REFERENCE.md 7.0.
+- **48-GPU overhead result, final closeout (2026-11):** genuinely interleaved re-measurement (`pinning/ab/interleaved_closeout.sh`,
+  `pinning/ab/interleaved_baseline.sh`) supersedes the earlier two-block result. Pinned vs. unpinned (Inspector on
+  both arms), healthy: pinning saves **8.02%** (77.84ms vs. 84.09ms, Welch t=-26.58, n=420/420; per-pair +9.34%/
+  +4.53%/+10.30%, all same direction). Under 100ms/rank-8 fault: pinning saves **0.59%** (t=-12.49, n=420/420) --
+  small, fault dominates iteration time. No-Inspector baseline vs. Inspector-on+pinned: **-0.58%** (pinned
+  marginally faster, t=-2.32, p~0.02, n=420/420) -- full-pinned Inspector costs approximately zero at this scale.
+  See DESIGN_NOTES.md 6.7.3. Not sampled this round: per-core utilization (`cpu_sampler.py` not invoked during
+  these 18 runs).
+- **Stale-supervisor trap (found live, 2026-11):** `run.sh`/`self_test.sh` detect an already-running
+  `run_alert_engine_supervised.sh` by process name only and reuse its log, with no check that it's running the
+  current checkout's code. If validating a code change, check the running process's actual script path (and
+  `sha256sum` it) before trusting a "already running -- leaving it alone" message; launching a second
+  `alert_engine.py` instance pointed at the same `VM_URL` with its own log path is safe (stateless VM consumer,
+  no lock file) and was this task's workaround.
+- **`OUTDIR`/`DUMPDIR` must be under the package root, `/root`, or `/tmp`** -- anything else is not bind-mounted
+  into the training container and the job silently near-no-ops (`TORCHRUN_EXIT: 0` almost instantly, empty train
+  log) instead of erroring. A non-root user also cannot write to `/root` at all, despite the quickstart's own
+  `/root/run1` example. Use `var/runs/<name>` + `var/dump` instead.
 - **Mean-check gate (`MEAN_CHECK_GATED_ROLE_N`, default `4`):** the main-path `mean` check is observed but not emitted for 4-member communicators (it produced about 64% of healthy-run alerts on TP4 shapes and never named the faulted rank). Logged once per member as `[MEAN-GATED]`. Set to an empty string to restore the old behaviour, or list other `role_n` values (comma-separated). Takes effect when `alert_engine.py` restarts. See docs/DETAILED_REFERENCE.md 7.0.
 
 ---
@@ -1240,8 +1258,14 @@ The Inspector-based timing detection (CV/mean) runs on K8s too; the tiered check
 
 ### Tiered detection (`_check_mean_tiered`): Slurm-verified state, thresholds, what to re-check
 
-Status: verified on Slurm only (2 nodes / 16 GPUs, Megatron TP4/PP2/DP2, 3 healthy + 3 fault trials on the final code);
-Kubernetes pending re-verification. Full history and evidence: DESIGN_NOTES.md 6.5.
+Status: verified on Slurm at 2 nodes/16 GPUs (TP4/PP2/DP2) AND at full production scale, 6 nodes/48 GPUs (TP4/PP4/DP3,
+3 healthy + 3 compute-fault + 1 storage-fault trial, 2026-11); Kubernetes pending re-verification. At 48 GPUs the
+communicator structure is genuinely richer (real DP groups are 3-member/3-node, not 2; a new 48-member world-sync
+group exists but falls below the 512B floor; a 2-member embedding-tie group exists but is excluded by Guard 2) --
+TP/PP/DP groups above the floor are all correctly evaluated. New finding: for a storage fault, `severity_ratio` is
+NOT a reliable cross-fault-type ranking signal (two non-faulted ranks fired 100-400x higher than the true rank for
+the whole job) -- the true rank is still correctly present in the alert stream, just not the highest-severity one.
+Full history and evidence: DESIGN_NOTES.md 6.5 (2-node) and 6.6 (6-node).
 
 Bugs fixed (all in `alerting/alert_engine.py`; `classifier.py` and `_check_mean` unchanged):
 1. NameError: `member` undefined at the `_emit` call (use `smember`).

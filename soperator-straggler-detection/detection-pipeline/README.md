@@ -6,8 +6,10 @@ VictoriaMetrics; `alert_engine.py` compares ranks against their peers and prints
 naming the host, GPU and process. Pure-Python pipeline, no third-party packages.
 
 **Platform**: This pipeline runs on **two platforms** — Slurm/soperator (original) and **plain Kubernetes** (K8s, added
-2026-11). The detection code is shared; only the launcher and topology-discovery layer differ. Both platforms verified
-on 2-node 16-GPU H200 (see Known limitations for shapes not yet tested on K8s).
+2026-11). The detection code is shared; only the launcher and topology-discovery layer differ. K8s verified on 2-node
+16-GPU H200. **Slurm now verified at full production scale: 6 nodes / 48 GPUs H200** (2026-11, commit `691c296d` +
+this validation), in addition to the earlier 2-node/16-GPU shape (see Known limitations for exact scope and what
+remains 2-node-only).
 
 ---
 
@@ -18,11 +20,11 @@ on 2-node 16-GPU H200 (see Known limitations for shapes not yet tested on K8s).
 > - **Megatron DP (TP=1/PP=1)**: existing `_check_mean` detects straggler signal (8-byte post-backward AllReduces);
 >   tiered check correctly silent (small bucket below 512-byte floor). 3/3 healthy trials clean. ✓
 > - **Megatron TP/PP training (TP=2/PP=2)**: TRAINING WORKS (TORCHRUN_EXIT: 0, 6/6 trials). ✓
->   HPC-X segfault resolved with `NCCL_NET_PLUGIN=/nonexistent` + PyTorch 2.6 `device_id` fix. See DESIGN_NOTES §6.6.1.
+>   HPC-X segfault resolved with `NCCL_NET_PLUGIN=/nonexistent` + PyTorch 2.6 `device_id` fix. See DESIGN_NOTES §6.9.1.
 > - **Megatron TP/PP straggler detection**: NOT DETECTABLE at 2-node scale (structural limit).
 >   All gradient sync communicators are 2-member (role_n=2). z-score detection yields z≈0.7 invariantly
->   (mathematical property of 2-sample stdev); tiered check Guard 2 also fails. See DESIGN_NOTES §6.8.
->   Detection becomes possible at 4+ nodes where role_n ≥ 4. See §6.8.4 for the upgrade path.
+>   (mathematical property of 2-sample stdev); tiered check Guard 2 also fails. See DESIGN_NOTES §6.11.
+>   Detection becomes possible at 4+ nodes where role_n ≥ 4. See §6.11.4 for the upgrade path.
 > - **Node counts > 2**: NOT TESTED. Tier structure at 4+ nodes is an unknown.
 
 **Prerequisites** (cluster-agnostic; substitute your cluster's values where shown):
@@ -72,7 +74,7 @@ kubectl scale nodeset worker -n soperator --replicas=0   # confirm no active Slu
    MEGA_TP=2 MEGA_PP=2 MEGA_LAYERS=8 MEGA_HIDDEN=512 MEGA_HEADS=8 MEGA_SEQ=512 MEGA_MBS=1 MEGA_GBS=4 \
      k8s/run_megatron_k8s.sh 500 29500 dump 0 ""
    # NOTE: straggler detection does NOT fire on 2-node clusters (structural limit: role_n=2 comms).
-   # Requires 4+ nodes for detection to work. See DESIGN_NOTES §6.8 for the full analysis.
+   # Requires 4+ nodes for detection to work. See DESIGN_NOTES §6.11 for the full analysis.
    ```
 
 **K8s-specific notes** (confirmed on-cluster, 2026-11):
@@ -100,7 +102,7 @@ kubectl scale nodeset worker -n soperator --replicas=0   # confirm no active Slu
 | | Tested with |
 |---|---|
 | Cluster | Soperator / Slurm with pyxis+enroot (`srun --container-image`), passwordless `ssh` login node -> workers, shared `/root` (or any path every node can read) |
-| GPUs | 8x NVIDIA H200 per node, driver `580.159.04`. 2 nodes (16 GPUs) tested in the latest audit |
+| GPUs | 8x NVIDIA H200 per node, driver `580.159.04`. 2 nodes (16 GPUs) and **6 nodes (48 GPUs, full production scale)** tested |
 | CUDA toolkit | 13.0 (`nvcc` 13.0.88) on the node that builds the plugin |
 | NCCL | Inspector plugin tree: 2.28.9 (`environment.sh` obtains it). Runtime NCCL: host 2.30.1 works (dump-thread pinning only); **>= 2.32.3 for full pinning** (build step below) |
 | Container image | `nvcr.io#nvidia/pytorch:25.01-py3` |
@@ -164,18 +166,47 @@ Run everything from the login node. Allow about 30 minutes plus the NCCL build (
 
 ## Known limitations
 
-- **Scale:** the latest audit validated 16 GPUs (2 nodes) on Slurm and 16 GPUs (2 nodes) on K8s. 48 GPUs / 6 nodes is the next step.
-- **CPU pinning is new code**, validated on both platforms at 16 GPUs. Overhead (Slurm): full pinning +0.64%,
-  dump-only +6.4%, unpinned +11.5%. Overhead (K8s, nanoGPT shape): `mfu=76.77%` full, `mfu=75.32%` dump.
+- **Scale:** validated at 16 GPUs (2 nodes) on both Slurm and K8s, and now at **full production scale on Slurm: 48
+  GPUs / 6 nodes**, Megatron TP4/PP4/DP3, 8B-class shape (2026-11, see DESIGN_NOTES.md 6.6). K8s remains 2-node-only.
+- **Communicator/tier structure at 6 nodes is genuinely richer than the 2-node shape**, not just "more of the same":
+  real TP groups (n_ranks=4, 1 node), PP Send/Recv groups (n_ranks=4, spanning 2 nodes), DP ReduceScatter/AllGather
+  groups (n_ranks=**3**, spanning **3** nodes — smaller and more node-spread than the 2-node case's DP=2), a 2-member
+  tied-embedding AllReduce group, and a previously-unseen job-wide 48-member (6-node) group used for tiny (4-8 B)
+  sync collectives. The tiered check's own 512 B floor (6.5.4) already excludes that 48-member group from evaluation
+  (its messages are far below the floor); the 2-member embedding group is excluded too, by Guard 2 (needs >=2
+  reference members after removing a candidate straggler) — a real, newly-confirmed coverage gap: a fault that only
+  affects embedding-tie sync would not be caught by this check at this shape. TP/PP/DP groups above the floor are
+  all correctly evaluated (confirmed live, see 6.6.2).
+- **CPU pinning**, validated on both platforms at 16 GPUs and now at 48 GPUs (Slurm), with a genuinely interleaved
+  re-measurement superseding the original two-block result. **Pinned vs. unpinned (Inspector on in both arms),
+  healthy: pinning saves 8.02% (77.84ms vs. 84.09ms, Welch t=-26.58, n=420/420, 3 truly-interleaved pairs, each
+  individually significant: +9.34%/+4.53%/+10.30% — confirms a real effect, not a block-order artifact). Under a
+  100ms/rank-8 fault: pinning still saves 0.59% (t=-12.49, n=420/420) — small because the fault's own ~390ms/iter
+  penalty dominates. Separately: Inspector-with-full-pinning vs. no Inspector at all (the total real-world cost
+  question): -0.58% (pinned is marginally faster, t=-2.32, p~0.02, n=420/420) — not practically distinguishable
+  from zero overhead at this scale.** Full dedication verified via real `/proc` affinity checks on 48/48 ranks
+  across all 6 nodes (`[PIN-VERIFY] verdict=FULLY_DEDICATED ranks=8/8` on every node) and via `INSPECTOR=off`
+  genuinely disabling the plugin (`[PIN-PREFLIGHT] mode=off`, no profiler-plugin load). See DESIGN_NOTES.md 6.7.3
+  for the full table. Not sampled at this scale: per-core CPU utilization (the 1-core/role sufficiency confirmation
+  still rests on the 16-GPU-scale sampling plus 48-GPU `/proc` affinity checks, not a fresh utilization sample).
   Untested: single-NUMA, 4-GPU nodes, SMT off, ARM, small CPU masks.
-- **Tiered mean check (`_check_mean_tiered`), Slurm status:** verified on one shape only (2 nodes / 16 GPUs, Megatron
-  TP4/PP2/DP2, 100 ms fault on rank 8, 3 healthy + 3 fault trials on the final code). Healthy: 0 tiered incidents and 0
-  `CHECK-FAILED`. Fault: true rank named in 3/3 at 167, 167 and 169 s (wait-induced path: 65, 55, 54 s; one earlier trial
-  took 223 s), each with a complete `[ALERT]` that is `UNCONFIRMED` / `LOG-ONLY` (does not page). Live testing found and
-  fixed three bugs (NameError, persistence state shared across groups, classifier KeyError) and added a minimum message
-  size of 512 B (`TIERED_MIN_BUCKET_BYTES`) because healthy runs false-fired on 4 B and 99 B collectives. That floor rests on
-  one shape and 6 trials, is not a general constant, and leaves collectives below 512 B uncovered. Untested: other node
-  counts, other communicator layouts, other fault sizes or ranks. Details: DESIGN_NOTES.md 6.5.
+- **Tiered mean check (`_check_mean_tiered`)**, Slurm status: verified on 2 nodes/16 GPUs (TP4/PP2/DP2, as before)
+  AND now on **6 nodes/48 GPUs** (TP4/PP4/DP3, 100 ms fault on rank 8, 3 healthy + 3 fault + 1 storage-fault trial,
+  all on the final bug-fixed code, full CPU pinning active). Healthy (3/3): 0 tiered incidents, 0 `CHECK-FAILED`.
+  Compute fault (3/3): true rank named every time, with a complete `[ALERT]`, via either the TP AllReduce group
+  (role_rank matching the rank's own TP slot) or the PP Send group (role_rank matching its PP stage) — detection
+  latency 43-60s persistence at this shape (faster in wall-clock than the 2-node case's 167-169s, though job
+  shapes differ enough that this isn't a clean apples-to-apples speed comparison). Each fault trial also produced
+  1-2 secondary alerts on a *different*, non-injected rank (downstream PP-stage cascade) — consistent with the
+  already-documented "mirror-position" pattern, not a new problem. Storage fault (1 trial, `STORAGE_FAULT_FILE_MB`):
+  the true rank (8) WAS named correctly, but a genuinely new nuance showed up — two *other*, non-faulted ranks fired
+  with much higher `severity_ratio` (up to ~995 vs. rank 8's own ~2.4-2.6) and kept firing for the entire 40+ minute
+  job, not just a brief window. A naive "highest severity wins" triage heuristic would point at the wrong rank for
+  this fault type; `severity_ratio` magnitude is not by itself a reliable ranking signal across fault types. The
+  512 B floor (`TIERED_MIN_BUCKET_BYTES`) was re-checked against this shape's real message sizes: the gap between
+  the largest sub-floor collective (96 B) and the smallest real gradient-bearing collective (~2.29 MB) is far wider
+  here than the shape the floor was derived from, so 512 B holds with a large safety margin — no new sweep needed.
+  Untested: other fault sizes/ranks, other node counts between 2 and 6. Details: DESIGN_NOTES.md 6.6.
 - **Noise path:** the main-path `mean` check is gated off for 4-member communicators (`MEAN_CHECK_GATED_ROLE_N=4`; set it to `""` to restore). It produced about 64% of healthy-run alerts on the TP4/PP2/DP2 shape and never named the faulted rank. After the gate, 2 healthy runs went from 18 and 24 total alerts to 9 and 6 (mean-check alerts 12 and 16 down to 0, no PAGE), and 3 fault runs still named the true rank in 51, 50 and 56 s. The criterion comes from one shape, so a 4-member communicator in another job is gated too. Remaining LOG-ONLY noise is from other paths.
 - **Memory growth:** aggregators about +5 to +7 MB/hour and the alert engine about +4 MB/hour over a 107-minute soak;
   cause not found. Restart them between very long campaigns.
@@ -185,16 +216,41 @@ Run everything from the login node. Allow about 30 minutes plus the NCCL build (
 - **DCGM clock fallback** now needs a sustained signal before it pages, so a real sustained clock fault pages
   about 10-60 s later than before.
 - Only `PAGE` alerts page a human; `LOG-ONLY` alerts are recorded for the dashboard and logs.
+- **`run.sh`/`self_test.sh` can silently validate against a stale `alert_engine.py`**: both detect an
+  already-running `run_alert_engine_supervised.sh` purely by process name and reuse its log path, with no check
+  that it's running *this* checkout's code. Found live (2026-11): a supervisor from an older, unrelated checkout had
+  been running for weeks; `self_test.sh`'s PASS was against that stale code, not the current bug-fixed
+  `_check_mean_tiered`. If you need to confirm behavior of code you just changed, check the running process's actual
+  script path and `sha256sum` it against your checkout before trusting `run.sh`'s "already running -- leaving it
+  alone" message, or launch a second `alert_engine.py` instance pointed at the same `VM_URL` with its own
+  `--summary-log`/log path (safe: it's a stateless, read-only VM consumer, no lock file).
+- **The quickstart's example `OUTDIR`/`DUMPDIR` (`/root/run1`, `/tmp/insp_dump_run1`) assume root access.** A
+  non-root user cannot write to `/root` at all (confirmed live: `Permission denied`), and a path outside this
+  package's root or `/root`/`/tmp` is **not bind-mounted into the training container**, so the job reports
+  `TORCHRUN_EXIT: 0` almost instantly with an empty `train_<host>.log` -- a silent near-no-op, not an error. Use a
+  path under the package root (e.g. `var/runs/<name>`, `var/dump`) or `/tmp`, which are mounted; `/tmp` is node-local
+  (not shared with the login node) and `var/dump` is this package's own NFS mount, so cross-reference with `pwd` on
+  the right host before assuming a dump/log file should exist somewhere.
+- **RDMA/NCCL crash risk (2026-11 review):** this cluster uses and actively loads the same HPC-X SHARP/IB plugin
+  implicated in a Kubernetes-side `ncclIbDeregMr` crash, and routinely creates the concurrent-communicator precondition
+  that triggers it (every TP>1/PP>1 job). A direct, realistically-shaped stress test against the live plugin passed
+  clean on real hardware; this cluster is not currently exhibiting that crash, on the evidence gathered so far. A new,
+  general-purpose startup self-check (`self-checks/net_selfcheck.sh`) now verifies this on every real job and falls
+  back to a safer config if it ever isn't. Also added: a rank-identity-collision self-check and an explicit DCGM
+  diagnostic-path startup log. Live-validated at this project's largest shape yet (48 GPUs/6 nodes): 1 healthy + 1
+  fault trial (100 ms, rank 20) -- the fault was correctly named, `confidence=PROBABLE severity=LOG-ONLY`. Full
+  writeup, including a real, pre-existing cross-job-ID mislabeling bug this review's own new check surfaced (not
+  introduced by it, not fixed -- out of scope): DESIGN_NOTES.md §6.8.
 - **K8s — node counts > 2**: validated on 2 nodes (16 GPUs) only. Tier structure at 4+ nodes is completely
   untested. Do not claim production readiness for K8s without validating at the target node count.
 - **K8s — Megatron TP/PP training**: resolved. `NCCL_NET_PLUGIN=/nonexistent` + PyTorch 2.6 `device_id` fix.
-  TORCHRUN_EXIT: 0 on 6 trials. See DESIGN_NOTES §6.6.1.
+  TORCHRUN_EXIT: 0 on 6 trials. See DESIGN_NOTES §6.9.1.
 - **K8s — Megatron TP/PP straggler detection**: not detectable at 2-node scale. All gradient sync communicators
   are 2-member (role_n=2); z-score detection yields z≈0.7 invariantly (mathematical property of 2-sample stdev).
-  Detection requires 4+ nodes. Zero false positives on 3/3 healthy trials. See DESIGN_NOTES §6.8.
+  Detection requires 4+ nodes. Zero false positives on 3/3 healthy trials. See DESIGN_NOTES §6.11.
 - **K8s — tiered check on Megatron DP**: sleep-before-backward injection does not create a detectable fast-
   straggler signal on large Megatron gradient AllReduces (DDP async overlap). The signal appears on small
-  post-backward collectives (< 512 B, below the floor); `_check_mean` detects it. See DESIGN_NOTES §6.6.2.
+  post-backward collectives (< 512 B, below the floor); `_check_mean` detects it. See DESIGN_NOTES §6.9.2.
 - **K8s — DCGM**: SSH-based cause classification unavailable in pods. All K8s alerts are UNCONFIRMED.
 
 ## Further reading

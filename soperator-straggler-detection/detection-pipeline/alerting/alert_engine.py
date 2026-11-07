@@ -1736,6 +1736,94 @@ class AlertEngine:
         # creation itself is not free at a 3s cadence).
         self._pool = concurrent.futures.ThreadPoolExecutor(max_workers=64)
         self._refresh_hostnames(force=True)
+        # Slurm/K8s env-robustness closeout -- additive startup self-checks,
+        # do not gate or modify any detection check below.
+        self._log_dcgm_path_startup()
+        self._check_rank_identity_collisions()
+
+    def _log_dcgm_path_startup(self):
+        """Explicit, startup-time confirmation of which hardware
+        diagnostic path is actually active, instead of silently assuming
+        dcgm_host_map's default-True init is correct. On Kubernetes this
+        SSH-based path is unreachable (a pod has no route to the bare-
+        metal hostname) and every alert is labeled UNCONFIRMED; on Slurm
+        it has always been assumed reachable from this project's history
+        -- this makes that assumption a verified, logged fact on every
+        real run instead of an unverified assumption. Probes one host
+        (cheap, `dcgmi discovery -l` needs no field/group setup) rather
+        than every host, since this is confirming the PATH is reachable
+        at all, not per-host health (query_dcgm_all_gpus already does
+        that live, continuously, for every host)."""
+        if not self.hostnames:
+            print("[DCGM-PATH] No hosts discovered yet at startup -- diagnostic path will be "
+                  "confirmed on the first real poll cycle instead.", flush=True)
+            return
+        probe_host = self.hostnames[0]
+        try:
+            alive, detail = p18k.check_nv_hostengine_alive(probe_host)
+        except Exception as e:
+            alive, detail = False, f"probe raised {type(e).__name__}: {e}"
+        if alive:
+            print(f"[DCGM-PATH] SSH-based DCGM access CONFIRMED active (probed {probe_host} via "
+                  f"dcgmi discovery -l) -- real hardware double-check available for CONFIRMED-vs-"
+                  f"UNCONFIRMED alert labeling.", flush=True)
+        else:
+            print(f"[DCGM-PATH] SSH-based DCGM access NOT reachable from this process (probed "
+                  f"{probe_host}: {detail}) -- alerts will be labeled UNCONFIRMED, the same degraded "
+                  f"mode as the Kubernetes path.", flush=True)
+
+    def _check_rank_identity_collisions(self):
+        """Startup+periodic self-check: no two ranks should ever claim the
+        same physical GPU slot on the same host at the same time. The
+        Kubernetes PID-collision bug this guards against combined pid
+        with hostname to fix cross-POD collisions (every member="{pid}"
+        label is always paired with a hostname label -- see
+        node_aggregator_ref.base_labels/gpu_slot_label); this check
+        catches the SAME-HOST case that fix doesn't address on its own,
+        e.g. OS PID reuse shortly after a rank crash/restart briefly
+        producing two live (hostname, member) identities that both
+        resolve to the same real physical GPU slot. Uses the already-
+        exported agg_member_gpu_slot_index metric -- no new
+        instrumentation needed. Additive only; never gates or modifies
+        any detection check. Runs once at startup (here) and again every
+        poll_once() cycle for actual runtime coverage, not just a one-
+        time boot-time check.
+
+        MUST scope by slurm_job_id, not hostname alone -- confirmed live
+        (this session): without it, this fired on every GPU slot on every
+        host, 100% false positive, because a PREVIOUS job's last real push
+        to this same gauge was still within FRESH_THRESH_S when a NEW job
+        started on the same host -- exactly the already-documented trap
+        _is_fresh_row's own docstring describes (a stale PREVIOUS job's
+        identity read back as live). Comparing members ACROSS two
+        different slurm_job_id values is comparing two jobs that were
+        never concurrent, never a real collision. Grouping by (hostname,
+        slurm_job_id, gpu_slot) instead -- same job-scoping discipline
+        _cross_comm_peer_median/_comm_slurm_job_id already use elsewhere
+        in this file -- needs no second query, just reading a label
+        that's already on every row."""
+        for hostname in self.hostnames:
+            try:
+                rows = _query_instant_real_ts(
+                    self.vm_url, f'agg_member_gpu_slot_index{{hostname="{hostname}"}}')
+            except Exception:
+                continue
+            slot_to_members = defaultdict(set)
+            for r in rows:
+                if not _is_fresh_row(r):
+                    continue
+                m = r["metric"]
+                member = m.get("member")
+                job_id = m.get("slurm_job_id")
+                slot = r["value"][1] if r.get("value") else None
+                if member is not None and slot is not None:
+                    slot_to_members[(job_id, slot)].add(member)
+            for (job_id, slot), members in slot_to_members.items():
+                if len(members) > 1:
+                    print(f"[RANK-COLLISION-WARNING] host={hostname} slurm_job_id={job_id} "
+                          f"gpu_slot={slot} claimed simultaneously by {len(members)} different "
+                          f"member identifiers: {sorted(members)} -- real identity collision, "
+                          f"investigate immediately.", flush=True)
 
     def _refresh_hostnames(self, force=False):
         if self._static_hostnames:
@@ -1857,6 +1945,7 @@ class AlertEngine:
         self._run_check("dump_disk_check", self._maybe_launch_dump_disk_check)
         self._run_check("path_c_check", self._maybe_launch_path_c_check)
         self._run_check("grafana_check", self._maybe_launch_grafana_check)
+        self._run_check("rank_identity_collision_check", self._check_rank_identity_collisions)
         futures = [self._pool.submit(self._poll_host, h) for h in self.hostnames]
         for f in futures:
             f.result()
