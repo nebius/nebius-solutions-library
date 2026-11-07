@@ -31,10 +31,20 @@ cluster_topology_available_nodes
 _SCRIPT_DIR_FOR_MOUNT_FIX="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 _PKG_ROOT_FOR_MOUNT_FIX="$(cd "$_SCRIPT_DIR_FOR_MOUNT_FIX/../.." && pwd)"
 _NCCL_SRC_DIR_FOR_MOUNT_FIX="$(cd "$(dirname "$(dirname "$NCCL_LIB_PATH")")" && pwd)"
-for _p in "$_PKG_ROOT_FOR_MOUNT_FIX" "$_NCCL_SRC_DIR_FOR_MOUNT_FIX"; do
+# var/dump and var/runs may be symlinks to a separate (larger) shared
+# filesystem outside PKG_ROOT (see DESIGN_NOTES.md storage-migration
+# section) -- resolve their real targets and mount those too, or any
+# write through them from inside the container silently fails with
+# "No such file or directory" even though the symlink itself is visible
+# (confirmed live: this broke OUTDIR/DUMPDIR_BASE writes after the
+# migration, until this fix).
+_OUTDIR_REAL_FOR_MOUNT_FIX="$(readlink -f "$OUTDIR" 2>/dev/null || echo "$OUTDIR")"
+_DUMPDIR_REAL_FOR_MOUNT_FIX="$(readlink -f "$DUMPDIR_BASE" 2>/dev/null || echo "$DUMPDIR_BASE")"
+for _p in "$_PKG_ROOT_FOR_MOUNT_FIX" "$_NCCL_SRC_DIR_FOR_MOUNT_FIX" "$_OUTDIR_REAL_FOR_MOUNT_FIX" "$_DUMPDIR_REAL_FOR_MOUNT_FIX"; do
   case "$_p" in
     /root|/root/*) ;;
-    *) MOUNTS="$MOUNTS,$_p:$_p" ;;
+    "$_PKG_ROOT_FOR_MOUNT_FIX"/*) ;;
+    *) case ",$MOUNTS," in *",$_p:$_p,"*) ;; *) MOUNTS="$MOUNTS,$_p:$_p" ;; esac ;;
   esac
 done
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

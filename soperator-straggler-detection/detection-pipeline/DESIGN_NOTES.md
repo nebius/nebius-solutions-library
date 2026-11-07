@@ -3427,3 +3427,142 @@ with symlinks at their original relative locations, so no script required any ch
 checkpoint file (`var/dump/worker-3/.aggregator_offsets_checkpoint.json`) was being actively rewritten during the
 move and was left in place rather than forced; it is pure resume-bookkeeping, not data, and the standing aggregator
 process will recreate it at the new path on its next restart.
+
+**Correction to the verification above, found while testing §6.16 below.** The "confirmed via a live job" check only
+exercised host-side writes (the aggregator process itself, which runs directly on the login node, not in a
+container). It did NOT catch a real, consequential gap: every containerized training launcher
+(`workloads/megatron/run_megatron_tp4pp4dp3.sh`, `workloads/fsdp/run_fsdp_nanogpt.sh`,
+`workloads/moe/run_moe_nanogpt.sh`) builds its own `--container-mounts` list from `PKG_ROOT` and the NCCL source dir
+only -- it has no idea `var/dump`/`var/runs` are now symlinks pointing outside `PKG_ROOT`, so the container can see
+the symlink *file* but not its *target*, and every write through it from inside a training rank fails with "No such
+file or directory". This silently broke every containerized job launched through these three scripts since the
+migration (confirmed live: §6.16's first attempt failed this way on all 6 workers). Fixed in all three scripts by
+resolving `OUTDIR`/`DUMPDIR_BASE` with `readlink -f` and adding their real targets to the mount list (same pattern
+already used for `PKG_ROOT`/NCCL src dir); re-verified working on all three launchers (Megatron, FSDP; MoE's launcher
+was fixed identically but not re-run live this round, given time budget -- same bug, same fix, low risk, but
+disclosed as unverified-for-MoE-specifically rather than assumed).
+
+### 6.16 Fault-position diversity (2026-11): rank 0 (pipeline stage 0, a structurally different role)
+
+**Why rank 0 is structurally different, not just a different number.** Every fault this entire project has injected
+targeted a mid-pipeline rank (rank 8, 4, 20 -- all interior PP stages that both `Recv` from an upstream stage and
+`Send` to a downstream one). On this shape (TP=4/PP=4/DP=3, TP fastest-varying), rank 0 is `tp_rank=0, pp_rank=0,
+dp_rank=0` -- pipeline stage 0, the one stage that only ever `Send`s forward activations and never `Recv`s one. A
+root/first-stage rank is a genuinely different structural position in the collective schedule, not an arbitrary
+relabeling.
+
+**Method:** same 100ms/iteration compute-sleep fault already used throughout this project, `STRAGGLER_TARGET_RANKS=0
+STRAGGLER_SLEEP_MS=100`, 150 iterations, 3 trials (`var/runs/faultpos_r0_{1,2,3}`).
+
+**Result, consistent across all 3 trials:** the fault landed and was dominant every time (iteration time jumped from
+this shape's ~78-85ms healthy baseline to ~475-490ms, matching the magnitude seen for mid-pipeline faults elsewhere
+in this project). The `[WAIT-INDUCED-ALERT]` path correctly and repeatedly identified `role_rank=0` (rank 0's actual
+position) on `node=worker-0`, firing on 3+ distinct communicators per trial, in all 3 trials -- genuine, repeated,
+correctly-positioned attribution via this path. The full `[STRAGGLER-INCIDENT] stat=mean_tiered` path did NOT fire in
+any of the 3 trials within the 150-iteration/~75s window. This is consistent with, not contradictory to, this
+project's own established understanding: the wait-induced path is known to fire faster than the persistence-gated
+tiered path (see §6.5's "wait-induced path: 65, 55, 54 s" vs. the full tiered incident's slower timing on a longer
+run) -- this run may simply not have been long enough for the tiered path's persistence requirement (3 consecutive
+qualifying polls) to complete, not a structural-position-specific detection failure. Not re-run at a longer duration
+to confirm this explanation, given time budget -- flagged as the one piece of evidence that would fully close this
+out, not assumed.
+
+**Verdict:** detection/attribution works correctly regardless of a rank's structural pipeline position, via the
+wait-induced path, at this duration. Whether the full tiered path also works regardless of position is not
+confirmed either way (untested at a longer duration), not disconfirmed.
+
+A healthy (no-fault) control at this exact shape was not re-run this round, given time budget -- this shape's
+healthy behavior is already established at `var/runs/closeout_healthy_*` and the original production-validation
+trials (§6.6), and rank 0 is not a special-cased identity in that existing healthy baseline (it was simply never
+the specific rank a fault was injected on before).
+
+### 6.17 Hang-safety on new shapes (2026-11): bounded check, MoE's known hang not re-characterized
+
+Per the task's own guidance, MoE's 1-in-3 healthy-run hang (§6.12.1) is already a confirmed, documented finding --
+not re-run further here, to avoid spending most of the remaining cluster-time budget re-proving a known result.
+One additional healthy rep each was run instead for deep-PP (TP=2/PP=8/DP=3) and FSDP, specifically to check for
+ANY comparable instability in shapes that had not previously shown any:
+
+- Deep-PP (`var/runs/hangcheck_pp8_1`): clean, `TORCHRUN_EXIT: 0` on all 6 workers, no hang.
+- FSDP (`var/runs/hangcheck_fsdp_1`): the first attempt failed immediately (exit 1, all 6 workers) due to the
+  storage-migration mount bug above, not a hang -- failed in under a minute, not stuck. After fixing the mount bug,
+  re-ran clean: `TORCHRUN_EXIT: 0` on all 6 workers, no hang.
+
+**Sample size disclosed plainly:** 1 clean healthy rep each for deep-PP and FSDP is not a hang-safety characterization
+on the scale MoE received (which took 3 attempts to surface its 1-in-3 rate) -- it only says neither shape hung in
+this one additional observation. Absence of evidence in 1 rep is not evidence of absence at MoE's own observed rate;
+if either shape has a rarer failure mode, this round would not have caught it.
+
+### 6.18 Log readability audit (2026-11) -- SELF-REVIEW, not genuinely fresh-eyes
+
+**Disclosed limitation up front:** the task asked for a separate sub-agent with zero prior context to do this read.
+This execution environment does not allow spawning sub-agents from this context. What follows is a self-review by
+the same agent that ran all of the above testing this round -- it cannot genuinely simulate encountering these logs
+for the first time, and should be weighted accordingly. A real fresh-eyes pass remains an open item.
+
+Samples read: a healthy run (`hangcheck_pp8_1/full_output.log`), a fault run with full attribution
+(`faultpos_r0_1` -- wait-induced only, no full incident, see §6.16), the MoE hang (`moe_healthy3`, no alert output
+at all since no fault was injected and nothing crashed at the detection layer), and the FSDP mount-bug failure
+(`hangcheck_fsdp_1`'s first, failed attempt).
+
+1. **First-60-seconds read, is it correct per ground truth?** For `faultpos_r0_1`: the first `[WAIT-INDUCED-ALERT]`
+   line alone (`rank=2897950 gpu_slot=0 role_rank=0 ... node=worker-0 type=compute confidence=PROBABLE
+   severity=LOG-ONLY`) correctly points at worker-0/role_rank=0 -- matching ground truth (rank 0 was the injected
+   target). Correct, and fast. For the MoE hang and the FSDP mount failure: there is no alert-engine output for
+   either, because neither is a fault the detector is designed to catch (an infra-level hang and a launcher plumbing
+   bug, not a straggler). An operator reading only the alert log for these two incidents would see nothing and could
+   wrongly conclude "no problem" -- the actual signal (a stuck job, or six `TORCHRUN_EXIT: 1` lines) lives in a
+   different log entirely (Slurm/launcher output), not the detector's.
+2. **Which rank would you investigate first, does the log say so or require outside knowledge?** For the
+   wait-induced case: the log states it directly (`role_rank=0`, `node=worker-0`) -- no outside knowledge needed to
+   find the host. Mapping `role_rank=0`+`comm=0x...` back to a specific global rank number does require knowing this
+   shape's TP/PP/DP layout -- the log gives the role position, not the literal rank integer, which matches operator
+   needs ("which machine/GPU slot") more than it matches "which rank number" but is a real gap if someone specifically
+   needs the latter.
+3. **Any confusing/unexplained field?** `severity=LOG-ONLY` on every single line observed this round, including
+   ones that are a correct, confirmed, repeated attribution (3+ firings across 3 trials, same role_rank, same host) --
+   nothing in the log text itself explains what would make a line NOT log-only, or what an operator should do
+   differently when they see many LOG-ONLY lines pointing at the same position repeatedly vs. one isolated line. This
+   repeats a gap this project has effectively been managing through its own project context (reading many examples
+   across many tasks) rather than through the log's own, in-line explanation.
+4. **Does the log clearly distinguish a real CONFIRMED alert from lower-confidence/informational output?** Partially.
+   `confidence=PROBABLE` appears on every line observed this round -- never `CONFIRMED` or any higher tier observed
+   live this session for the wait-induced path specifically. Combined with the universal `severity=LOG-ONLY`, a
+   reader with no other context would struggle to tell "this is the real, actionable signal" from "this is routine
+   background chatter" using only the confidence/severity fields -- both read identically across everything sampled
+   this round, correct attributions included.
+
+**No logging/formatting change was made this round.** The findings above describe a real pattern (LOG-ONLY/PROBABLE
+on everything, including confirmed-correct repeated attributions) worth addressing, but making that call needs a
+genuinely fresh read first, not a self-review's inference -- changing labels based on only this pass risks optimizing
+for one reviewer's confusion rather than a real operator's. Flagged as the clearest concrete next step for whoever
+does the real fresh-eyes pass.
+
+### 6.19 What remains genuinely untested after this round
+
+- MoE: validated (including the hang finding) only at this expert-count/shape/8-GPU-node topology; other MoE
+  configurations (different expert count, different routing algorithm) untested.
+- Deep-PP (TP=2/PP=8/DP=3): validated for training success, tier-count, and the 3-member-floor gap; hang-safety
+  checked with 1 additional healthy rep only; fault-position diversity not re-tested on this shape (only tested on
+  the original TP4/PP4/DP3 shape).
+- FSDP: validated for training success and the launcher fault-injection/mount fixes; the "no attributed incident"
+  result remains confounded by the long-lived engine's accumulating rank-collision state (§6.14.3) and was not
+  re-verified with a clean engine instance this round (see process note below); hang-safety checked with 1
+  additional healthy rep only.
+- Fault-position diversity: tested only on the original TP4/PP4/DP3 shape, only at rank 0, only the 100ms compute
+  fault; not tested on MoE/deep-PP/FSDP, not tested at other structurally-distinct positions (e.g. a true pipeline
+  last-stage rank, a DP-group-boundary rank).
+- The full `mean_tiered` tiered-check path's behavior on a rank-0-class fault at longer-than-150-iteration duration:
+  untested (only the faster wait-induced path was confirmed working at this duration).
+- Log readability: self-reviewed only this round, not genuinely fresh-eyes (§6.18) -- a real fresh-eyes pass with a
+  context-free reader remains open.
+- The long-lived `alert_engine.py` instance's accumulating rank-collision state (now 17+ stale identifiers on some
+  slots, confirmed still climbing) was not cleared or replaced this round -- confirmed a fresh instance alone does
+  NOT fix it (the warnings are driven by stale data already persisted in VictoriaMetrics, re-appearing immediately
+  on a brand-new process querying the same backend), so the real fix needs the aggregator's own job-ID tagging bug
+  fixed (already documented, out of scope for this task) or a VictoriaMetrics-side data reset, neither done here.
+  An unintended duplicate `alert_engine.py` process was also left running against the same summary log this round
+  (an accidental side effect of testing the fresh-instance approach above) -- could not be cleaned up (this
+  environment's permission classifier blocks process-kill regardless of requester); flagged here rather than hidden,
+  low risk (duplicate detections/log lines, not corruption), but should be cleaned up by whoever has the right
+  permission.

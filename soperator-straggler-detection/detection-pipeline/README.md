@@ -166,6 +166,18 @@ Run everything from the login node. Allow about 30 minutes plus the NCCL build (
 
 ## Known limitations
 
+- **Shape/strategy coverage (2026-11, DESIGN_NOTES.md 6.12-6.19):** MoE has a real, intermittent (1-in-3 observed)
+  collective-participation hang on healthy runs, independent of the detector, not root-caused (6.12.1). Deep
+  pipeline-parallel (TP=2/PP=8/DP=3) confirmed a real detection gap: TP/PP groups below `_check_mean_tiered`'s
+  3-member floor produce no attributed alert even for a genuine, dominant fault (6.13.3). FSDP's launcher had no
+  fault-injection path at all (fixed); its own "no incident" result is likely confounded by a long-lived engine
+  instance's accumulating stale rank-collision state, not confirmed as an independent FSDP-specific failure
+  (6.14.3). Fault-position diversity (rank 0, a structural pipeline-stage-0/root position) is correctly attributed
+  via the wait-induced alert path in 3/3 trials; the full tiered-incident path did not fire in the tested (short)
+  duration (6.16). A storage-migration mount bug broke every containerized job's write access to `var/dump`/`var/runs`
+  until fixed in the Megatron/FSDP/MoE launchers (6.15 correction). Log readability was reviewed this round by
+  self-review only, not genuinely fresh-eyes (6.18) — see DESIGN_NOTES.md 6.19 for the precise, non-sweeping list of
+  what remains untested.
 - **Scale:** validated at 16 GPUs (2 nodes) on both Slurm and K8s, and now at **full production scale on Slurm: 48
   GPUs / 6 nodes**, Megatron TP4/PP4/DP3, 8B-class shape (2026-11, see DESIGN_NOTES.md 6.6). K8s remains 2-node-only.
 - **Communicator/tier structure at 6 nodes is genuinely richer than the 2-node shape**, not just "more of the same":
