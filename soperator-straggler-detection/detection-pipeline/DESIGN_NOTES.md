@@ -2622,23 +2622,35 @@ incident.
 **Scope and hard constraint**: validated on 2 nodes / 16 H200 GPUs only. Behavior at 4+ nodes is completely untested.
 Tier structure at larger node counts is a genuine unknown — do not extrapolate from these results.
 
-#### 6.6.1 Megatron-LM TP/PP on K8s: HPC-X NCCL incompatibility (confirmed root cause)
+#### 6.6.1 Megatron-LM TP/PP on K8s: HPC-X NCCL incompatibility — RESOLVED (2026-11)
 
-Megatron-LM with TP>1 or PP>1 fails with `NCCL Error 2: unhandled system error` and a segfault in
-`/opt/hpcx/nccl_rdma_sharp_plugin/lib/libnccl-net.so(ncclIbDeregMr+0x1f)` during NCCL communicator setup.
+Megatron-LM TP/PP training initially failed with `NCCL Error 2: unhandled system error` and a segfault in
+`ncclIbDeregMr` during NCCL communicator setup. Two independent bugs were found and fixed:
 
-Evidence:
-- TP=4/PP=1, TP=4/PP=2, TP=2/PP=2: all fail identically
-- `NCCL_SHARP_DISABLE=1`, `NCCL_NET_GDR_DISABLE=1`, `NCCL_NET=Socket`: none resolved the segfault
-- Root cause: HPC-X SHARP/IB RDMA plugin (bundled in pytorch:25.01-py3 at `/opt/hpcx/`) segfaults in `ncclIbDeregMr`
-  when multiple NCCL process groups are created concurrently, as Megatron TP+PP+DP requires
-- nanoGPT works because it creates only ONE NCCL process group
-- Megatron TP=1/PP=1 (pure DP, one process group) works
+**Bug 1 — HPC-X segfault (even with NCCL_IB_DISABLE=1):**
+HPC-X SHARP/IB RDMA plugin (auto-loaded via `/etc/ld.so.conf.d/hpcx.conf`) segfaults in `ncclIbDeregMr`
+during multi-communicator teardown even when `NCCL_IB_DISABLE=1`, because the plugin is *loaded* (via ldconfig)
+even if IB is disabled for transport. Fix: set `NCCL_NET_PLUGIN=/nccl_net_disabled_hpcx_workaround.so`
+(a deliberately non-existent path; `dlopen()` fails → NCCL uses built-in TCP network).
+Key insight: `NCCL_NET_PLUGIN=""` does NOT prevent loading — `strlen("")==0` triggers the default plugin
+(`libnccl-net.so` via ldconfig). Only a non-existent path forces dlopen failure.
+Implemented in `k8s/startup_checks.sh` (applied automatically when `NCCL_IB_DISABLE=1` + HPC-X detected).
 
-This is an HPC-X/NCCL plugin compatibility issue in the pytorch:25.01-py3 container on this cluster. It is NOT
-a straggler detection pipeline issue. Workaround: use a container without HPC-X, or use TP=1/PP=1 (pure DP).
+**Bug 2 — PyTorch 2.6 `device_id` requirement:**
+PyTorch 2.6 `init_process_group()` requires explicit `device_id` to associate NCCL communicators with the
+correct CUDA device when multiple process groups exist. Without it: "devices used by this process are currently
+unknown" → `ncclSystemError` on first cross-process-group AllReduce. Megatron-core's `initialize.py` computed
+`device_id = torch.device(f'cuda:{args.local_rank}')` but did not pass it to `init_process_group()`.
+Fixed in `workloads/megatron/Megatron-LM/megatron/training/initialize.py` by adding:
+```python
+if device_id is not None:
+    init_process_group_kwargs['device_id'] = device_id
+```
+Combined fix: permanent `NCCL_IB_DISABLE=1` env var in `k8s/manifests/06-megatron-job.yaml.tmpl` +
+`startup_checks.sh` setting `NCCL_NET_PLUGIN` to non-existent path. Megatron TP=2/PP=2 smoke tests
+pass with TORCHRUN_EXIT: 0 on both pods.
 
-**TP/PP on K8s is untested for straggler detection purposes until this container issue is resolved.**
+**TP/PP training on K8s: VALIDATED.** See §6.8 for straggler detection results on this workload.
 
 #### 6.6.2 Megatron DP (TP=1/PP=1) on K8s: validated shape
 
@@ -2692,14 +2704,15 @@ relies on DDP's synchronous blocking — which appears to be fully async for lar
 | Item | Status |
 |---|---|
 | Node counts > 2 | **NOT VALIDATED** — tier structure at 4+/8+ nodes is unknown |
-| Megatron TP/PP on K8s | **NOT VALIDATED** — HPC-X NCCL incompatibility blocks testing |
-| tiered check on Megatron workload | **NOT VALIDATED** — fault injection does not trigger tiered signal |
+| Megatron TP/PP training on K8s | **VALIDATED** — TORCHRUN_EXIT: 0 on 6 trials (see §6.6.1) |
+| Megatron TP/PP straggler detection | **NOT DETECTABLE at this scale** — structural reason: 2-member comms (see §6.8) |
+| tiered check on Megatron gradient AllReduce | **NOT TRIGGERED** — mm < 10× on 4-member comms; Guard 2 fails on 2-member comms |
 | Faults on ranks other than rank 1 | Tested only for rank 1 on K8s |
 | Longer-running jobs / production checkpointing | Not tested |
 
-**The mandatory next step before any customer-facing K8s POC claim**: resolve the HPC-X NCCL multi-communicator
-incompatibility (use a container without HPC-X, or a later pytorch image), then validate Megatron TP/PP straggler
-detection at 4+ nodes where hierarchical AllReduce creates genuine inter-tier signals at scale.
+**The mandatory next step before Megatron TP/PP straggler detection**: increase cluster scale to 4+ nodes.
+At 4+ nodes TP=4/PP=2/DP=8, gradient AllReduces become 8-member communicators; z-score detection works at n≥4,
+and hierarchical AllReduce creates genuine inter-tier structure for the tiered check.
 
 ---
 
@@ -2725,21 +2738,23 @@ What was tested (all on pytorch:25.01-py3, 2 × H200 K8s nodes):
 - NCCL_IB_DISABLE=1 respected: startup check skips when job sets it ✓
 - AWS OFI auto-switch: tested and REVERTED — broke Megatron DP (ncclSystemError) ✗
 
-**6.7.1 Megatron TP/PP NCCL root cause: fully diagnosed, unresolved for this container**
+**6.7.1 Megatron TP/PP NCCL root cause: fully diagnosed and resolved (2026-11)**
 
 The HPC-X segfault (`ncclIbDeregMr`) is specific to multi-communicator teardown. Single-communicator
-workloads (nanoGPT, Megatron DP) work fine. With any NCCL workaround tried:
-- AWS OFI: `ncclSystemError` (not EFA hardware, libfabric can't use Mellanox IB on this cluster)
-- `NCCL_IB_DISABLE=1` (TCP): `ncclSystemError` during training — Megatron TP/PP training STARTS
-  (model loads, all process groups initialize) but fails during the first AllReduce with NCCL error 2.
-  Likely root cause: PyTorch 2.6's requirement for `device_id` in `init_process_group()` that Megatron
-  doesn't pass, leading to wrong device selection with multi-process-group setup.
-- `MLNX_SHARP_NET=0 + NCCL_ALGO=Ring`: same `ncclSystemError`
+workloads (nanoGPT, Megatron DP) work fine. The resolution required two independent fixes applied together:
 
-Summary: Megatron TP/PP on K8s with pytorch:25.01-py3 on this cluster is not achievable with
-any NCCL network configuration. The fix requires either: (a) a container image that patches the
-`device_id` requirement, (b) a Megatron-core version compatible with PyTorch 2.6's new init API,
-or (c) a different base image without HPC-X.
+1. **NCCL_NET_PLUGIN workaround** (applied by `startup_checks.sh`): Setting `NCCL_NET_PLUGIN` to a
+   non-existent path forces `dlopen()` to fail and NCCL to use its built-in TCP network. This prevents
+   the HPC-X plugin from being loaded at all (even with `NCCL_IB_DISABLE=1`, the plugin was still loaded
+   via ldconfig and its teardown code segfaulted on uninitialized IB handles).
+
+2. **PyTorch 2.6 `device_id` fix** (applied to `megatron/training/initialize.py`): Megatron-core did not
+   pass `device_id` to `init_process_group()`. PyTorch 2.6 requires this for correct CUDA device mapping
+   across multiple process groups. Without it, NCCL communicators for the TP/PP process groups mapped to
+   wrong devices, causing `ncclSystemError` on the first cross-process-group AllReduce.
+
+Combined result: Megatron TP=2/PP=2 training completes cleanly with TORCHRUN_EXIT: 0 on both pods.
+The TCP transport has lower throughput than RDMA but gives correct multi-communicator behavior.
 
 **Check 2 — Rank uniqueness (PID collision prevention):**
 Writes `(hostname, pid)` to `/dev/shm/straggler_rank_ids/` and checks for existing entries. Within a
@@ -2766,3 +2781,81 @@ unique within a single host. The only cross-node member aggregation (`_check_mea
 **Alert engine startup logging (added):**
 `AlertEngine.__init__` now logs DCGM/diagnostic path availability at startup via `[DIAG-PATHS]`,
 so the alert confidence ceiling is explicit in the log rather than discovered per-alert.
+
+---
+
+### 6.8 Megatron TP/PP straggler detection: validated 3+3 trials (2026-11)
+
+**Setup**: 2 nodes × 8 H200 GPUs, TP=2/PP=2/DP=4, tiny model (LAYERS=8, HIDDEN=512, HEADS=8, SEQ=512),
+100ms sleep on rank 1 (fault), 0ms sleep (healthy). Three fault trials (500 steps each) + three healthy
+trials (300 steps each). Alert engine running as K8s Deployment with direct ClusterIP access to VictoriaMetrics.
+
+#### 6.8.1 Communicator structure observed in VictoriaMetrics
+
+| Bucket | Collective | role_n | Timing range | Interpretation |
+|---|---|---|---|---|
+| 6468501 B | ReduceScatter | 4 | 12.8–18.6 ms | Gradient sync (DP dimension) |
+| 4194304 B | AllReduce | 2 | 32–11000 μs | TP AllReduce (attention/MLP output) |
+| 3234251 B | AllGather | 4 | 4.5–8.4 ms | Gradient sync (DP dimension) |
+| 1048576 B | ReduceScatter | 4 | 1.1–4.3 ms | Smaller gradient buckets |
+| 524288 B | AllGather | 4 | 1.2–3.4 ms | Smaller gradient buckets |
+| 524288 B | AllReduce | 2 | 27–14514 μs | TP AllReduce (straggler signal visible) |
+| 524288 B | Recv | 2 | 8897–117417 μs | PP point-to-point receive (100ms fault visible) |
+| 524288 B | Send | 2 | 2–158 μs | PP point-to-point send |
+
+The 100ms sleep on rank 1 is clearly visible in the raw data: PP Recv shows 117ms max (13.2× ratio),
+TP AllReduce shows 14.5ms max vs 27μs min (538× ratio). The signal is present in VictoriaMetrics.
+
+#### 6.8.2 Why detection does not fire: mathematical constraint
+
+**z-score detection (`_check_mean`) on 2-member communicators:**
+With exactly 2 members [t₁, t₂], the standard deviation is σ = |t₁-t₂|/√2 and the mean is μ = (t₁+t₂)/2.
+For the worst member: z = |tₘₐₓ - μ| / σ = (|t₂-t₁|/2) / (|t₂-t₁|/√2) = √2/2 ≈ 0.707.
+This is **invariant of the actual timing values**. With `MEAN_Z_THRESH=30.0`, z≈0.7 never qualifies.
+The PP Recv (13.2× ratio, 100ms fault magnitude) also yields z≈0.7. No threshold tuning can fix this —
+it is a fundamental property of two-sample z-scores.
+
+**Tiered check (`_check_mean_tiered`) on 2-member communicators:**
+Guard 2 requires `len(reference_tier) >= 2`. With 2 members total and 1 in the straggler tier,
+the reference tier has only 1 member. Guard 2 fails immediately.
+
+**4-member communicators (DP ReduceScatter/AllGather):**
+These are gated by `MEAN_CHECK_GATED_ROLE_N=4` for `_check_mean`. For the tiered check, the
+observed max/min ratio (mm) on the 4-member comms is below `TIERED_MM_THRESH=10.0`:
+- 6.5 MB ReduceScatter: mm = 18646/12752 = 1.46× (natural timing variation, no fault signal)
+- The 100ms sleep on rank 1 does not propagate strongly to the DP ReduceScatter/AllGather timing
+  at 500-step training duration with the sleep-before-backward injection method.
+
+**Role-baseline check:** Fires as `[ROLE-BASELINE-ALERT-UNVALIDATED]` (LOG-ONLY severity, informational).
+Not wired to actionable [STRAGGLER-INCIDENT] output.
+
+#### 6.8.3 Trial results
+
+| Trial | Type | Steps | TORCHRUN_EXIT | [STRAGGLER-INCIDENT] fired? | ROLE-BASELINE? |
+|---|---|---|---|---|---|
+| Fault 1 | 100ms sleep rank=1 | 2000 | 0 (clean) | No | UNVALIDATED (LOG-ONLY) |
+| Fault 2 | 100ms sleep rank=1 | 500 | 0 (clean) | No | UNVALIDATED (LOG-ONLY) |
+| Fault 3 | 100ms sleep rank=1 | 500 | 0 (clean) | No | UNVALIDATED (LOG-ONLY) |
+| Healthy 1 | 0ms sleep | 300 | 0 (clean) | No | None |
+| Healthy 2 | 0ms sleep | 300 | 0 (clean) | No | None |
+| Healthy 3 | 0ms sleep | 300 | 0 (clean) | No | None |
+
+**False positive rate: 0/3. True positive rate: 0/3 (structural detection gap, not a threshold issue).**
+
+#### 6.8.4 Path to detection for Megatron TP/PP
+
+The 2-member communicator constraint is a function of cluster scale, not of the detection algorithm:
+
+| Cluster scale | TP/PP/DP | Gradient AllReduce role_n | z-score works? | Tiered check works? |
+|---|---|---|---|---|
+| 2 nodes / 16 GPUs | TP=2/PP=2/DP=4 | role_n=2 (TP comm) | No (z≈0.7 always) | No (Guard 2 fails) |
+| 4 nodes / 32 GPUs | TP=4/PP=2/DP=4 | role_n=4 (TP comm) | Gated (MEAN_CHECK_GATED_ROLE_N=4) | Possible if mm≥10× |
+| 8 nodes / 64 GPUs | TP=4/PP=2/DP=8 | role_n=8 (DP ReduceScatter) | Yes (z works at n≥4) | Yes (Guard 2 met) |
+
+At 8 nodes/64 GPUs with TP=4/PP=2/DP=8: DP ReduceScatter uses 8-member communicators.
+With an 8-member comm and a 100ms straggler, the straggler's OWN fast timing (the NCCL operation
+returns quickly to the straggler but blocks others) creates the same bimodal pattern that nanoGPT
+produces on its 16-member AllReduce — and both the tiered check and z-score detection should fire.
+
+**Recommendation for K8s POC**: use 4+ GPU nodes to get role_n ≥ 4 on gradient sync communicators.
+On the current 2-node hardware, nanoGPT DDP (confirmed working) is the only validated workload.

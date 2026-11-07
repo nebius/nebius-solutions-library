@@ -93,6 +93,13 @@ spec:
               value: ""
             - name: PIN_MODE
               value: "${PIN_MODE}"
+            # NCCL_IB_DISABLE=1: required workaround for HPC-X SHARP RDMA plugin
+            # segfault with multiple NCCL process groups (Megatron TP/PP) on
+            # pytorch:25.01-py3. Forces TCP transport — loses RDMA performance but
+            # gives correct multi-communicator behavior. startup_checks.sh logs this
+            # limitation explicitly. See DESIGN_NOTES §6.7 for the full diagnosis.
+            - name: NCCL_IB_DISABLE
+              value: "1"
             # Megatron shape
             - name: MEGA_TP
               value: "${MEGA_TP}"

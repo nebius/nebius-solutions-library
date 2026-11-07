@@ -289,6 +289,12 @@ def _initialize_distributed(get_embedding_ranks, get_position_embedding_ranks):
             'rank': args.rank,
             'timeout': timedelta(minutes=args.distributed_timeout_minutes),
         }
+        # PyTorch 2.4+ requires device_id to associate NCCL communicators with the
+        # correct CUDA device. Without it, PyTorch 2.6 prints "devices used by this
+        # process are currently unknown" and barriers/all-reduces fail with
+        # ncclSystemError when multiple process groups exist (Megatron TP/PP).
+        if device_id is not None:
+            init_process_group_kwargs['device_id'] = device_id
 
         torch.distributed.init_process_group(**init_process_group_kwargs)
 

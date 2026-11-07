@@ -13,12 +13,16 @@ on 2-node 16-GPU H200 (see Known limitations for shapes not yet tested on K8s).
 
 ## Quickstart — Platform: Kubernetes (plain K8s)
 
-> **Kubernetes verification status** (commit `691c296` + this task, 2026-11):
+> **Kubernetes verification status** (2026-11, 2 nodes / 16 H200 GPUs):
 > - **nanoGPT 85M (DDP)**: tiered mean check fires 3/3 fault trials, zero false positives 3/3 healthy. ✓
 > - **Megatron DP (TP=1/PP=1)**: existing `_check_mean` detects straggler signal (8-byte post-backward AllReduces);
 >   tiered check correctly silent (small bucket below 512-byte floor). 3/3 healthy trials clean. ✓
-> - **Megatron TP/PP (TP>1 or PP>1)**: BLOCKED by HPC-X NCCL multi-communicator segfault in pytorch:25.01-py3.
->   Unresolved. See DESIGN_NOTES §6.6.1.
+> - **Megatron TP/PP training (TP=2/PP=2)**: TRAINING WORKS (TORCHRUN_EXIT: 0, 6/6 trials). ✓
+>   HPC-X segfault resolved with `NCCL_NET_PLUGIN=/nonexistent` + PyTorch 2.6 `device_id` fix. See DESIGN_NOTES §6.6.1.
+> - **Megatron TP/PP straggler detection**: NOT DETECTABLE at 2-node scale (structural limit).
+>   All gradient sync communicators are 2-member (role_n=2). z-score detection yields z≈0.7 invariantly
+>   (mathematical property of 2-sample stdev); tiered check Guard 2 also fails. See DESIGN_NOTES §6.8.
+>   Detection becomes possible at 4+ nodes where role_n ≥ 4. See §6.8.4 for the upgrade path.
 > - **Node counts > 2**: NOT TESTED. Tier structure at 4+ nodes is an unknown.
 
 **Prerequisites** (cluster-agnostic; substitute your cluster's values where shown):
@@ -61,12 +65,14 @@ kubectl scale nodeset worker -n soperator --replicas=0   # confirm no active Slu
    # Expected: [STRAGGLER-INCIDENT] stat=mean_tiered + [ALERT] within 2-3 min of training start
    ```
 
-4. **Megatron TP/PP run** (requires resolving HPC-X NCCL incompatibility first — see Known Limitations)
+4. **Megatron TP/PP run** (training validated; straggler detection requires 4+ nodes — see Known Limitations)
    ```bash
    source cluster_k8s.env
-   k8s/run_megatron_k8s.sh 100   # TP=2/PP=2/DP=4, tiny model, 100 steps
-   # NOTE: fails on pytorch:25.01-py3 due to HPC-X multi-communicator segfault. Use a container
-   # without HPC-X, or TP=1/PP=1 (Megatron DP), until this is resolved. See DESIGN_NOTES §6.6.1.
+   # Training works on pytorch:25.01-py3 (HPC-X segfault + PyTorch 2.6 device_id fixed):
+   MEGA_TP=2 MEGA_PP=2 MEGA_LAYERS=8 MEGA_HIDDEN=512 MEGA_HEADS=8 MEGA_SEQ=512 MEGA_MBS=1 MEGA_GBS=4 \
+     k8s/run_megatron_k8s.sh 500 29500 dump 0 ""
+   # NOTE: straggler detection does NOT fire on 2-node clusters (structural limit: role_n=2 comms).
+   # Requires 4+ nodes for detection to work. See DESIGN_NOTES §6.8 for the full analysis.
    ```
 
 **K8s-specific notes** (confirmed on-cluster, 2026-11):
@@ -181,9 +187,12 @@ Run everything from the login node. Allow about 30 minutes plus the NCCL build (
 - Only `PAGE` alerts page a human; `LOG-ONLY` alerts are recorded for the dashboard and logs.
 - **K8s — node counts > 2**: validated on 2 nodes (16 GPUs) only. Tier structure at 4+ nodes is completely
   untested. Do not claim production readiness for K8s without validating at the target node count.
-- **K8s — Megatron TP/PP**: HPC-X NCCL multi-communicator segfault in pytorch:25.01-py3 blocks testing.
-  Any TP>1 or PP>1 shape fails. Use a container without HPC-X. See DESIGN_NOTES §6.6.1.
-- **K8s — tiered check on Megatron**: sleep-before-backward injection does not create a detectable fast-
+- **K8s — Megatron TP/PP training**: resolved. `NCCL_NET_PLUGIN=/nonexistent` + PyTorch 2.6 `device_id` fix.
+  TORCHRUN_EXIT: 0 on 6 trials. See DESIGN_NOTES §6.6.1.
+- **K8s — Megatron TP/PP straggler detection**: not detectable at 2-node scale. All gradient sync communicators
+  are 2-member (role_n=2); z-score detection yields z≈0.7 invariantly (mathematical property of 2-sample stdev).
+  Detection requires 4+ nodes. Zero false positives on 3/3 healthy trials. See DESIGN_NOTES §6.8.
+- **K8s — tiered check on Megatron DP**: sleep-before-backward injection does not create a detectable fast-
   straggler signal on large Megatron gradient AllReduces (DDP async overlap). The signal appears on small
   post-backward collectives (< 512 B, below the floor); `_check_mean` detects it. See DESIGN_NOTES §6.6.2.
 - **K8s — DCGM**: SSH-based cause classification unavailable in pods. All K8s alerts are UNCONFIRMED.

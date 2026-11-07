@@ -48,7 +48,22 @@ _check_nccl_plugin() {
     # already set a workaround (NCCL_IB_DISABLE, NCCL_NET, NCCL_NET_PLUGIN),
     # the startup check must not override it.
     if [ "${NCCL_IB_DISABLE:-0}" = "1" ]; then
-        echo "[NCCL-CHECK] [CHECK-PASS] [$_HN rank=$_RANK] NCCL_IB_DISABLE=1 already set (job-level config). Skipping plugin check." >&2
+        # NCCL_IB_DISABLE=1 disables IB for communication, but the HPC-X plugin
+        # (libnccl-net.so via ldconfig) is STILL loaded and its teardown code
+        # (ncclIbDeregMr) segfaults on uninitialized IB handles when IB was never used.
+        # Fix: also unset NCCL_NET_PLUGIN so NCCL skips plugin loading entirely and
+        # uses its built-in TCP network. Only needed when HPC-X is the ldconfig default.
+        _default_for_ib_check="$(ldconfig -p 2>/dev/null | awk '/libnccl-net\.so / {print $NF}' | head -1)"
+        if echo "${_default_for_ib_check:-}" | grep -q "hpcx" && [ -z "${NCCL_NET_PLUGIN:-}" ]; then
+            # NCCL plugin loading: empty string still triggers default (libnccl-net.so via ldconfig).
+            # Use a non-existent path so dlopen() fails and NCCL falls back to built-in network.
+            export NCCL_NET_PLUGIN="/nccl_net_disabled_hpcx_workaround.so"
+            echo "[NCCL-CHECK] [CHECK-PASS] [$_HN rank=$_RANK] NCCL_IB_DISABLE=1 set + HPC-X default detected." >&2
+            echo "[NCCL-CHECK] Setting NCCL_NET_PLUGIN to non-existent path to prevent HPC-X plugin loading." >&2
+            echo "[NCCL-CHECK] NCCL will use built-in TCP network (no RDMA, no HPC-X segfault)." >&2
+        else
+            echo "[NCCL-CHECK] [CHECK-PASS] [$_HN rank=$_RANK] NCCL_IB_DISABLE=1 already set. No HPC-X override needed." >&2
+        fi
         return 0
     fi
     if [ -n "${NCCL_NET:-}" ] && [ "${NCCL_NET}" != "IB" ]; then
