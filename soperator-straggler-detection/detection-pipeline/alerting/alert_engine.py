@@ -1376,6 +1376,58 @@ def _record_and_count_repeat(key, window_s=_REPEAT_WINDOW_S, now=None):
     return len(dq)
 
 
+# Log-readability fix (third independent review, 2026-11): pattern= above
+# answers "has this EXACT (host, comm, rank) fired repeatedly" -- a different
+# axis from the real, still-unresolved complaint the second independent
+# review surfaced: a 104-alert, whole-cluster event (every rank-scoped check
+# firing across all 6 nodes within a ~20s window, found live in
+# var/alert_summary.log 2026-11-07T09:34:09-09:34:30 -- 85 ROLE-BASELINE-
+# ALERT-UNVALIDATED + 19 WAIT-INDUCED-ALERT lines) got labeled pattern=SINGLE
+# on every one of its 104 lines, because no single (host,comm,rank) tuple
+# repeated >=3 times within 60s -- each tuple fired once or twice, the
+# aggregate volume was the real signal, and nothing reported it. burst=
+# below is a second, independent, orthogonal axis: how many rank-scoped
+# alerts (any host, any comm, any rank -- true cluster-wide volume) have
+# fired in the last _BURST_WINDOW_S seconds, counting this one. Same
+# discipline as _record_and_count_repeat: pure presentation bookkeeping, a
+# bounded in-memory deque, never read by any detection/attribution logic,
+# never gates/delays/suppresses a real alert. Threshold chosen from this
+# project's own real healthy-cluster background rate (the only other
+# recurring alert on an idle/healthy cluster is the nvlink check, ~1 every
+# 40-80s -- see the worst_host= fix below for why that one is never a real
+# outlier) -- 8 rank-scoped alerts inside 30s is far above anything a lone
+# nvlink heartbeat-style finding could ever produce, and well below the 104
+# seen in the one confirmed real burst this project has on record.
+_BURST_WINDOW_S = 30.0
+_BURST_THRESHOLD = 8
+_cluster_burst_tracker = deque()
+_cluster_burst_lock = threading.Lock()
+
+
+def _record_and_count_cluster_burst(window_s=_BURST_WINDOW_S, now=None):
+    """Records one cluster-wide rank-scoped alert firing now, prunes entries
+    older than window_s, returns the count still in the window (including
+    this one). Thread-safe (poll_once() dispatches per-host checks
+    concurrently via a ThreadPoolExecutor) -- see pattern= sibling function
+    above for the same "pure presentation bookkeeping" discipline."""
+    now = now if now is not None else time.time()
+    with _cluster_burst_lock:
+        _cluster_burst_tracker.append(now)
+        while _cluster_burst_tracker and now - _cluster_burst_tracker[0] > window_s:
+            _cluster_burst_tracker.popleft()
+        return len(_cluster_burst_tracker)
+
+
+def _burst_label(now=None):
+    """BURST(n=N,window=Ws) when N rank-scoped alerts have fired cluster-wide
+    in the last _BURST_WINDOW_S seconds (including this one), else ISOLATED.
+    Always a real, exact count -- never a guessed/rounded bucket."""
+    n = _record_and_count_cluster_burst(now=now)
+    if n >= _BURST_THRESHOLD:
+        return f"BURST(n={n},window={int(_BURST_WINDOW_S)}s)"
+    return "ISOLATED"
+
+
 def severity_for_tier(tier):
     """Returns ('PAGE', ...) or ('LOG-ONLY', ...) -- see PAGE_WORTHY_TIERS
     docstring above for the real data this policy is based on."""
@@ -1406,9 +1458,18 @@ def format_alert(finding, coverage):
     # confirm an [ALERT] and a [STRAGGLER-INCIDENT] line refer to the
     # same real event without inferring it from log adjacency.
     incident_id_part = f" incident_id={finding['incident_id']}" if finding.get("incident_id") else ""
-    # item-8 -- real worker/GPU/rank identity alongside the PID
-    # (rank= above IS the real PID, kept exactly as-is per explicit
-    # instruction), same gpu_slot=/role_rank=/role_n= convention
+    # item-8 -- real worker/GPU/rank identity alongside the PID. Log-
+    # readability fix (third independent review, 2026-11): the prior
+    # "rank= IS the real PID, kept exactly as-is" convention is EXACTLY the
+    # misread risk the second independent review flagged -- a reader sees
+    # `rank=2629547` and reasonably assumes a 0-47 world rank, when the real
+    # small-integer identity is in the separately-named role_rank field
+    # several tokens later. Renamed to pid= (unambiguous: it always was a
+    # PID, nothing about the underlying value changes) and reordered so
+    # role_rank/role_n -- the field a human actually wants first -- leads
+    # the header instead of trailing it. Presentation-only: pid is still
+    # exactly finding["rank"], same value, same source, nothing about
+    # attribution changed. Same gpu_slot=/role_rank=/role_n= convention
     # [STRAGGLER-INCIDENT]'s own header already uses. "unknown"/"na" are
     # honest, real fallbacks (not guesses) for the two real gaps this
     # project's own history already found and disclosed: dcgm_gpu_slot_
@@ -1430,9 +1491,21 @@ def format_alert(finding, coverage):
     # Presentation only: never gates, delays, or suppresses this alert.
     repeat_n = _record_and_count_repeat((host, comm, rank))
     pattern_disp = f"REPEATED(n={repeat_n})" if repeat_n >= _REPEAT_THRESHOLD else "SINGLE"
-    header = (f"[ALERT] rank={rank} gpu_slot={gpu_slot_disp} role_rank={role_rank_disp} role_n={role_n_disp} "
-              f"comm={comm} node={host} type={fault_type} confidence={tier} "
-              f"severity={severity} pattern={pattern_disp}{incident_id_part}")
+    burst_disp = _burst_label()
+    # Log-readability fix (third independent review, 2026-11): role_n=
+    # appearing as 4 on one line and 48 on another for the SAME pid/node is
+    # real and legitimate, not a bug -- confirmed live (rank=2629547,
+    # node=worker-3 fires under 3 different comm= values: two role_n=4
+    # TP-sized groups and one role_n=48 world group, each its own real
+    # communicator). comm= moved to sit directly next to role_rank=/role_n=
+    # (rather than after pid=/gpu_slot=) so the three fields that describe
+    # ONE communicator's view of this process read as a visual unit --
+    # role_rank=/role_n= are always scoped to the comm= immediately
+    # following them on the same line, never a cross-line or global value.
+    header = (f"[ALERT] role_rank={role_rank_disp} role_n={role_n_disp} comm={comm} "
+              f"pid={rank} gpu_slot={gpu_slot_disp} "
+              f"node={host} type={fault_type} confidence={tier} "
+              f"severity={severity} pattern={pattern_disp} burst={burst_disp}{incident_id_part}")
     # P21.6 -- cascade-mislocalization fix: shown prominently, right after
     # the header, before any cause-evidence body -- either confirming a
     # real re-attribution (host/rank/comm above already reflect it) or
@@ -1709,6 +1782,30 @@ class AlertEngine:
         # the module docstring above _hosts_have_active_job for why these
         # can't run synchronously inside the 3s poll loop.
         self._alerts_lock = threading.Lock()
+        # Log-readability fix (third independent review, 2026-11): real root
+        # cause of the confirmed duplicate back-to-back [ROLE-BASELINE-ALERT-
+        # UNVALIDATED]/[ALERT] lines (26 exact-timestamp, exact-content pairs
+        # found live in var/alert_summary.log) -- _poll_host's own `seen_comms`
+        # set (see its docstring) was local to ONE host's call, but a comm that
+        # spans multiple physical hosts (any TP/PP group crossing a node
+        # boundary -- confirmed live: role_n=4 groups split across worker-4/
+        # worker-5) appears in _comm_buckets for EVERY host it touches, so
+        # _poll_host gets invoked once per touching host via the
+        # ThreadPoolExecutor in poll_once(), and each invocation's own local
+        # seen_comms sees the comm as "new" and redundantly re-dispatches
+        # _check_wait_induced/_check_role_baseline -- both of which already
+        # evaluate the FULL cross-node comm via _comm_cross_node_members
+        # regardless of which host triggered them, so every touching host
+        # reproduces the exact same real finding. This lock + set makes "once
+        # per distinct comm per poll cycle" genuinely global instead of
+        # per-host-local, mirroring the dedup pattern poll_once() already uses
+        # for mean_tiered's own cross-host comm scan below. Presentation/
+        # dispatch-layer only: does not change _check_wait_induced's or
+        # _check_role_baseline's own detection math, thresholds, or
+        # persistence state -- only how many times an already-qualifying
+        # finding gets formatted and printed.
+        self._cycle_comms_lock = threading.Lock()
+        self._cycle_seen_comms = set()
         self._last_network_check_at = 0.0
         self._last_host_check_at = 0.0
         self._last_nvlink_check_at = 0.0
@@ -1963,8 +2060,16 @@ class AlertEngine:
             # not a hardcoded subset" guarantee cv/mean already have.
             if comm not in seen_comms:
                 seen_comms.add(comm)
-                self._run_check("wait_induced", self._check_wait_induced, hostname, comm)
-                self._run_check("role_baseline", self._check_role_baseline, hostname, comm)
+                # Log-readability fix (third independent review, 2026-11): the
+                # real cross-host dedup gate -- see self._cycle_seen_comms'
+                # own comment in __init__ for why the local seen_comms set
+                # above is not enough for a comm that spans multiple hosts.
+                with self._cycle_comms_lock:
+                    is_first_dispatch_this_cycle = comm not in self._cycle_seen_comms
+                    self._cycle_seen_comms.add(comm)
+                if is_first_dispatch_this_cycle:
+                    self._run_check("wait_induced", self._check_wait_induced, hostname, comm)
+                    self._run_check("role_baseline", self._check_role_baseline, hostname, comm)
         self._run_check("rank0_outlier_rate", self._check_rank0_outlier_rate, hostname)
         self._run_check("job_throughput", self._check_job_throughput, hostname)
 
@@ -1985,6 +2090,11 @@ class AlertEngine:
         self._run_check("path_c_check", self._maybe_launch_path_c_check)
         self._run_check("grafana_check", self._maybe_launch_grafana_check)
         self._run_check("rank_identity_collision_check", self._check_rank_identity_collisions)
+        # Log-readability fix (third independent review, 2026-11): reset the
+        # real cross-host dedup set once per poll cycle, before any
+        # _poll_host future is submitted -- see its own definition in
+        # __init__ for the duplicate-line bug this closes.
+        self._cycle_seen_comms = set()
         futures = [self._pool.submit(self._poll_host, h) for h in self.hostnames]
         for f in futures:
             f.result()
@@ -3585,7 +3695,7 @@ class AlertEngine:
         # node_aggregator_ref.py's own phys_comm_role dict already uses
         # for "role not yet/never discovered," not a new convention.
         lines = [
-            f"[ALERT] rank={member} gpu_slot={slot} role_rank=na role_n=na "
+            f"[ALERT] pid={member} gpu_slot={slot} role_rank=na role_n=na "
             f"comm={comm} node={member_host} type=compute "
             f"confidence={tier} severity={severity}",
             "",
@@ -3717,10 +3827,15 @@ class AlertEngine:
         # makes that explicit instead of leaving it to be inferred.
         _wi_repeat_n = _record_and_count_repeat((culprit_host, comm, culprit))
         _wi_pattern = f"REPEATED(n={_wi_repeat_n})" if _wi_repeat_n >= _REPEAT_THRESHOLD else "SINGLE"
+        _wi_burst = _burst_label()
         lines = [
-            f"[WAIT-INDUCED-ALERT] rank={culprit} gpu_slot={slot} role_rank={d['role_rank']} "
-            f"role_n={d['role_n']} comm={comm} node={culprit_host} type=compute "
-            f"confidence={tier} severity={severity} pattern={_wi_pattern}",
+            # role_n= scoping fix: see format_alert's own comment -- comm=
+            # moved next to role_rank=/role_n= so the triple reads as one
+            # communicator's view, since the same pid legitimately shows a
+            # different role_n under a different comm.
+            f"[WAIT-INDUCED-ALERT] role_rank={d['role_rank']} role_n={d['role_n']} comm={comm} "
+            f"pid={culprit} gpu_slot={slot} node={culprit_host} type=compute "
+            f"confidence={tier} severity={severity} pattern={_wi_pattern} burst={_wi_burst}",
             "",
             f"WAIT-INDUCED STRAGGLER ({len(per_member)}-member comm): this member's OWN current "
             f"reading (ratio={d['ratio']:.3f}x its own real historical baseline, "
@@ -3970,10 +4085,15 @@ class AlertEngine:
         # level-triggered too, so a sustained condition legitimately repeats.
         _rb_repeat_n = _record_and_count_repeat((data["hostname"], comm, member))
         _rb_pattern = f"REPEATED(n={_rb_repeat_n})" if _rb_repeat_n >= _REPEAT_THRESHOLD else "SINGLE"
+        _rb_burst = _burst_label()
         lines = [
-            f"{header_tag} rank={member} gpu_slot={slot} role_rank={data['role_rank']} "
-            f"role_n={data['role_n']} comm={comm} node={data['hostname']} type=compute "
-            f"confidence={tier} severity={severity} pattern={_rb_pattern}",
+            # role_n= scoping fix: see format_alert's own comment -- comm=
+            # moved next to role_rank=/role_n= so the triple reads as one
+            # communicator's view, since the same pid legitimately shows a
+            # different role_n under a different comm.
+            f"{header_tag} role_rank={data['role_rank']} role_n={data['role_n']} comm={comm} "
+            f"pid={member} gpu_slot={slot} node={data['hostname']} type=compute "
+            f"confidence={tier} severity={severity} pattern={_rb_pattern} burst={_rb_burst}",
             "",
             f"ROLE-BASELINE DEVIATION: this member's current reading (current_mean_us="
             f"{data['current']:.0f}) is {data['ratio']:.3f}x its OWN real historical baseline for "
@@ -4080,7 +4200,7 @@ class AlertEngine:
         # role_n convention as _emit_timing_fallback's own header (see
         # that function's comment for why "na" here, not a guess).
         lines = [
-            f"[ALERT] rank={member} gpu_slot={slot} role_rank=na role_n=na "
+            f"[ALERT] pid={member} gpu_slot={slot} role_rank=na role_n=na "
             f"comm={comm} node={hostname} type=compute "
             f"confidence={tier} severity={severity}",
             "",
@@ -4792,8 +4912,31 @@ class AlertEngine:
         worst_host, worst_d = min(
             net["net"].items(),
             key=lambda kv: (kv[1]["participation_frac"], -kv[1]["errors_delta"]))
-        header_detail = (f"worst_host={worst_host} participation={worst_d['participation_frac']:.2f} "
-                          f"errors_delta={worst_d['errors_delta']}")
+        # Log-readability fix (third independent review, 2026-11): real,
+        # confirmed contradiction -- every single nvlink alert in this
+        # project's history (27/27 checked live in var/alert_summary.log)
+        # has every host at participation=1.00/errors_delta=0, so min()'s
+        # tie-break always hands worst_host= an arbitrary pick with nothing
+        # actually wrong about it: "worst_host=worker-0 participation=1.00"
+        # reads as a real outlier when 100% participation means there isn't
+        # one. Presentation-only fix: when every host is genuinely tied
+        # (same participation_frac AND same errors_delta across the whole
+        # set -- the real condition for "no outlier exists", not a guess),
+        # report that honestly instead of naming an arbitrary host as
+        # "worst". A real spread (even one host differing) still reports
+        # worst_host= exactly as before -- this never hides a genuine
+        # outlier, only a uniform/healthy set.
+        participations = [d["participation_frac"] for d in net["net"].values()]
+        errors_deltas = [d["errors_delta"] for d in net["net"].values()]
+        no_real_outlier = (max(participations) == min(participations)
+                            and max(errors_deltas) == min(errors_deltas))
+        if no_real_outlier:
+            header_detail = (f"worst_host=none (uniform across all {len(net['net'])} hosts: "
+                              f"participation={worst_d['participation_frac']:.2f} "
+                              f"errors_delta={worst_d['errors_delta']})")
+        else:
+            header_detail = (f"worst_host={worst_host} participation={worst_d['participation_frac']:.2f} "
+                              f"errors_delta={worst_d['errors_delta']}")
         lines = [f"[ALERT] scope=cluster type=nvlink confidence={tier} severity={severity} {header_detail}", ""]
         lines.append(f"NVLink evidence across {sorted(net['net'].keys())} (live_query, "
                       f"no rolling buffer for NVLink yet):")
