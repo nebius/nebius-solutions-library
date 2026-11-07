@@ -38,10 +38,24 @@ cluster_topology_available_nodes
 _SCRIPT_DIR_FOR_MOUNT_FIX="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 _PKG_ROOT_FOR_MOUNT_FIX="$(cd "$_SCRIPT_DIR_FOR_MOUNT_FIX/../.." && pwd)"
 _NCCL_SRC_DIR_FOR_MOUNT_FIX="$(cd "$(dirname "$(dirname "$NCCL_LIB_PATH")")" && pwd)"
-for _p in "$_PKG_ROOT_FOR_MOUNT_FIX" "$_NCCL_SRC_DIR_FOR_MOUNT_FIX"; do
+# Real bug found live (log-readability round, 2026-11): the storage-
+# migration mount-fix below (OUTDIR/DUMPDIR_BASE real-target resolution,
+# see Megatron/FSDP's run_*.sh for the same fix and DESIGN_NOTES.md's
+# storage-migration section) was applied to every other launcher in this
+# repo but missed here -- var/runs/var/dump are now symlinks to a separate
+# (larger) shared filesystem outside PKG_ROOT, so without resolving their
+# real targets into the mount list, any write through OUTDIR/DUMPDIR_BASE
+# from inside the container silently fails with "No such file or
+# directory" even though the symlink itself is visible (confirmed live:
+# every worker's TORCHRUN_EXIT: 1, train_node_straggler.sh unable to
+# create train_worker-N.log, until this fix).
+_OUTDIR_REAL_FOR_MOUNT_FIX="$(readlink -f "$OUTDIR" 2>/dev/null || echo "$OUTDIR")"
+_DUMPDIR_REAL_FOR_MOUNT_FIX="$(readlink -f "$DUMPDIR_BASE" 2>/dev/null || echo "$DUMPDIR_BASE")"
+for _p in "$_PKG_ROOT_FOR_MOUNT_FIX" "$_NCCL_SRC_DIR_FOR_MOUNT_FIX" "$_OUTDIR_REAL_FOR_MOUNT_FIX" "$_DUMPDIR_REAL_FOR_MOUNT_FIX"; do
   case "$_p" in
     /root|/root/*) ;;  # already covered by the existing /root:/root mount
-    *) MOUNTS="$MOUNTS,$_p:$_p" ;;
+    "$_PKG_ROOT_FOR_MOUNT_FIX"/*) ;;  # already covered by the PKG_ROOT mount above
+    *) case ",$MOUNTS," in *",$_p:$_p,"*) ;; *) MOUNTS="$MOUNTS,$_p:$_p" ;; esac ;;
   esac
 done
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
