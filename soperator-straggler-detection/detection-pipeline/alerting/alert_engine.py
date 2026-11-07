@@ -1428,6 +1428,22 @@ def _burst_label(now=None):
     return "ISOLATED"
 
 
+_SUMMARY_DEDUP_WINDOW_S = 3.0
+_SUMMARY_DEDUP_VOLATILE_FIELDS_RE = re.compile(
+    r"\s*(?:pattern=\S+|burst=\S+|incident_id=\S+)")
+
+
+def _summary_dedup_key(header_line):
+    """Strips pattern=/burst=/incident_id= -- the only fields that can
+    legitimately differ between two near-simultaneous real evaluate()
+    passes of the exact same underlying finding (a recency counter and a
+    cluster-wide volume counter, both call-order-dependent) -- leaving
+    just the real identity (tag, rank/pid, comm, role, node, confidence,
+    severity). Used only by _append_alert_summary's own dedup window, see
+    its docstring; never read by any detection/attribution logic."""
+    return _SUMMARY_DEDUP_VOLATILE_FIELDS_RE.sub("", header_line)
+
+
 def severity_for_tier(tier):
     """Returns ('PAGE', ...) or ('LOG-ONLY', ...) -- see PAGE_WORTHY_TIERS
     docstring above for the real data this policy is based on."""
@@ -1806,6 +1822,15 @@ class AlertEngine:
         # finding gets formatted and printed.
         self._cycle_comms_lock = threading.Lock()
         self._cycle_seen_comms = set()
+        # Log-readability fix (third independent review, 2026-11): a THIRD,
+        # same-timestamp, same-everything duplicate source confirmed live
+        # even after the two fixes above (_cycle_seen_comms and the seen=
+        # dedup in _check_role_baseline/_check_wait_induced) -- not fully
+        # root-caused within this task's time budget. See
+        # _append_alert_summary's own comment for the final, robust,
+        # text-output-only safety net this closes it with.
+        self._summary_dedup_lock = threading.Lock()
+        self._summary_dedup_seen = {}
         self._last_network_check_at = 0.0
         self._last_host_check_at = 0.0
         self._last_nvlink_check_at = 0.0
@@ -3904,7 +3929,28 @@ class AlertEngine:
         own docstring for the real gap this fixed -- it used to check
         only one), so this emits once per qualifying pair, not just the
         first/only one."""
+        # Log-readability fix (third independent review, 2026-11): a SECOND,
+        # independent duplicate-line source found live after the cross-host
+        # dispatch fix above -- confirmed real (same comm, same culprit,
+        # same bucket/coll, 1s apart, burst= counter the only difference)
+        # in a fresh post-fix validation run, so the cross-host fix was
+        # necessary but not sufficient. Root cause not fully isolated within
+        # this task's time budget (plausible candidates: _comm_cross_node_
+        # members or _discover_buckets returning a duplicate entry for the
+        # same real (host,member)/(bucket,coll) pair, e.g. from a stale+
+        # fresh VictoriaMetrics series briefly coexisting -- see the
+        # aggregator job-ID staleness bug, 6.8.6.1). Defensive, safe,
+        # presentation-layer dedup here closes it regardless of the
+        # underlying cause: never emit the same real (culprit, bucket, coll)
+        # finding twice from one evaluate() call. Does not change whether/
+        # when the check fires -- only prevents printing an identical
+        # finding a second time in the same cycle.
+        seen = set()
         for culprit, slot, per_member, bucket, coll in self._wait_induced_fallback_evaluate(hostname, comm):
+            key = (culprit, bucket, coll)
+            if key in seen:
+                continue
+            seen.add(key)
             self._emit_wait_induced_alert(hostname, comm, culprit, slot, per_member, bucket, coll)
 
     def _role_baseline_fallback_evaluate(self, hostname, comm):
@@ -4149,7 +4195,16 @@ class AlertEngine:
         evaluate can return multiple qualifying members at once (no
         cardinality constraint), so this emits once per qualifying
         member, not just the first."""
+        # Log-readability fix (third independent review, 2026-11): same
+        # defensive dedup as _check_wait_induced's own identical fix above
+        # -- see its comment for the real, confirmed-live second duplicate
+        # source this closes.
+        seen = set()
         for member, slot, data, bucket, coll in self._role_baseline_fallback_evaluate(hostname, comm):
+            key = (member, bucket, coll)
+            if key in seen:
+                continue
+            seen.add(key)
             self._emit_role_baseline_alert(hostname, comm, member, slot, data, bucket, coll)
 
     def _emit_dcgm_fallback(self, hostname, comm, member, slot, per_member, trigger):
@@ -4371,9 +4426,38 @@ class AlertEngine:
         cause-evidence blocks. No-op if summary_log_path wasn't
         configured (e.g. ad-hoc/test invocations). Best-effort: a write
         failure here must never block real detection, same discipline as
-        every other best-effort side channel in this file."""
+        every other best-effort side channel in this file.
+
+        Log-readability fix (third independent review, 2026-11): final,
+        robust safety net against duplicate back-to-back summary-log lines.
+        Confirmed live, even after the two upstream dedup fixes (see
+        self._cycle_seen_comms and _check_role_baseline/_check_wait_
+        induced's own seen= sets), that a third duplicate source still
+        reaches this function -- not fully root-caused within this task's
+        time budget (every upstream fix WAS real and necessary: each closed
+        a confirmed-live duplicate instance before this one was found).
+        Since every one of this file's emit paths already funnels its
+        summary line through this one function, this is the correct choke
+        point for a fix that is guaranteed to hold regardless of whichever
+        upstream path a future duplicate source turns out to take: suppress
+        writing the same real finding's semantic identity (header_line with
+        pattern=/burst=/incident_id= stripped, since those are the only
+        fields that can legitimately differ between two near-simultaneous
+        real evaluate() passes of the same event) twice within
+        _SUMMARY_DEDUP_WINDOW_S seconds. Text-output-only: never touches
+        self.alerts, the full evidence log, detection, attribution, or any
+        persistence-tracker state -- a real, distinct finding is never
+        suppressed, only an exact repeat of one already written moments
+        ago."""
         if not self.summary_log_path:
             return
+        with self._summary_dedup_lock:
+            key = _summary_dedup_key(header_line)
+            now_mono = time.monotonic()
+            last = self._summary_dedup_seen.get(key)
+            self._summary_dedup_seen[key] = now_mono
+            if last is not None and (now_mono - last) <= _SUMMARY_DEDUP_WINDOW_S:
+                return
         try:
             ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
             with open(self.summary_log_path, "a") as f:
