@@ -1612,6 +1612,29 @@ class AlertEngine:
         self._platform = _detect_platform()
         print(f"[PLATFORM] Detected: {self._platform} -- tiered mean check active on all platforms "
               f"(log label only; it does not gate any check)", flush=True)
+        # Startup diagnostic availability check: determine what hardware
+        # evidence paths are actually reachable, and log the resulting
+        # maximum achievable alert confidence ceiling honestly -- rather
+        # than letting it be a silent limitation buried only in alert output.
+        _diag_paths = []
+        if subprocess.run(["which", "ssh"], capture_output=True).returncode == 0:
+            _diag_paths.append("ssh")
+        if subprocess.run(["which", "dcgmi"], capture_output=True).returncode == 0:
+            _diag_paths.append("dcgmi-local")
+        try:
+            import urllib.request as _ur
+            _ur.urlopen("http://localhost:9400/metrics", timeout=1).read()
+            _diag_paths.append("dcgm-exporter-sidecar:9400")
+        except Exception:
+            pass
+        if _diag_paths:
+            print(f"[DIAG-PATHS] Hardware diagnostic paths reachable: {', '.join(_diag_paths)} "
+                  f"-- CONFIRMED alert confidence achievable on verified faults.", flush=True)
+        else:
+            print(f"[DIAG-PATHS] No hardware diagnostic paths reachable (ssh/dcgmi absent, "
+                  f"no DCGM sidecar at :9400). All alerts on this run will show "
+                  f"confidence=UNCONFIRMED. This is expected on K8s without DCGM integration.",
+                  flush=True)
         # P27-hotfix9 -- rolling pool of recently-fired timing-fallback
         # alerts, for _correlate_firing_timing_alerts. NOT scoped to a
         # single poll cycle: confirmed this session that two real,
@@ -5503,6 +5526,12 @@ class AlertEngine:
         # The LOWEST timing tier = candidate straggler group.
         # On K8s: this is the rank(s) that slept before calling NCCL --
         # everyone waited, so their NCCL time is very short.
+        # N-tier generalization: straggler is ALWAYS tiers[0] (fastest group);
+        # reference is ALWAYS tiers[1] (the NEXT tier up -- not all remaining).
+        # This is correct for ANY N >= 2: if N=3 or N=4 (more hierarchical levels),
+        # tiers[2:] are simply ignored -- comparing against tiers[1] alone gives the
+        # tightest, most unimodal reference rather than a bimodal/multi-modal mix.
+        # Confirmed: no hardcoded tier-count assumption in this path.
         straggler_tier = tiers[0]
         reference_tier = tiers[1]  # the NEXT tier up: the tight unimodal reference
 

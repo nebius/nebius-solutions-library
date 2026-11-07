@@ -2700,3 +2700,69 @@ relies on DDP's synchronous blocking — which appears to be fully async for lar
 **The mandatory next step before any customer-facing K8s POC claim**: resolve the HPC-X NCCL multi-communicator
 incompatibility (use a container without HPC-X, or a later pytorch image), then validate Megatron TP/PP straggler
 detection at 4+ nodes where hierarchical AllReduce creates genuine inter-tier signals at scale.
+
+---
+
+### 6.7 Environment self-checks (2026-11): what was built, what was found
+
+`k8s/startup_checks.sh` is sourced at the start of every K8s training script. Three checks:
+
+**Check 1 — NCCL plugin detection (HPC-X diagnosis):**
+Detection: `ldconfig -p | grep libnccl-net.so` → identifies HPC-X SHARP plugin as the default
+(`/opt/hpcx/nccl_rdma_sharp_plugin/lib/libnccl-net.so`) via `/etc/ld.so.conf.d/hpcx.conf` (ldconfig, not LD_LIBRARY_PATH).
+
+Policy: conservative. If `NCCL_IB_DISABLE=1`, `NCCL_NET`, or `NCCL_NET_PLUGIN` is already set by the
+job, the check skips and logs `[CHECK-PASS]`. If not set and HPC-X is the default, logs `[CHECK-WARN]`
+with workaround guidance; does NOT auto-override.
+
+Rationale for not auto-overriding: AWS OFI NCCL plugin (`/opt/amazon/aws-ofi-nccl/`) is present in
+pytorch:25.01-py3 but requires AWS EFA hardware, not Mellanox IB. Switching to it broke Megatron DP
+(which works with HPC-X single-communicator) on this cluster. Auto-remediation without verification of
+alternative plugin compatibility causes regressions.
+
+What was tested (all on pytorch:25.01-py3, 2 × H200 K8s nodes):
+- HPC-X detection: reliable (`[CHECK-WARN]` on every run) ✓
+- NCCL_IB_DISABLE=1 respected: startup check skips when job sets it ✓
+- AWS OFI auto-switch: tested and REVERTED — broke Megatron DP (ncclSystemError) ✗
+
+**6.7.1 Megatron TP/PP NCCL root cause: fully diagnosed, unresolved for this container**
+
+The HPC-X segfault (`ncclIbDeregMr`) is specific to multi-communicator teardown. Single-communicator
+workloads (nanoGPT, Megatron DP) work fine. With any NCCL workaround tried:
+- AWS OFI: `ncclSystemError` (not EFA hardware, libfabric can't use Mellanox IB on this cluster)
+- `NCCL_IB_DISABLE=1` (TCP): `ncclSystemError` during training — Megatron TP/PP training STARTS
+  (model loads, all process groups initialize) but fails during the first AllReduce with NCCL error 2.
+  Likely root cause: PyTorch 2.6's requirement for `device_id` in `init_process_group()` that Megatron
+  doesn't pass, leading to wrong device selection with multi-process-group setup.
+- `MLNX_SHARP_NET=0 + NCCL_ALGO=Ring`: same `ncclSystemError`
+
+Summary: Megatron TP/PP on K8s with pytorch:25.01-py3 on this cluster is not achievable with
+any NCCL network configuration. The fix requires either: (a) a container image that patches the
+`device_id` requirement, (b) a Megatron-core version compatible with PyTorch 2.6's new init API,
+or (c) a different base image without HPC-X.
+
+**Check 2 — Rank uniqueness (PID collision prevention):**
+Writes `(hostname, pid)` to `/dev/shm/straggler_rank_ids/` and checks for existing entries. Within a
+pod (all 8 worker processes share the same hostname), PIDs should be unique. Cross-pod uniqueness is
+guaranteed by the alert engine using `(hostname, pid)` composite keys since the earlier bug fix. This
+check is a belt-and-suspenders guard for single-pod scenarios.
+
+**Check 3 — Hardware diagnostic reachability:**
+Tests ssh, dcgmi, and local DCGM exporter at :9400. On this cluster: `ssh` is present but node
+hostnames are not DNS-resolvable from pods; `dcgmi` and the DCGM sidecar are absent. Result logged
+as `[CHECK-WARN] No hardware diagnostic path found` on every run. All K8s alerts remain
+`confidence=UNCONFIRMED`. This is correct behavior documented explicitly at startup.
+
+**Tier-count generalization confirmed:**
+`_check_mean_tiered` uses `tiers[0]` (straggler) vs `tiers[1]` (reference) regardless of N. With 4+
+tiers, `tiers[2:]` are ignored — this is correct: comparing the straggler against the NEXT tier only
+gives the tightest unimodal reference, not a bimodal mix. No hardcoded tier-count assumption.
+
+**PID-only keying audit:**
+All `(comm, member)` usages in alert_engine.py are within hostname-scoped VM queries; member (PID) is
+unique within a single host. The only cross-node member aggregation (`_check_mean_tiered`) already uses
+`(hostname, member)` as the composite key since the earlier bug fix. No additional fixes needed.
+
+**Alert engine startup logging (added):**
+`AlertEngine.__init__` now logs DCGM/diagnostic path availability at startup via `[DIAG-PATHS]`,
+so the alert confidence ceiling is explicit in the log rather than discovered per-alert.

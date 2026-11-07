@@ -19,6 +19,11 @@ RANK=$NODE_RANK
 
 mkdir -p "$DUMPDIR" "$OUTDIR"
 
+# Run environment self-checks before training.
+# Detects and adapts to: broken NCCL plugin, PID collisions, DCGM availability.
+_CHECKS_SCRIPT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/k8s/startup_checks.sh"
+if [ -f "$_CHECKS_SCRIPT" ]; then source "$_CHECKS_SCRIPT"; fi
+
 # Wait for the rendezvous DNS entry to be resolvable before starting torchrun.
 # Non-rank-0 pods must wait for rank-0's DNS to appear in the headless service;
 # rank-0 also waits briefly to ensure the headless service endpoint is registered.

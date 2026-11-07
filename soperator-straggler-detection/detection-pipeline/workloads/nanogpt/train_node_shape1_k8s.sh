@@ -19,6 +19,10 @@ OUTDIR=$2
 PORT=$3
 DUMPDIR=$4   # inside-pod path; shared with aggregator sidecar via EmptyDir volume
 
+# Environment self-checks (NCCL plugin, rank uniqueness, DCGM availability)
+_CHECKS_SCRIPT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/k8s/startup_checks.sh"
+if [ -f "$_CHECKS_SCRIPT" ]; then source "$_CHECKS_SCRIPT"; fi
+
 _LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../lib/cluster_topology_k8s.sh"
 source "$_LIB"
 cluster_topology_job_nodes
