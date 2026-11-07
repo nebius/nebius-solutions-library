@@ -3245,7 +3245,7 @@ scale, prioritized by what this project's history shows is most likely to surfac
 known Falcon-side MoE/Stage-1-autocorrelation risk). No core detection logic touched; this section documents
 findings only unless stated otherwise.
 
-**6.15.1 MoE: a real, intermittent cluster-stability hang -- the headline finding of this round.** Two 150-step
+**6.12.1 MoE: a real, intermittent cluster-stability hang -- the headline finding of this round.** Two 150-step
 healthy MoE trials (`moe_healthy1`, `moe_healthy2`, `workloads/moe/run_moe_nanogpt.sh`, 48 ranks/6 nodes) completed
 cleanly, `TORCHRUN_EXIT: 0` on all 6 workers each time. A third, otherwise identical trial (`moe_healthy3`) HUNG:
 5 of 6 nodes (40/48 ranks) froze permanently at round 1 of MoE's token-routing diagnostic, while the 6th node
@@ -3263,9 +3263,9 @@ planning on its own merits, separate from detection-logic readiness.
 
 Given this hang rate on HEALTHY runs alone, forcing 3 full MoE fault trials (as originally planned) was judged not
 worth the cluster-time cost of a predictable rate of hung 6-node allocations; one additional, bounded fault-trial
-attempt was made (see 6.15.2) rather than three.
+attempt was made (see 6.12.2) rather than three.
 
-**6.15.2 MoE fault-injection attempt and the autocorrelation-lock question (code-review based, not fully
+**6.12.2 MoE fault-injection attempt and the autocorrelation-lock question (code-review based, not fully
 empirically confirmed).** `_check_mean_tiered`'s persistence mechanism (`self.tiered_tracker`, keyed by
 `(comm, member, bucket, coll)`, requiring N consecutive qualifying polls scoped per-group via
 `_reset_tiered_keys`) is architecturally different from Falcon's Stage 1 mechanism that MoE broke on the Falcon
@@ -3282,7 +3282,7 @@ SAME rank from appearing as the tier outlier for the required N consecutive poll
 fault -- not because the detection math is wrong, but because the persistence key's membership stability
 assumption may not hold under MoE's routing dynamics. This is a real, named, OPEN question, not a confirmed bug:
 it requires actual fault-trial data against a stable (non-hanging) MoE run to verify, which this round's hang
-finding (6.15.1) made too costly to pursue further without risking most of the remaining cluster-time budget on a
+finding (6.12.1) made too costly to pursue further without risking most of the remaining cluster-time budget on a
 1-in-3 chance of a hung allocation. Flagged precisely as unresolved, not rounded up to either "confirmed safe" or
 "confirmed broken."
 
@@ -3291,8 +3291,8 @@ to `var/dump`, not a per-run subdir -- `node_aggregator_ref.py` instances watch 
 Clean runs: `var/runs/moe_healthy1`, `var/runs/moe_healthy2`. Hung run (preserved, do not overwrite):
 `var/runs/moe_healthy3`.
 
-**6.9.3 MoE fault-trial attempts: inconclusive, honestly reported as such.** Two fault attempts were made (not
-three, given 6.9.1's hang rate): `moe_fault1` (channel-limit fault via `run_moe_rankfault.sh`, rank 4) and
+**6.12.3 MoE fault-trial attempts: inconclusive, honestly reported as such.** Two fault attempts were made (not
+three, given 6.12.1's hang rate): `moe_fault1` (channel-limit fault via `run_moe_rankfault.sh`, rank 4) and
 `moe_delayfault1` (100ms delay fault via `run_moe_delayfault.sh`, rank 4, matching this project's established
 magnitude). Both completed without hanging (`TORCHRUN_EXIT: 0` on all 6 workers). Neither produced a clear,
 freshly-timestamped `[STRAGGLER-INCIDENT] stat=mean_tiered` attributed to rank 4 within its own run's time window --
@@ -3302,9 +3302,9 @@ honestly as INCONCLUSIVE, not as a confirmed detection miss: by this point in th
 backend carries many hours of accumulated series from dozens of prior jobs (production validation, closeout,
 robustness-check, and this round's own MoE runs), making precise per-run attribution difficult to confirm cleanly
 without a longer, dedicated, single-purpose re-run. The autocorrelation/group-membership-stability question raised
-in 6.9.2 remains open and is NOT resolved by this inconclusive result either way.
+in 6.12.2 remains open and is NOT resolved by this inconclusive result either way.
 
-**6.9.4 A real, live finding while investigating 6.9.3: the new rank-identity-collision self-check (added in
+**6.12.4 A real, live finding while investigating 6.12.3: the new rank-identity-collision self-check (added in
 §6.8.3/6.8) fired during `moe_delayfault1`'s own job** (`[RANK-COLLISION-WARNING] host=worker-4 slurm_job_id=91299
 gpu_slot=6/7 claimed simultaneously by 5-6 different member identifiers`). Investigated: of the 5 flagged member
 PIDs for `gpu_slot=6`, only 1 had a corresponding live Inspector dump file from this job's own actual run window
@@ -3324,13 +3324,13 @@ genuine collision without the kind of manual PID/dump-file cross-check done here
 cause is the already out-of-scope aggregator bug); flagged for whoever eventually fixes §6.8.6.1, and for anyone
 improving this warning's own text to name this known confound explicitly.
 
-### 6.10 Deep pipeline-parallel shape (2026-11): a real, confirmed rank_launch.sh bug and a real, unresolved detection gap
+### 6.13 Deep pipeline-parallel shape (2026-11): a real, confirmed rank_launch.sh bug and a real, unresolved detection gap
 
 Scope: TP=2/PP=8/DP=3 (48 GPUs/6 nodes) -- deeper pipeline than any previously tested shape in this project (prior
 deepest: PP=4). Chosen to directly test whether `_check_mean_tiered`'s claimed N-tier generality holds at a PP depth
 never exercised before, per this task's own Step 4 charter.
 
-**6.10.1 Real bug found and fixed: `pinning/rank_launch.sh`'s `unpinned()` fallback crashed the job instead of
+**6.13.1 Real bug found and fixed: `pinning/rank_launch.sh`'s `unpinned()` fallback crashed the job instead of
 degrading gracefully.** First smoke attempt failed outright (`TORCHRUN_EXIT: 1` on all 6 workers,
 `exec: rank_setup failed: not found`) due to a real, reproducible CPU-core contention condition on this shape
 (`rank_setup: NUMA node 0 needs 8 physical cores for pinning but only 7 available` -- plausibly accumulated
@@ -3344,7 +3344,7 @@ sites use that saved array. Confirmed fixed live: the identical contention condi
 genuine unpinned fallback (`TORCHRUN_EXIT: 0` on all 6 workers) instead of a hard crash. Launcher/pinning-layer fix
 only; no core detection logic touched.
 
-**6.10.2 Tier structure: no incident beyond `role_n=8`/`role_n=48` observed; TP groups structurally too small to
+**6.13.2 Tier structure: no incident beyond `role_n=8`/`role_n=48` observed; TP groups structurally too small to
 evaluate.** With TP collapsed to 2 (from this shape's own TP=2 choice), every TP communicator has exactly 2
 members -- below `_check_mean_tiered`'s own hard-coded `len(all_timing) < 3: return` floor (needs >=3 ranks for
 "meaningful tier detection", same code path already governing the known 2-member embedding-tie gap in 6.6).
@@ -3353,19 +3353,19 @@ receiver) -- not new to this shape, but newly confirmed to compound with TP=2's 
 AND the embedding-tie group are all below the 3-member floor, leaving only the DP=3 AllReduce groups structurally
 eligible to ever fire this check.
 
-**6.10.3 A real, unresolved detection gap: the 100ms/rank-8 fault was genuinely, strongly injected and measurable
+**6.13.3 A real, unresolved detection gap: the 100ms/rank-8 fault was genuinely, strongly injected and measurable
 (ground truth), but produced no attributed `mean_tiered` incident.** Healthy run (`deeppp_healthy1`): ~78ms/iter.
 Fault run (`deeppp_fault1`, identical 100ms sleep on rank 8, same methodology as every other fault trial in this
 project): ~465ms/iter -- a ~387ms/iter increase, nearly identical in magnitude to the production shape's own
 confirmed fault signature (78->469ms, 6.6/6.7). The fault is real and dominant. No `[STRAGGLER-INCIDENT]
 stat=mean_tiered` with a `job_start` matching this run's actual window (`2026-11-07T06:00:46Z`) appears anywhere in
-the engine's log. Most likely explanation, consistent with 6.10.2: if rank 8's fault-induced delay propagates
+the engine's log. Most likely explanation, consistent with 6.13.2: if rank 8's fault-induced delay propagates
 primarily through this shape's TP=2 and/or PP Send/Recv paths -- both structurally below the 3-member floor -- the
 only structurally-eligible comparison (DP=3 AllReduce) may not carry a strong enough or correctly-bucketed signal
 to trigger on its own. This is a REAL, CONFIRMED, UNRESOLVED gap at this shape: not proven root-caused to the
 3-member floor specifically (not exhaustively traced to every communicator this run created), but strongly
 consistent with it and not explained by any other factor checked (fault genuinely applied; pinning degraded
-gracefully after the 6.10.1 fix, not blocking the run; no CHECK-FAILED/Traceback in the engine log for this
+gracefully after the 6.13.1 fix, not blocking the run; no CHECK-FAILED/Traceback in the engine log for this
 window). Flagged as the headline technical finding of this task's shape-coverage work: `_check_mean_tiered`'s
 N-tier generality does NOT yet have confirmed coverage at a shape where TP and PP both collapse below its 3-member
 floor simultaneously -- a real, named limitation for POC planning, not a formality.
@@ -3374,3 +3374,56 @@ floor simultaneously -- a real, named limitation for POC planning, not a formali
 "$(pwd)/var/dump" [100 8]` (last two positional args = sleep-ms/target-rank for the fault arm). Runs:
 `var/runs/deeppp_smoke` (pre-fix failure, preserved), `var/runs/deeppp_smoke3` (post-fix success),
 `var/runs/deeppp_healthy1`, `var/runs/deeppp_fault1`.
+
+### 6.14 FSDP validation, a real launcher gap fixed, and a session-state caveat that applies to 6.12/6.13 too
+
+**6.14.1 Real gap found and fixed: FSDP's launcher had no fault-injection path at all.** `train_fsdp.py` already has
+full `STRAGGLER_SLEEP_MS`/`STRAGGLER_TARGET_RANKS` support (same convention as every other workload in this
+project), but `workloads/fsdp/run_fsdp_nanogpt.sh`'s `srun` call had no `--export=` clause whatsoever -- unlike
+every other launcher here, these vars could never actually reach the job. Fixed by adding them as optional
+positional args 5/6, exported explicitly (`--export=ALL,STRAGGLER_SLEEP_MS=...,STRAGGLER_TARGET_RANKS=...`), same
+pattern as `run_megatron_tp4pp4dp3.sh`. Launcher-layer only.
+
+**6.14.2 Smoke/healthy/fault trials: all ran and exited cleanly** (`fsdp_smoke` 30 iters, `fsdp_healthy1` and
+`fsdp_fault1` 150 iters each, 100ms/rank-8 fault, `TORCHRUN_EXIT: 0` on all 6 workers each time). This nanoGPT-based
+FSDP script does not log per-iteration timing the way the Megatron/MoE scripts do, so no direct ground-truth timing
+comparison (healthy vs. fault) was available from the training log itself for this workload -- a real instrumentation
+gap in `train_fsdp.py` relative to the other workloads, noted but not fixed (out of scope: that script is this
+project's nanoGPT-based training code, not launcher/detection logic).
+
+**6.14.3 No attributed incident observed -- and this now reads as a session-state caveat, not three independent
+per-shape failures.** Like 6.12.3 (MoE) and 6.13.3 (deep PP), no `[STRAGGLER-INCIDENT] stat=mean_tiered` with a
+`job_start` matching this run's window was found. Unlike deep PP, FSDP has no TP/PP groups at all -- its sharding
+communicators (AllGather/ReduceScatter at the DP level) are not structurally below the 3-member floor the way
+6.10's TP=2/PP=8 groups are, so that specific explanation does NOT apply here. The SAME non-firing pattern
+appearing across three structurally different shapes (MoE's expert-routing, deep-PP's tier-collapse, and FSDP's
+flat sharding) is itself informative: it is more consistent with a session-wide confound than three independent,
+shape-specific detection failures. Supporting evidence: the rank-identity-collision self-check's own warnings
+(6.12.4) have visibly WORSENED over this same window -- the most recent poll shows 13 distinct member identifiers
+accumulated for a single `(host, gpu_slot)` pair with `slurm_job_id=None` (no job even active), versus 5-6 when
+first observed a few runs earlier -- confirming the already-documented aggregator job-ID staleness bug (6.8.6.1)
+accumulates monotonically and never self-clears across this one very long-lived engine/VM instance (49+ minutes
+uptime, dozens of jobs deep by this point in the session). No `CHECK-FAILED`/`Traceback`/`KeyError`/`NameError`
+appeared in the engine log at any point in this window, so the check is not crashing -- it is specifically not
+attributing incidents to these later runs, and the increasingly polluted shared state is the most plausible
+explanation found, though not proven to be the SOLE cause (6.10's 3-member-floor fact remains independently true
+and likely still a real, additional, shape-specific limiting factor for that shape specifically).
+
+**Recommendation, not fixed in this pass:** re-verify MoE, deep-PP, and FSDP fault-trial detection against a FRESH
+alert_engine.py/VictoriaMetrics instance (or a dedicated job-ID-scoped VM datasource) before treating any of
+6.12.3/6.13.3/6.14.3's "no incident observed" results as a confirmed per-shape detection failure -- the honest
+finding from this round is that this session's own accumulated state makes that distinction currently
+unverifiable, not that these shapes are confirmed broken.
+
+**Reproducibility:** `bash workloads/fsdp/run_fsdp_nanogpt.sh 150 <outdir> <port> "$(pwd)/var/dump" [100 8]`. Runs:
+`var/runs/fsdp_smoke`, `var/runs/fsdp_healthy1`, `var/runs/fsdp_fault1`.
+
+### 6.15 Storage migration (infrastructure housekeeping, not a detection finding)
+
+This repo's `var/dump` and `var/runs` were moved from `/home` (91G total, repeatedly hit 100% full this session) to
+`/mnt/asabry-scratch/falcon_detection_pipeline/var/{dump,runs}` (10T filesystem, genuinely shared across the login
+node and all 6 workers, confirmed via a live job writing there and `/home` usage staying flat). Both paths replaced
+with symlinks at their original relative locations, so no script required any changes. One live aggregator
+checkpoint file (`var/dump/worker-3/.aggregator_offsets_checkpoint.json`) was being actively rewritten during the
+move and was left in place rather than forced; it is pure resume-bookkeeping, not data, and the standing aggregator
+process will recreate it at the new path on its next restart.

@@ -4,6 +4,16 @@ STEPS=$1
 OUTDIR=$2
 PORT=$3
 DUMPDIR_BASE=$4
+# Real gap found live (this session): unlike every other launcher in this
+# project, this one had no --export= clause at all, so train_fsdp.py's own
+# already-wired STRAGGLER_SLEEP_MS/STRAGGLER_TARGET_RANKS fault-injection
+# support (see train_fsdp.py) could never actually be exercised through this
+# launcher -- bare srun/--export=ALL does not reliably forward ad-hoc
+# exported vars on this cluster, confirmed repeatedly elsewhere in this
+# project's history, so every new var must be named explicitly. Added as
+# optional positional args, same convention as run_megatron_tp4pp4dp3.sh.
+SLEEP_MS=${5:-0}
+TARGET_RANKS=${6:-}
 IMAGE="nvcr.io#nvidia/pytorch:25.01-py3"
 MOUNTS="/usr/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu,/usr/lib64:/usr/lib64,/root:/root"
 
@@ -48,6 +58,7 @@ mkdir -p "$OUTDIR"
 srun --nodes="$NUM_NODES" --ntasks="$NUM_NODES" --ntasks-per-node=1 --gpus-per-node="$GPUS_PER_NODE" -w "$NODE_LIST" \
   --container-image="$IMAGE" \
   --container-mounts="$MOUNTS" \
+  --export=ALL,STRAGGLER_SLEEP_MS="$SLEEP_MS",STRAGGLER_TARGET_RANKS="$TARGET_RANKS" \
   bash -c 'DD="'"$DUMPDIR_BASE"'/$(hostname)"; bash "'"$SCRIPT_DIR"'/train_node_fsdp.sh" '"$STEPS $OUTDIR $PORT"' $DD' \
   > "$OUTDIR/full_output.log" 2>&1 &
 echo $! > "$OUTDIR/srun_driver.pid"
