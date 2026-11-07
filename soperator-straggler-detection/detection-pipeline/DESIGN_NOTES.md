@@ -4000,10 +4000,17 @@ with FSDP's already-established, separately-documented non-firing behavior (6.20
 a live smoke-level regression check (several short, fresh trials), not a full statistical re-validation -- the
 diff-review is the actual, exhaustive proof that detection/attribution logic is unchanged; the live runs confirm
 no crash, no exit-code regression, and the same kinds of real findings still being produced under the new code.
-nanoGPT-DDP (`run_straggler_nanogpt.sh`) was not run this round given time budget -- not fixed, not run, flagged
-as the one regression leg from the task's named three (dense Megatron, FSDP, nanoGPT DDP) left untested; the diff
--review still applies to it identically (same shared `alert_engine.py` code path, no workload-specific branching
-in any of this round's changes).
+**nanoGPT-DDP (`run_straggler_nanogpt.sh`), the third of the task's named three shapes, was attempted and found
+broken** (unrelated to this task's `alert_engine.py` changes): every one of 6 workers failed immediately
+(`TORCHRUN_EXIT: 1`, `train_node_straggler.sh` unable to create `train_worker-N.log`, "No such file or directory")
+-- this launcher never received the OUTDIR/DUMPDIR_BASE real-target mount fix that Megatron, FSDP, and (separately,
+6.19) the three MoE fault launchers already got after the storage migration to `/mnt/asabry-scratch`; `var/runs`/
+`var/dump` are symlinks outside `PKG_ROOT`, invisible to the container without it. A fourth, previously-undiscovered
+instance of the same bug class. Fixed with the identical `readlink -f` pattern already used in the other launchers
+(commit `979d2be5`) and confirmed live with a fresh trial (`logfix3_nanogpt2`, 80 iters,
+`STRAGGLER_SLEEP_MS=100 STRAGGLER_TARGET_RANKS=1`): all 6 workers `TORCHRUN_EXIT: 0`. Launcher-layer only, no
+`alert_engine.py` involvement -- the diff-review above already covers it identically regardless (same shared code
+path, no workload-specific branching in any of this round's changes).
 
 **6.25.7 Final sample set prepared for the third, genuinely independent review** (handed to the parent/coordinator
 session, which performs the actual review -- forked agents cannot spawn further sub-agents in this environment,
