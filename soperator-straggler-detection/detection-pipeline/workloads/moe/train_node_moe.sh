@@ -27,13 +27,18 @@ mkdir -p "$DUMPDIR" "$OUTDIR"
 # ($PKG_ROOT/inspector-plugin/libnccl-profiler-inspector.so, confirmed
 # live by install.sh's own "Inspector plugin built: ..." message),
 # regardless of where this package was actually cloned.
-_PKG_ROOT_FOR_PLUGIN_FIX="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-export NCCL_PROFILER_PLUGIN="$_PKG_ROOT_FOR_PLUGIN_FIX/inspector-plugin/libnccl-profiler-inspector.so"
-export NCCL_INSPECTOR_ENABLE=1
-export NCCL_INSPECTOR_DUMP_VERBOSE="${NCCL_INSPECTOR_DUMP_VERBOSE:-0}"
-export NCCL_INSPECTOR_DUMP_THREAD_INTERVAL_MICROSECONDS=500
-export NCCL_INSPECTOR_DUMP_DIR=$DUMPDIR
-export NCCL_INSPECTOR_PROM_DUMP=0
+# INSPECTOR=off (isolation-test control arm, added this round): no profiler
+# plugin loaded at all. Default on -- same convention as
+# run_megatron_tp4pp4dp3.sh / run_fsdp_nanogpt.sh's own INSPECTOR gating.
+if [ "${INSPECTOR:-on}" = "on" ]; then
+  _PKG_ROOT_FOR_PLUGIN_FIX="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+  export NCCL_PROFILER_PLUGIN="$_PKG_ROOT_FOR_PLUGIN_FIX/inspector-plugin/libnccl-profiler-inspector.so"
+  export NCCL_INSPECTOR_ENABLE=1
+  export NCCL_INSPECTOR_DUMP_VERBOSE="${NCCL_INSPECTOR_DUMP_VERBOSE:-0}"
+  export NCCL_INSPECTOR_DUMP_THREAD_INTERVAL_MICROSECONDS=500
+  export NCCL_INSPECTOR_DUMP_DIR=$DUMPDIR
+  export NCCL_INSPECTOR_PROM_DUMP=0
+fi
 
 # P23 -- no CUDA_VISIBLE_DEVICES restriction, same established precedent
 # as every prior real-training test in this project. GPU3 participates

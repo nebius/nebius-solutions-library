@@ -44,8 +44,13 @@ for _p in "$_PKG_ROOT_FOR_MOUNT_FIX" "$_NCCL_SRC_DIR_FOR_MOUNT_FIX" "$_OUTDIR_RE
   esac
 done
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# INSPECTOR isolation-test control arm (added this round): named explicitly
+# in --export= below, since this cluster does not reliably forward ad-hoc
+# exported vars through bare srun (confirmed repeatedly elsewhere in this
+# project's history).
+INSPECTOR="${INSPECTOR:-on}"
 
-echo "### moe-nanogpt steps=$STEPS outdir=$OUTDIR port=$PORT"
+echo "### moe-nanogpt steps=$STEPS outdir=$OUTDIR port=$PORT inspector=$INSPECTOR"
 echo "--- queue check ---"
 if [ -n "$(squeue -u soperatorchecks -h)" ]; then echo "ABORT: soperatorchecks job active"; exit 1; fi
 if [ -n "$(squeue -u "$USER" -h)" ]; then echo "ABORT: existing job for $USER already queued/running"; exit 1; fi
@@ -55,6 +60,7 @@ mkdir -p "$OUTDIR"
 srun --nodes="$NUM_NODES" --ntasks="$NUM_NODES" --ntasks-per-node=1 --gpus-per-node="$GPUS_PER_NODE" -w "$NODE_LIST" \
   --container-image="$IMAGE" \
   --container-mounts="$MOUNTS" \
+  --export=ALL,INSPECTOR="$INSPECTOR" \
   bash -c 'DD="'"$DUMPDIR_BASE"'/$(hostname)"; bash "'"$SCRIPT_DIR"'/train_node_moe.sh" '"$STEPS $OUTDIR $PORT"' $DD' \
   > "$OUTDIR/full_output.log" 2>&1 &
 echo $! > "$OUTDIR/srun_driver.pid"

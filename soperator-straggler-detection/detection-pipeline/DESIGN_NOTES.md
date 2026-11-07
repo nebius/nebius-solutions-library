@@ -3635,3 +3635,92 @@ owns FSDP validation next, separate from the (now-ruled-out) confound theory.
 `curl "http://login-0:8428/api/v1/label/cluster/values"`, `curl "http://login-0:8428/api/v1/label/hostname/values"`.
 Blocked reset attempt: `curl -X POST "http://login-0:8428/api/v1/admin/tsdb/delete_series?match[]={__name__=~\"agg_.*\"}"`.
 Run: `var/runs/fsdp_reverify1/` (`full_output.log`, `train_worker-*.log`).
+
+### 6.21 The TP/PP/DP group-size floor, precisely characterized and unified across Slurm and K8s
+
+**6.21.1 The mechanism (one limitation, two platforms, already both documented separately -- now unified).**
+`_check_mean_tiered`'s `Guard 2` requires `len(reference_tier) >= 2` after removing a candidate straggler (so >=3
+members total; `alert_engine.py:5518-5521`, confirmed directly in code, also documented at DESIGN_NOTES.md lines
+3196-3197 for K8s and 3347-3349/3353 for Slurm deep-PP). This is ONE mechanism, not two coincidentally-similar ones:
+the same `len(all_timing) < 3: return` early-exit (this file, `_check_mean_tiered`) fires identically regardless of
+which platform or launcher produced the comm.
+
+**6.21.2 Precise, usable rule (not a vague caveat) -- derived from this project's own real data on both platforms:**
+
+- **TP (tensor-parallel) groups**: size = the TP degree directly. Detectable once **TP >= 3**.
+- **DP (data-parallel) groups** (AllReduce/ReduceScatter/AllGather at the DP level): size = the DP degree directly.
+  Detectable once **DP >= 3**.
+- **PP (pipeline-parallel) Send/Recv**: this is point-to-point communication between exactly two adjacent pipeline
+  stages, by construction -- **always exactly 2 members, for ANY PP degree**. This is categorically different from
+  the TP/DP cases: there is no "PP >= 3" that fixes it, because increasing PP depth does not change the fact that
+  each individual Send/Recv pair still involves only the sender and receiver. PP's pairwise communication pattern is
+  structurally excluded from this tiered mechanism at every depth, not just small ones.
+
+**Real cross-platform evidence table** (K8s data from §6.11/lines 3228-3230, Slurm data from §6.13):
+
+| Platform | Shape | Group checked | role_n | Guard 2 result |
+|---|---|---|---|---|
+| K8s | TP=2/PP=2/DP=4 (2 nodes/16 GPU) | TP comm | 2 | FAILS |
+| K8s | TP=4/PP=2/DP=8 (8 nodes/64 GPU) | DP ReduceScatter | 8 | PASSES |
+| Slurm | TP=2/PP=8/DP=3 (6 nodes/48 GPU, this round's deep-PP) | TP comm, PP Send/Recv | 2 | FAILS (both) |
+| Slurm | TP=4/PP=4/DP=3 (6 nodes/48 GPU, this project's main validated production shape) | TP comm | 4 | PASSES |
+| Slurm | TP=4/PP=4/DP=3 | DP AllReduce | 3 | PASSES (right at the floor) |
+
+**6.21.3 Why the project's own production shape (TP4/PP4/DP3) has always worked.** This is not a coincidence: TP=4
+and DP=3 both clear the floor independently, so real fault detection throughout this project's many Megatron
+validation rounds (rank 8, rank 0, rank 20, etc., all correctly attributed) has always gone through the TP or DP
+group, never through PP's Send/Recv path -- which, per 6.21.2, structurally never could have worked regardless of
+PP depth. **Practical, precise guidance for anyone choosing a shape to validate or deploy against**: ensure TP >= 3
+or DP >= 3 for whichever communicator actually carries the gradient-sync collective you need tiered-check coverage
+on (which group that is depends on the parallelism configuration -- confirmed in this project's own K8s data,
+6.11.4, where the relevant gradient-AllReduce group was the TP comm at TP=2/PP=2/DP=4 but the DP ReduceScatter at
+TP=4/PP=2/DP=8); do not rely on PP depth to achieve coverage, since PP'''s own Send/Recv communication never clears
+the floor at any depth. A shape whose actually-exercised gradient-sync group stays below 3 members has a confirmed,
+structural, disclosed detection gap on that group -- raising TP or DP alone does not help unless it is the dimension
+that group's size actually tracks.
+
+**Reproducibility:** mechanism trace: `alert_engine.py:5518-5521` (`_check_mean_tiered` Guard 2) and
+`alert_engine.py` lines ~5568-5572 (`len(all_timing) < 3` early exit). Cross-platform data: DESIGN_NOTES.md §6.11
+(K8s), §6.13 (Slurm deep-PP), §6.6 (Slurm production shape).
+
+### 6.22 STANDALONE, ESCALATION-READY FINDING: MoE 6-node/48-GPU collective-participation hang -- infrastructure issue, not a detector issue
+
+**For whoever owns the MoE shape/infrastructure, independent of anything else in this document.**
+
+**What happens:** on this project's 6-node/48-GPU `workloads/moe/run_moe_nanogpt.sh` shape, a training job
+occasionally (see rate below) freezes: most nodes stop making collective progress entirely while at least one node
+keeps running far ahead, with no OOM, no CUDA/NCCL error, and (on 2 of the 2 nodes that self-exited at all) zero
+traceback. First observed and detailed in §6.12.1 (`moe_healthy3`).
+
+**Refined hang-rate estimate (6 real healthy trials now, not 3):** `moe_healthy1`, `moe_healthy2` (§6.12.1, clean),
+`moe_healthy3` (§6.12.1, HUNG), `moe_healthy4`, `moe_healthy5` (this round, clean) -- **1 hang in 5 trials with the
+detector active**. (A 6th ON trial was not run this round given cluster-time budget; 5 is already double the
+original sample.) Consistent with, not contradicting, the original "1-in-3" estimate -- both are compatible with a
+true rate somewhere in the 10-35% range on a sample this small; more trials would narrow it further but were not run
+given time budget.
+
+**Critical isolation check: does this happen with the straggler detector completely disabled?** Added `INSPECTOR=off`
+support to `workloads/moe/train_node_moe.sh`/`run_moe_nanogpt.sh` (previously hardcoded `NCCL_INSPECTOR_ENABLE=1`
+with no off-switch -- an additive, launcher-only gate, same convention already used in the Megatron/FSDP launchers;
+no detection logic touched). Ran 2 trials with `INSPECTOR=off` (no profiler plugin loaded, no Inspector dump thread,
+no aggregator watching this job at all): **both completed cleanly, no hang.**
+
+**Honest limitation on this isolation result: 2 clean trials do not rule out detector involvement.** With only a
+~1-in-5 observed hang rate even WITH the detector active, 2 clean trials with it disabled is not yet strong enough
+evidence to confidently say the detector plays no role -- a true ~20% hang rate would be expected to show 0 hangs in
+2 trials roughly 64% of the time by chance alone. What this DOES support, weakly: there is no evidence so far that
+disabling the detector eliminates the hang, which is at least consistent with (not proof of) this being a pure
+MoE/infrastructure issue rather than something the detector's own instrumentation (LD_PRELOAD interposition, NCCL
+profiler plugin, concurrent dump-thread activity) is contributing to or triggering. **More trials with the detector
+disabled, ideally matching or exceeding the ON-arm's 5-trial sample, are needed before this isolation question is
+actually closed** -- flagged here as the precise next step, not claimed as resolved.
+
+**What is NOT in question:** no fault was injected in any of these trials; `_check_mean_tiered` and the rest of the
+detection pipeline were never exercised against this incident in any way that could explain or be blamed for it.
+This is purely about whether running the detector's instrumentation alongside MoE training changes MoE's own
+collective-progress stability -- a question for whoever owns MoE infrastructure, not a detection-logic question.
+
+**Reproducibility:** `bash workloads/moe/run_moe_nanogpt.sh 150 <outdir> <port> "$(pwd)/var/dump"` (detector on,
+default) or `INSPECTOR=off bash workloads/moe/run_moe_nanogpt.sh ...` (detector off). Runs: `var/runs/moe_healthy4`,
+`var/runs/moe_healthy5` (both clean, detector on), `var/runs/moe_noinsp1`, `var/runs/moe_noinsp2` (both clean,
+detector off). Hung reference run (do not overwrite): `var/runs/moe_healthy3`.
