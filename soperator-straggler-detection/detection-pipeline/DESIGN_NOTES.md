@@ -3566,3 +3566,72 @@ does the real fresh-eyes pass.
   environment's permission classifier blocks process-kill regardless of requester); flagged here rather than hidden,
   low risk (duplicate detections/log lines, not corruption), but should be cleaned up by whoever has the right
   permission.
+
+### 6.20 FSDP reset attempt and clean re-verification (2026-11): the session-state-confound theory does NOT hold up, and a different, FSDP-specific question is now open
+
+**6.20.1 Step 0 done.** Killed the duplicate `alert_engine.py` (PID 1813809). Confirmed exactly one instance remains
+for this repo (PID 1586359, running since 05:30). A separate, unrelated instance (PID 1586291, against the older
+`/home/asabry/nebius-solutions-library` clone) was left alone -- out of scope.
+
+**6.20.2 The planned VictoriaMetrics reset could not be performed.** `curl -X POST
+.../api/v1/admin/tsdb/delete_series?match[]=...` was denied outright by this environment's own permission classifier
+(`[Cloud Storage Mass Delete]`), the same category of block already hit on `scancel`/`sudo`/`kill` elsewhere this
+session. Confirmed, before being blocked, that a reset would have been reasonably safe to attempt: this
+VictoriaMetrics instance (`http://login-0:8428`, v2.24.0) has a single `cluster="soperator"` label value and
+`hostname` values limited to `worker-0`..`worker-5` -- no evidence of shared Kubernetes-side data, and `squeue`
+(all users) was empty at the time, so no live job anywhere depended on fresh pushes. Confirmed the real scale of the
+problem instead: `agg_member_gpu_slot_index` alone holds ~1,097 live series with every `(hostname, gpu_slot)` pair
+under `slurm_job_id="None"` already carrying 20-26 distinct stale `member` PIDs each, accumulated across this
+session's many jobs -- and because the aggregator's `refresh_job_id()` bug (6.8.6.1) keeps RE-PUSHING this
+accumulated junk with a fresh timestamp every poll cycle, a time-range-scoped delete would not actually have helped;
+only a real series delete (blocked) or a full instance wipe (also blocked) would.
+
+**6.20.3 Pivoted to direct code-level diagnosis, since the reset was blocked -- and this overturns the prior round's
+leading theory.** `_check_mean_tiered`'s own data query is:
+`agg_mean_exec_time_us{hostname="...",comm="{comm}",bucket="{bucket}",coll="{coll}"}` -- scoped by the real
+communicator address (`comm`), which is a fresh pointer value created new by every job and essentially never
+collides across separate process runs. A different, unrelated past job's stale data literally cannot appear in this
+query (different `comm` = different series, doesn't match the label selector), and `_fresh()`'s 90s staleness window
+additionally excludes any series that stopped being actively pushed. **The session-wide-confound theory from 6.14.3
+does not hold up under this scrutiny for this specific check** -- cross-job VictoriaMetrics pollution is real (see
+6.20.2) but it affects the *rank-collision self-check* and (by the project's own design, intentionally) cross-job
+role-baseline pooling (`_member_role_baseline`, filtered by `workload_signature` match) -- it does not explain why
+`_check_mean_tiered` specifically finds nothing, because that check's query is already isolated per-job by `comm`.
+
+**6.20.4 Live re-verification, clean run, real result: still no incident, for a different, FSDP-specific reason.**
+Ran a fresh FSDP trial (`var/runs/fsdp_reverify1`, 150 iters, `STRAGGLER_SLEEP_MS=100 STRAGGLER_TARGET_RANKS=8`, all
+6 workers `TORCHRUN_EXIT: 0`). Confirmed live, directly, that this run's own data reached VictoriaMetrics correctly
+and immediately (queried `agg_mean_exec_time_us{comm="0xf2b2d95b8fd65c"}` within 1s of job completion: fresh rows,
+`bucket=142935`, `coll=AllGather`, `role_n=48` -- not below the 3-member floor). `alert_summary.log` confirmed
+processing this exact comm in real time (`ROLE-BASELINE-ALERT-UNVALIDATED` lines with `role_n=48` at the correct
+wall-clock time). **No `[STRAGGLER-INCIDENT] stat=mean_tiered` fired for this comm** -- the only `mean_tiered`
+incident anywhere in the log is a stale one from an earlier (03:08) storage-fault run, unrelated.
+
+Checked whether the fault itself even landed: `train_fsdp.py`'s sleep is gated on
+`STRAGGLER_IS_TARGET and STRAGGLER_SLEEP_S > 0 and STRAGGLER_PHASE == 'backward'`, and with `STRAGGLER_MODE`
+defaulting to `"constant"` (not `"file_trigger"`), `resolve_file_trigger()` returns the env-derived values unchanged
+-- so the 100ms sleep on rank 8 (`ddp_rank==8`, `STRAGGLER_TARGET_RANKS=8`) should fire on every single iteration's
+backward pass, unconditionally. But the master process's own per-50-iteration timing print (`iter 50/100/150: ...
+time 130-135ms`) shows **no visible elevation at all** despite the fault running the entire time -- flat ~130-135ms
+throughout. This is a real, concrete, FSDP-specific open question, not a confound: either FSDP's sharded
+ReduceScatter-after-backward does not create the same global, all-ranks-wait-on-the-slowest synchronization barrier
+that Megatron's AllReduce/Send-Recv collectives do (plausible -- FSDP2's `fully_shard` units may only synchronize
+within their own shard group, not necessarily across every rank every step, depending on sharding degree), or the
+specific instrumented bucket/collective this check is reading isn't the one the sleep's effect actually propagates
+through.
+
+**6.20.5 Honest verdict:** FSDP's fault detection via `_check_mean_tiered` **genuinely does not fire** for this
+fault injection method, on a confirmed-clean, confirmed-live-data run -- this is NOT explained by the previously-
+suspected session-state confound (ruled out in 6.20.3), and is NOT explained by the 3-member floor (role_n=48, well
+above it). The open, real, FSDP-specific question is whether a 100ms sleep on one rank's backward pass actually
+produces a synchronized, detectable slowdown in FSDP's communication pattern the way it reliably does in Megatron's
+-- the coarse iteration-timing evidence (6.20.4) suggests it may not, which would mean the gap is in how FSDP
+propagates a straggler's delay into measurable collective timing, not in the detection logic once a real signal
+exists. Not root-caused further within this task's scope -- flagged as the real, standalone finding for whoever
+owns FSDP validation next, separate from the (now-ruled-out) confound theory.
+
+**Reproducibility:** `bash workloads/fsdp/run_fsdp_nanogpt.sh 150 "$(pwd)/var/runs/fsdp_reverify1" 29822
+"$(pwd)/var/dump" 100 8`. VM queries: `curl "http://login-0:8428/api/v1/query?query=agg_mean_exec_time_us{comm=\"<comm>\"}"`,
+`curl "http://login-0:8428/api/v1/label/cluster/values"`, `curl "http://login-0:8428/api/v1/label/hostname/values"`.
+Blocked reset attempt: `curl -X POST "http://login-0:8428/api/v1/admin/tsdb/delete_series?match[]={__name__=~\"agg_.*\"}"`.
+Run: `var/runs/fsdp_reverify1/` (`full_output.log`, `train_worker-*.log`).
