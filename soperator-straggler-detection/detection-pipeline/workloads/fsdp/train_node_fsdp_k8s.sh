@@ -25,7 +25,13 @@ _PKG_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
 # Environment self-checks (NCCL plugin, rank uniqueness, DCGM availability)
 _CHECKS_SCRIPT="$_PKG_ROOT/k8s/startup_checks.sh"
-if [ -f "$_CHECKS_SCRIPT" ]; then source "$_CHECKS_SCRIPT"; fi
+_cw=0
+while [ $_cw -lt 60 ] && [ ! -f "$_CHECKS_SCRIPT" ]; do sleep 2; _cw=$((_cw + 2)); done
+if [ -f "$_CHECKS_SCRIPT" ]; then
+    source "$_CHECKS_SCRIPT"
+else
+    echo "[STARTUP] [WARN] startup_checks.sh not found after 60s. Skipping." >&2
+fi
 
 _LIB="$_PKG_ROOT/lib/cluster_topology_k8s.sh"
 source "$_LIB"

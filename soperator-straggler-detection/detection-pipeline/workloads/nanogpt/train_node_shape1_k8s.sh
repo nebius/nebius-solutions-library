@@ -19,9 +19,18 @@ OUTDIR=$2
 PORT=$3
 DUMPDIR=$4   # inside-pod path; shared with aggregator sidecar via EmptyDir volume
 
-# Environment self-checks (NCCL plugin, rank uniqueness, DCGM availability)
+# Environment self-checks (NCCL plugin, rank uniqueness, DCGM availability).
+# Mount-timing fix: poll up to 60s for the workspace PVC to appear. The original
+# `if [ -f ... ]; then source ...; fi` pattern silently skipped all checks if the
+# workspace wasn't mounted yet (a real timing-window race on fresh PVC mounts).
 _CHECKS_SCRIPT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/k8s/startup_checks.sh"
-if [ -f "$_CHECKS_SCRIPT" ]; then source "$_CHECKS_SCRIPT"; fi
+_cw=0
+while [ $_cw -lt 60 ] && [ ! -f "$_CHECKS_SCRIPT" ]; do sleep 2; _cw=$((_cw + 2)); done
+if [ -f "$_CHECKS_SCRIPT" ]; then
+    source "$_CHECKS_SCRIPT"
+else
+    echo "[STARTUP] [WARN] startup_checks.sh not found after 60s (workspace PVC mount delayed?). Skipping self-checks." >&2
+fi
 
 _LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../lib/cluster_topology_k8s.sh"
 source "$_LIB"

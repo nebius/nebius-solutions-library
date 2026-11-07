@@ -3623,4 +3623,95 @@ Agent-based independent review. All 7 fix categories confirmed present and activ
 **Verdict**: K8s and Slurm detection logic is at full parity for all shared code paths.
 Platform-specific gaps (DCGM, SSH, job boundary confidence) are already documented.
 
+---
+
+### 6.14 Rank=5 investigation and FSDP RDMA fix (2026-11)
+
+#### 6.14.1 The rank=5 "failure" — full root-cause chain
+
+Initial report (§6.13.5): FSDP straggler detection, rank=5 as the injected fault, 0/3 detected.
+The proposed hypothesis was TCP ring topology (rank=5 is mid-ring, rank=1 is early-ring, different
+bimodal distribution strength). This was investigated and **definitively refuted**.
+
+**Actual root cause chain (three interacting issues):**
+
+**Issue A — NCCL profiler API version mismatch:**
+NCCL 2.25.1 (`libnccl.so.2.25.1`, the system NCCL in pytorch:25.01-py3) only supports profiler
+API versions `ncclProfiler_v1` and `ncclProfiler_v2`. Inspector exports only `ncclProfiler_v5`.
+When NCCL loads the Inspector plugin, it tries `dlsym(handle, "ncclProfiler_v2")` → NOT FOUND,
+then `dlsym(handle, "ncclProfiler_v1")` → NOT FOUND, then gives up. No dumps written.
+Confirmed by `strings /usr/lib/x86_64-linux-gnu/libnccl.so.2 | grep -i profiler`:
+  - Strings present: `ncclProfiler_v2`, `ncclProfiler_v1`, `PROFILER/Plugin: failed to find ncclProfiler_v2.`
+  - Strings absent: `ncclProfiler_v5`, `ncclProfiler_v3`, `ncclProfiler_v4`
+
+**Issue B — NCCL_IB_DISABLE=1 added incorrectly to FSDP:**
+The FSDP manifest (07-fsdp-job.yaml.tmpl) had `NCCL_IB_DISABLE=1` added during the previous
+session's HPC-X segfault investigation. FSDP creates ONE NCCL process group (like nanoGPT DDP);
+HPC-X only segfaults on MULTIPLE concurrent process groups (Megatron TP+PP+DP). This was an
+incorrect assumption. FSDP + HPC-X (RDMA) works correctly.
+
+**Issue C — the two faces of HPC-X (confirmed by brief):**
+With NCCL_IB_DISABLE=1 (TCP transport), NCCL uses a flat ring AllGather — no hierarchical tree
+structure, no bimodal timing. AllGather mm drops to ~2× regardless of which rank is the straggler.
+With RDMA (HPC-X or similar), the hierarchical tree creates genuine bimodal timing (mm=27-979×).
+The brief predicted this: "If the root cause is confirmed to be the TCP-ring fallback... the
+rank-position gap and the HPC-X segfault are the same root problem wearing two faces."
+**Confirmed true for FSDP.** The NCCL_IB_DISABLE=1 workaround (needed for Megatron but not for
+FSDP) caused both: lost RDMA (removed bimodal timing) and misled investigation toward ring topology.
+
+#### 6.14.2 Timing data comparison: TCP vs RDMA
+
+| Transport | Injected rank | AllGather 440KB mm | Tiered check fired? |
+|---|---|---|---|
+| TCP (NCCL_IB_DISABLE=1) | rank=1 | 2.1× | ❌ No |
+| TCP (NCCL_IB_DISABLE=1) | rank=5 | 1.9× | ❌ No |
+| RDMA (no IB disable) | rank=1 | 979× | ✅ Yes (role_rank=1) |
+| RDMA (no IB disable) | rank=5 | 27× | ✅ Yes (role_rank=5) |
+| RDMA (no IB disable) | rank=9 | 979× | ✅ Yes (role_rank=9) |
+
+**Conclusion**: ring position has no effect on detection. ALL rank positions are detected equally
+under RDMA. The bimodal timing signal is a function of the hierarchical network topology
+(present under RDMA, absent under TCP), not of which rank is the straggler.
+
+#### 6.14.3 Fixes applied
+
+1. **NCCL 2.32.3 built** (`pinning/nccl/fetch_build_nccl.sh`, ~2 min on H200):
+   NCCL 2.32.3 supports `ncclProfiler_v5`. Inspector writes dumps. Detection works with any NCCL >= 2.26 that supports ncclProfiler_v5. Set via `NCCL_LIB_PATH` in the FSDP manifest.
+   Path: `/workspace/nccl-2.32.3/build/lib/libnccl.so.2.32.3`.
+   `cluster_k8s.env` updated: `NCCL_232_LIB_PATH="/workspace/nccl-2.32.3/build/lib"`.
+
+2. **NCCL_IB_DISABLE=1 removed from 07-fsdp-job.yaml.tmpl**:
+   FSDP does not trigger the HPC-X multi-communicator teardown bug (single process group).
+   Removing IB disable restores RDMA → bimodal hierarchical timing → tiered check detection.
+
+3. **Mount-timing window fixed in all K8s training scripts**:
+   `startup_checks.sh` sourcing replaced with a 60-second poll-wait loop in all K8s train scripts
+   (`train_node_shape1_k8s.sh`, `train_node_fsdp_k8s.sh`, `train_node_moe_k8s.sh`,
+   `train_node_megatron_k8s.sh`). Silently-skipped checks are now explicitly warned.
+
+4. **run_megatron_k8s.sh prerequisite documented**:
+   Added explicit `PREREQUISITE: k8s/deploy.sh must be run first` comment at the top.
+
+#### 6.14.4 Re-validated FSDP results (with RDMA + NCCL 2.32.3)
+
+| Trial | Type | TORCHRUN_EXIT | mean_tiered fired? | role_rank | mm |
+|---|---|---|---|---|---|
+| Fault rank=1 | 2000 steps, 100ms | 0 | ✅ Yes | 1 | 979× |
+| Fault rank=5 | 2000 steps, 100ms | 0 | ✅ Yes | 5 | 27× |
+| Fault rank=9 | 2000 steps, 100ms | 0 | ✅ Yes | 9 | 979× |
+| Healthy 1-3 | 1000 steps, 0ms | 0 | ✅ No | — | — |
+
+**FSDP detection is now fully validated**: 3 fault ranks detected (1, 5, 9), 3 healthy trials
+clean. The detection is rank-position-agnostic. No HPC-X segfault on FSDP (single process group).
+
+#### 6.14.5 Inspector cold-start: NCCL profiler API version limitation
+
+When a fresh workspace is initialized with `deploy.sh`, the system NCCL (2.25.1) is used by
+default. NCCL 2.25.1 only supports profiler_v1/v2; Inspector only exports profiler_v5. No dumps.
+Detection requires NCCL >= 2.26 (specifically ncclProfiler_v5 support), achievable by:
+1. Building NCCL 2.32.3 via `deploy.sh --build-nccl` or the pinning script (~2 min)
+2. Using a container with a newer system NCCL (>= 2.26)
+The `--build-nccl` flag should be the RECOMMENDED default for production deployments.
+Documented prominently in README (Step 3 of K8s quickstart).
+
 

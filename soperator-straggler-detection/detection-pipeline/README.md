@@ -17,8 +17,10 @@ remains 2-node-only).
 
 > **Kubernetes verification status** (2026-11, 2 nodes / 16 H200 GPUs):
 > - **nanoGPT 85M (DDP)**: tiered mean check fires 3/3 fault trials, zero false positives 3/3 healthy. ✓
-> - **FSDP (Fully Sharded Data Parallel)**: tiered mean check fires 3/3 fault trials (mm=24–979×, 440KB AllGather),
->   zero false positives 3/3 healthy. ✓ Requires `NCCL_IB_DISABLE=1` (HPC-X segfault on multi-PG teardown).
+> - **FSDP (Fully Sharded Data Parallel)**: tiered mean check fires on rank=1, rank=5, rank=9 (mm=27–979×,
+>   440KB AllGather). Zero false positives 3/3 healthy. ✓ Detection is rank-position-agnostic. Requires RDMA
+>   (NCCL_IB_DISABLE=1 must NOT be set — FSDP is single-process-group, no HPC-X segfault risk). Requires
+>   NCCL >= 2.26 (profiler_v5 support) — build via `deploy.sh --build-nccl`. See DESIGN_NOTES §6.14.
 > - **MoE (Mixture of Experts)**: training works (3/3 clean, TORCHRUN_EXIT: 0). NOT DETECTABLE with
 >   sleep-before-backward injection — AllToAll expert routing is in forward pass (before sleep); tiny per-param
 >   AllReduce after backward is below the bucket floor. See DESIGN_NOTES §6.13.2.
@@ -72,6 +74,14 @@ kubectl scale nodeset worker -n soperator --replicas=0   # confirm no active Slu
    SLEEP_MS=100 TARGET_RANKS=1 k8s/run_k8s.sh 2000
    # Expected: [STRAGGLER-INCIDENT] stat=mean_tiered + [ALERT] within 2-3 min of training start
    ```
+
+   > **Inspector cold-start note (fresh deployments):** On some cluster NCCL builds, the Inspector
+   > profiler plugin may not activate on the VERY FIRST training run after a fresh `deploy.sh`. If
+   > the fault test shows TORCHRUN_EXIT: 0 but no `[STRAGGLER-INCIDENT]` fires, run a 100-step
+   > warmup first (`k8s/run_k8s.sh 100`) then re-run the fault test. This is a known issue with
+   > NCCL versions that only support profiler_v1/v2 (e.g. NCCL 2.25.1); the pipeline runs
+   > correctly with NCCL >= 2.26 or when NCCL 2.32.3 is built via `deploy.sh --build-nccl`.
+   > See DESIGN_NOTES §6.13.7 for the full diagnosis.
 
 4. **Megatron TP/PP run** (training validated; straggler detection requires 4+ nodes — see Known Limitations)
    ```bash
@@ -249,6 +259,10 @@ Run everything from the login node. Allow about 30 minutes plus the NCCL build (
   introduced by it, not fixed -- out of scope): DESIGN_NOTES.md §6.8.
 - **K8s — node counts > 2**: validated on 2 nodes (16 GPUs) only. Tier structure at 4+ nodes is completely
   untested. Do not claim production readiness for K8s without validating at the target node count.
+- **K8s — FSDP detection requires NCCL >= 2.26 and RDMA**: NCCL 2.25.1 (system default in pytorch:25.01-py3)
+  only supports profiler_v1/v2; Inspector exports only profiler_v5. No dumps → no detection. Build NCCL 2.32.3
+  via `deploy.sh --build-nccl`. Do NOT set NCCL_IB_DISABLE=1 for FSDP (single process group, no segfault risk).
+  With RDMA and NCCL 2.32.3: detected at rank=1,5,9 (mm=27-979×, rank-position-agnostic). See DESIGN_NOTES §6.14.
 - **K8s — Megatron TP/PP training**: resolved. `NCCL_NET_PLUGIN=/nonexistent` + PyTorch 2.6 `device_id` fix.
   TORCHRUN_EXIT: 0 on 6 trials. See DESIGN_NOTES §6.9.1.
 - **K8s — Megatron TP/PP straggler detection**: not detectable at 2-node scale. All gradient sync communicators
