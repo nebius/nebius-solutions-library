@@ -1831,6 +1831,21 @@ class AlertEngine:
         # text-output-only safety net this closes it with.
         self._summary_dedup_lock = threading.Lock()
         self._summary_dedup_seen = {}
+        # Log-readability fix (fourth independent review, 2026-11): a cold
+        # review of a 100-alert live burst found the [MONITOR-HEARTBEAT]
+        # line's own alerts_this_period/total_alerts internally inconsistent
+        # with the summary log a human actually reads (88 claimed vs. 69
+        # printed lines, confirmed live). Root cause: self.alerts.append()
+        # (every emit call site) happens unconditionally, BEFORE
+        # _append_alert_summary's dedup choke point decides whether to
+        # print -- so len(self.alerts) counts raw pre-dedup findings, never
+        # verifiable against what's actually in the file. This counter
+        # tracks only lines _append_alert_summary actually writes (post-
+        # dedup, excluding the heartbeat's own line), so the heartbeat's
+        # own numbers are always exactly what a human can count in the
+        # file. Text-output-only: self.alerts (the full evidence record)
+        # and total_alerts's prior meaning are untouched elsewhere.
+        self._summary_alert_lines_written = 0
         self._last_network_check_at = 0.0
         self._last_host_check_at = 0.0
         self._last_nvlink_check_at = 0.0
@@ -4411,7 +4426,7 @@ class AlertEngine:
         self._dcgm_fallback_thread = threading.Thread(target=_run, daemon=True)
         self._dcgm_fallback_thread.start()
 
-    def _append_alert_summary(self, header_line):
+    def _append_alert_summary(self, header_line, count_as_alert=True):
         """V1-beta-dashboard-followup -- a distilled, one-line-per-alert
         companion to the full evidence log (var/alert_engine_supervised.
         log, which every real alert already prints a full multi-line
@@ -4448,7 +4463,18 @@ class AlertEngine:
         self.alerts, the full evidence log, detection, attribution, or any
         persistence-tracker state -- a real, distinct finding is never
         suppressed, only an exact repeat of one already written moments
-        ago."""
+        ago.
+
+        Log-readability fix (fourth independent review, 2026-11):
+        count_as_alert=False (set only by the [MONITOR-HEARTBEAT] call
+        site) excludes the heartbeat's own line from
+        self._summary_alert_lines_written, the counter the heartbeat
+        itself reports as alerts_this_period/total_alerts -- otherwise
+        every heartbeat would count itself as an alert against its own
+        total. For every real alert call site (the default), a line that
+        reaches the actual write below increments that counter so the
+        heartbeat's numbers are always exactly what a human can count in
+        this same file, never the pre-dedup self.alerts count."""
         if not self.summary_log_path:
             return
         with self._summary_dedup_lock:
@@ -4462,6 +4488,9 @@ class AlertEngine:
             ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
             with open(self.summary_log_path, "a") as f:
                 f.write(f"{ts} {header_line}\n")
+            if count_as_alert:
+                with self._summary_dedup_lock:
+                    self._summary_alert_lines_written += 1
         except Exception as e:
             print(f"[alert-summary-write-failed] {type(e).__name__}: {e}", file=sys.stderr)
 
@@ -6366,23 +6395,34 @@ class AlertEngine:
         # ambiguous -- "nothing to report" and "this monitor silently died"
         # look identical (no lines either way). A low-frequency, clearly-
         # tagged liveness line closes that: [MONITOR-HEARTBEAT] on a fixed
-        # interval regardless of alert volume, cheap (self.alerts is just a
-        # len() check), and never confused with a real finding (distinct
-        # header, no confidence=/severity=/pattern= fields at all).
+        # interval regardless of alert volume, never confused with a real
+        # finding (distinct header, no confidence=/severity=/pattern=
+        # fields at all).
+        #
+        # Log-readability fix (fourth independent review, 2026-11): this
+        # used to read len(self.alerts) directly -- a raw, pre-dedup
+        # internal count that a cold reviewer correctly found inconsistent
+        # with what's actually printed to this same file (88 claimed vs.
+        # 69 printed lines, confirmed live in a real 100-alert burst).
+        # self._summary_alert_lines_written (see _append_alert_summary) is
+        # incremented only when a line is actually written past the dedup
+        # choke point, so these numbers are now always exactly what a
+        # human can count in this file.
         _heartbeat_interval_s = 60.0
         _last_heartbeat_ts = time.time()
-        _last_heartbeat_alert_count = len(self.alerts)
+        _last_heartbeat_alert_count = self._summary_alert_lines_written
         while forever or time.time() < t_end:
             self.poll_once()
             now = time.time()
             if now - _last_heartbeat_ts >= _heartbeat_interval_s:
-                _alerts_this_period = len(self.alerts) - _last_heartbeat_alert_count
+                _total_written = self._summary_alert_lines_written
+                _alerts_this_period = _total_written - _last_heartbeat_alert_count
                 hb = (f"[MONITOR-HEARTBEAT] alive=true alerts_this_period={_alerts_this_period} "
-                      f"total_alerts={len(self.alerts)}")
+                      f"total_alerts={_total_written}")
                 print(hb, flush=True)
-                self._append_alert_summary(hb)
+                self._append_alert_summary(hb, count_as_alert=False)
                 _last_heartbeat_ts = now
-                _last_heartbeat_alert_count = len(self.alerts)
+                _last_heartbeat_alert_count = self._summary_alert_lines_written
             time.sleep(poll_interval)
 
 

@@ -4018,3 +4018,81 @@ confirmed repeatedly this project): `burst_sample_postfix3.log` (86 lines, the 9
 6.25.5, zero duplicates), `isolated_sample_postfix3.log` (19 lines, the 7-alert genuinely isolated trial, all
 `ISOLATED`), `healthy_nofindings_sample_postfix3.log` (10 lines, pure heartbeats + the now-non-contradictory
 nvlink background line, zero rank-scoped alerts) -- all freshly captured post-all-three-fixes, UNedited, real.
+
+### 6.26 The third independent review: a real improvement, a self-inflicted methodology flaw caught and corrected, a genuine new counter bug found and fixed, and the honest final answer on "would an on-call engineer trust this"
+
+**6.26.1 First attempt at the third review used a methodology flaw (parent/coordinator's own error, not a fork's)
+that produced a false finding.** To keep the review prompt a readable length, the coordinator session condensed
+`burst_sample_postfix3.log`'s middle ~60 lines with a bracketed ellipsis summary comment before handing it to a
+fresh reviewer -- a real violation of this project's own "real, unedited excerpts" standard, since that comment is
+not a genuine log line. The condensed version also happened to drop the mid-stream `[MONITOR-HEARTBEAT]
+alerts_this_period=88 total_alerts=90` line. That reviewer concluded Sample B was unambiguously page-worthy (using
+the `burst=` field and the `total_alerts` trend) but flagged what looked like a heartbeat math contradiction
+(`total_alerts` jumping from 2 to 100 while `alerts_this_period=10`) -- an artifact of the coordinator's own
+omission, not a real inconsistency: confirmed directly (`2 -> +88 -> 90 -> +10 -> 100`, fully consistent) once the
+dropped line was accounted for. This result was discarded and not used for any conclusion below.
+
+**6.26.2 Second attempt, the real third review: the full, complete, unedited 86-line `burst_sample_postfix3.log`
+handed to a fresh reviewer with zero summarization.** This is the valid, citable result. Findings:
+- Correctly read the file as a synchronized stall/wait burst across all 6 nodes, found the `gpu_slot=7`-across-
+  every-node pattern in the `role_n=48` world comm by manually computing `role_rank mod 8` (not stated in-line --
+  noted as something it had to infer).
+- Found a REAL counting inconsistency, not a false one this time: `alerts_this_period=88` at the 18:05:21 heartbeat
+  reconciles arithmetically against `total_alerts` (`2+88=90`) but does **not** reconcile against the number of
+  alert lines actually printed between the two heartbeats -- it counted only 69 printed lines, not 88. Independently
+  confirmed by the coordinator directly against the raw file (`awk 'NR>=6 && NR<=74' | grep -c ALERT` = 69, exactly
+  matching the reviewer's count) -- a genuine, reproducible 19-line gap between what the heartbeat claims and what a
+  human can verify by reading the file.
+- **Bottom line, the actual bar this whole task was scored against: "No [I would not page]... Nothing here exceeds
+  LOG-ONLY/PROBABLE... I would not wake anyone off this alone."** Reasoning given: every one of the ~98 alert lines
+  carries `confidence=PROBABLE severity=LOG-ONLY` with no escalation anywhere in the file, the real quantified error
+  signal present (`errors_delta=0`) reads as zero, and the alert tag names themselves (`UNVALIDATED`,
+  `WAIT-INDUCED`) read as the tool self-disclaiming confidence. It did treat the `gpu_slot=7` pattern and the
+  `burst=` volume trend as worth a non-urgent daytime look -- useful triage signal, just not page-worthy on its own.
+
+**6.26.3 Root cause of the real counting gap, found and fixed (presentation-layer only).**
+`_append_alert_summary` (the final dedup choke point from 6.25.4/6.25.5) legitimately suppresses writing a line
+to `var/alert_summary.log` when it is a near-duplicate of one already written within `_SUMMARY_DEDUP_WINDOW_S`
+seconds -- by design, and correctly so (that is what closed the real duplicate-line bug). But
+`self.alerts.append()` happens unconditionally at every one of the file's 9 emit call sites, *before* that dedup
+check runs -- so `total_alerts=len(self.alerts)` was always counting raw, pre-dedup internal findings, a number
+that can never be verified against what a human actually sees printed. This was never a detection or attribution
+bug (confirmed: `_append_alert_summary`'s own docstring already states it "never touches self.alerts... a real,
+distinct finding is never suppressed, only an exact repeat"), but it is a real readability bug in the heartbeat's
+own self-reported numbers. Fixed by adding `self._summary_alert_lines_written`, a counter incremented only when
+`_append_alert_summary` actually writes a line (i.e. post-dedup), with the `[MONITOR-HEARTBEAT]` call site itself
+passing `count_as_alert=False` so it never counts its own line. The heartbeat's `alerts_this_period=`/
+`total_alerts=` now read directly off this counter instead of `len(self.alerts)` -- always exactly what's countable
+in the file (`alerting/alert_engine.py`: `__init__` new counter, `_append_alert_summary` signature/increment,
+`run()`'s heartbeat block). No other call site's behavior changes (all default to `count_as_alert=True`). Verified
+by direct code read of all 13 `_append_alert_summary` call sites plus a full-module `ast.parse` syntax check; not
+yet re-run live end-to-end (see 6.26.5).
+
+**6.26.4 The honest, final answer: the core "would you page" bar is not met, and the reason is now precisely
+understood -- a previously-established, data-driven design decision, not a presentation oversight.**
+`severity_for_tier` (`alerting/alert_engine.py:1447`) deliberately gates `severity=PAGE` to `CONFIRMED` tier only:
+"PROBABLE/UNCONFIRMED carry the run's entire measured false-positive rate (22-25/hour)." This is the real reason
+`severity=` never escalates even for a 98-alert, 6-node burst -- and it is correct, validated project policy, not
+a bug: a burst this size is also exactly consistent with a benign, synchronized checkpoint/restart pause (the very
+alternative the round-2 reviewer itself raised unprompted), and no false-positive-rate data exists in this project
+for "is a volume/burst threshold a reliable proxy for a real vs. benign stall" the way it does for the
+CONFIRMED/PROBABLE split. Making `severity=` escalate on burst volume alone, without that validation, would
+re-introduce exactly the false-positive-prone paging the existing CONFIRMED-only policy was built to prevent --
+this is real detection/alerting-policy work requiring new validation data, not a safe presentation-layer fix, and
+is explicitly out of this task's scope ("Do NOT modify... _check_mean_tiered's underlying detection/attribution
+logic"). **Escalating this plainly, per this task's own instruction, rather than rounding up a real, measurable
+improvement to "resolved":** this round's fixes (burst/volume classification, the worst_host/participation
+contradiction, the pid/role_rank split, three layers of duplicate-line fixes landing at a structural choke point,
+and now the heartbeat counter) make the log genuinely more useful for a human actively triaging -- faster to tell
+an escalating cluster-wide event from a one-off, no more self-contradictory fields, verifiable counts. They do
+**not** make the log safe to page a human off of unattended, because the system's own honest, validated policy is
+that PROBABLE-tier findings require human judgment -- by design. That is the project's real, current state: a
+log-only, human-reviewed beta tool, not a page-worthy alerting pipeline, and that distinction should be stated
+plainly in any POC decision rather than implied to be closed.
+
+**6.26.5 Not yet done: a fourth, fresh, cold re-review has not been run against the heartbeat-counter fix in 6.26.3**
+specifically (it was implemented directly by the coordinator after the valid third review in 6.26.2, to close a
+bug that review found) -- the live regression in 6.25.6 predates this fix. Recommended next step if a live run is
+performed: fresh `logfix4`-style trial, grep `var/alert_summary.log` for `[MONITOR-HEARTBEAT]` and confirm
+`alerts_this_period` matches the real count of intervening alert lines by direct count, the same check that found
+the original gap.
