@@ -3891,3 +3891,69 @@ safety question (the K8s RDMA crash) confirmed not present here. The real open i
 question, the <3-member structural floor, the aggregator memory/multi-instance hazard) are not reasons to block a
 POC -- they are reasons to scope the POC's claims precisely (e.g., do not claim FSDP or <3-member-group coverage;
 do flag the MoE hang risk to whoever owns that shape) rather than claiming unconditional, universal readiness.
+**Update, §6.25 below: this verdict's Step 4 (log readability) premise did not hold up on a genuinely independent
+second review and required real additional fixes -- see §6.25 for the corrected, now third-review-pending state.**
+
+### 6.25 Log readability, round 2: the §6.23 fix did not actually solve the problem, and what fixed it for real
+
+**6.25.1 The second independent review (genuinely fresh, zero-context, non-fork) came back and did not confirm the
+§6.23/§6.24 "GO" premise for this one item.** Reviewing fresh post-fix samples (`fault_after.log`,
+`fsdp_after.log`), it found the core complaint from the FIRST review completely unresolved
+(`confidence=PROBABLE severity=LOG-ONLY` with zero exceptions in both samples, no in-line way to separate signal
+from noise) plus four new, concrete problems introduced or exposed by the §6.23 fix itself: (a) the new `pattern=`
+field, scoped to exact-(host,comm,rank)-tuple repeats, mislabeled a real 104-alert whole-cluster burst (85
+`ROLE-BASELINE-ALERT-UNVALIDATED` + 19 `WAIT-INDUCED-ALERT` lines, `var/alert_summary.log`
+2026-11-07T09:34:09-09:34:30) as `pattern=SINGLE` on every one of its 104 lines -- correct on its own narrow axis
+(no single tuple repeated), actively misleading on the axis that actually mattered (aggregate volume); (b)
+`worst_host=worker-0 participation=1.00` is self-contradictory -- confirmed live that ALL 27 nvlink alerts in this
+project's history have every host at participation=1.00/errors_delta=0, so `min()`'s tie-break always names an
+arbitrary host as "worst" when nothing is; (c) `rank=` shows a large PID-like integer (e.g. `2629547`) while the
+real small-integer world/TP rank sits in the separately-named `role_rank` field several tokens later -- a genuine
+misread risk the first review didn't catch; (d) exact, same-timestamp duplicate lines were still present post-fix
+(26 confirmed instances). The reviewer's own words: "As an on-call engineer, I would not page off either excerpt
+alone." This is reported plainly, per this task's own instruction, rather than treated as a minor gap in an
+otherwise-closed item.
+
+**6.25.2 Root cause of the duplicate lines, found for real (not assumed to be the already-known stray duplicate
+process).** The stray second `alert_engine.py` process (§6.19/§6.20.1) was already killed before this task started,
+yet 26 exact-timestamp duplicate `[ROLE-BASELINE-ALERT-UNVALIDATED]`/`[ALERT]` lines were still found live in
+`var/alert_summary.log`. Traced to `_poll_host`'s own `seen_comms` set (`alert_engine.py`): it is local to ONE
+host's call, but a communicator that spans multiple physical hosts (any TP/PP group crossing a node boundary --
+confirmed live: role_n=4 groups split across worker-4/worker-5) appears in `_comm_buckets` for every host it
+touches. `poll_once()` dispatches `_poll_host` once per host via a `ThreadPoolExecutor`, so each per-host
+invocation's own local `seen_comms` independently treats the shared comm as "new" and redundantly re-dispatches
+`_check_wait_induced`/`_check_role_baseline` -- both of which already evaluate the FULL cross-node comm via
+`_comm_cross_node_members` regardless of which host triggered them, so every touching host reproduces the exact
+same real finding. Fixed with a poll-cycle-global, lock-protected `_cycle_seen_comms` set (reset once per
+`poll_once()` cycle, checked/updated under `_cycle_comms_lock`), making "once per distinct comm per cycle"
+genuinely global instead of per-host-local. Dispatch-layer only -- no change to either check's own detection math,
+thresholds, or persistence state, confirmed via diff (6.25.5 below).
+
+**6.25.3 All five fixes implemented, commit `08d7fa01`:**
+1. **New `burst=` field** (`_record_and_count_cluster_burst`/`_burst_label`, `alert_engine.py`): a 30s-windowed,
+   cluster-wide count of rank-scoped alerts (any host/comm/rank), orthogonal to the existing per-tuple `pattern=`.
+   `BURST(n=N,window=30s)` at N>=8, else `ISOLATED`. Threshold chosen from this project's own real healthy-cluster
+   background rate (the only other recurring alert on an idle cluster, nvlink, fires ~once per 40-80s -- 8 in 30s
+   is far above anything that could produce) and well below the 104 seen in the one confirmed real burst on record.
+2. **`worst_host=`/`participation=` contradiction fixed**: now reports `worst_host=none (uniform across all N
+   hosts: ...)` when every host is genuinely tied (same participation_frac AND same errors_delta across the whole
+   set), and keeps the real `worst_host=` label whenever an actual outlier exists. Never hides a genuine outlier,
+   only a uniform/healthy set.
+3. **`rank=` renamed to `pid=`** (it always was a PID; the name was the confusion) and `role_rank=`/`role_n=`/`comm=`
+   promoted to lead every rank-scoped header, since that identity triple is what an on-call reader actually needs
+   first. Value itself is unchanged (`pid=` is exactly the old `rank=`'s value) -- presentation only.
+4. **Duplicate-line root cause fixed** -- see 6.25.2.
+5. **`role_n` flip (e.g. 4 then 48 for the same pid) investigated and confirmed legitimate, not a bug**: confirmed
+   live (`rank=2629547`/`pid=2629547`, node=worker-3 fires under 3 different real `comm=` values within the same
+   poll cycle -- two role_n=4 TP-sized groups and one role_n=48 world/DP group). The same physical process is a
+   real member of multiple real communicators simultaneously; each line's role_rank/role_n is correctly scoped to
+   the `comm=` on that same line, it was just visually split across the header before. Fixed by moving `comm=` to
+   sit immediately next to `role_rank=`/`role_n=` on every rank-scoped header, so the triple reads as one
+   communicator's view instead of three same-looking but differently-scoped fields.
+
+**6.25.4 Step 1 live/historical validation.** Standalone replay of the exact `burst=` sliding-window algorithm
+against the real, already-captured 104-alert burst timestamps (`var/alert_summary.log`, same window as 6.25.1(a))
+confirms it now correctly flips from ISOLATED to `BURST(n=8,window=30s)` at the 8th alert and stays BURST through
+96 of the remaining 95 lines (n climbing to 103) -- i.e. the dominant majority of that real burst would now read
+correctly instead of uniformly misleading `pattern=SINGLE`. [Live-engine validation against a fresh, controlled,
+isolated single-shape trial and the full Step 6 regression re-run recorded below once complete.]
