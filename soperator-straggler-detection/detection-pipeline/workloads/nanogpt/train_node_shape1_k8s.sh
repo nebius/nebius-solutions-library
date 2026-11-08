@@ -41,8 +41,6 @@ else
          "rank-uniqueness, and hardware-diagnostic self-checks did NOT run this job." >&2
 fi
 
-fi
-
 _LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../lib/cluster_topology_k8s.sh"
 source "$_LIB"
 cluster_topology_job_nodes

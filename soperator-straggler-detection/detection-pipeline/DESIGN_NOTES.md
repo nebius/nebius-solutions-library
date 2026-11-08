@@ -4793,3 +4793,97 @@ Healthy trial: TORCHRUN_EXIT: 0 + 0 incidents. Zero false positives.
 #### 6.20.3 Verdict
 
 Both fixes verified correct on live K8s cluster. No behavior difference between Slurm (where fixes were originally found and tested) and K8s (where the shared code was applied). The OUTDIR/DUMPDIR and startup_checks.sh fixes transfer correctly across platforms.
+
+---
+
+### 6.21 MoE Option C: implementation and definitive result (2026-11)
+
+#### 6.21.1 Option C implementation
+
+Option C (from §6.17.5) was implemented as `_check_alltoall_tiered()`:
+- Queries `sum by (hostname, member, role_rank, role_n) (agg_mean_exec_time_us{comm=..., coll=...})` across ALL bucket sizes
+- Applies same GAP_RATIO_THRESH=0.8 and TIERED_MM_THRESH=10 as `_check_mean_tiered`
+- Tracks persistence by `(comm, coll)` without bucket — directly solving the variable-bucket-size problem
+- Added as a parallel path in `poll_once()` for all `(comm, coll)` where `coll in ("Send", "Recv")`
+
+#### 6.21.2 Option C result: 0/3 detected
+
+**TORCHRUN_EXIT: 0 for all 3 fault trials. 0 STRAGGLER-INCIDENTs. 0 false positives on 3 healthy trials.**
+
+The sum-by query works technically (16 series returned, mm=3.7× Send, 6.3× Recv). However, the straggler signal is NOT bimodal — all ranks show elevated timing, not a fast-outlier vs slow-waiter split.
+
+**Root cause (confirmed empirically and by timing analysis):**
+
+AllToAll is a SYNCHRONOUS collective. When rank=1 sleeps 100ms before calling `all_to_all_single()`:
+- ALL 16 ranks must wait for rank=1 to participate before the collective can complete
+- ALL ranks' execution times are elevated by ~100ms uniformly
+- The timing distribution is UNIMODAL (all elevated), not BIMODAL (fast straggler vs slow waiters)
+- This directly contradicts the tiered check's core assumption: straggler=fast_outlier, peers=slow
+
+For comparison with FSDP AllGather:
+- Rank=1 sleeps before backward → enters AllGather 100ms late
+- rank=1's OWN AllGather time: fast (it enters late, others have been waiting, collective completes instantly)
+- Other ranks' AllGather time: slow (they waited 100ms at the collective entry)
+- Distribution: BIMODAL → tiered check fires ✅
+
+For MoE AllToAll:
+- Rank=1 sleeps before all_to_all_single() → ALL ranks wait for rank=1 at the synchronous barrier
+- rank=1's OWN Send time: elevated (100ms wait + send time)
+- Other ranks' Send time: elevated (100ms wait + send time)
+- Distribution: UNIMODAL (all elevated) → tiered check cannot fire ❌
+
+Option C is correctly implemented and produces no false positives, but cannot detect AllToAll stragglers because the fundamental assumption (bimodal distribution) doesn't hold for synchronous AllToAll collectives.
+
+#### 6.21.3 Revised fix direction
+
+Option C (bucket aggregation) doesn't resolve the core issue. The correct approach requires a DIFFERENT detection model for AllToAll:
+
+**Option D: AllToAll entry-to-exit latency per rank.**
+Instead of using NCCL operation timing, measure how long each rank spends inside `all_to_all_single()`. This requires either:
+(a) Application-level timing: wrap `all_to_all_single()` with `time.time()` before/after in model_moe.py, push this to a custom metric, detect outliers — but this requires model-side code
+(b) Inspector timing interpretation: for AllToAll as grouped P2P, the NCCLSend timing for a straggler rank is LOWER than others (it enters late, sends quickly because others waiting). But unlike AllGather where this creates a clear bimodal with mm>>10x, the AllToAll Send timing is spread across variable bucket sizes, making aggregated comparison unreliable.
+
+**Most practical fix**: Model-level injection of a fixed-size padding AllToAll alongside the variable AllToAll, creating a consistent (comm, bucket) for detection. This avoids all pipeline changes.
+
+**Current status**: MoE detection remains an open problem. Zero false positives confirmed.
+
+---
+
+### 6.22 Fresh-eyes README/alert review (2026-11) and triage=PRIMARY/SECONDARY fix
+
+#### 6.22.1 Fresh-eyes README review findings
+
+An independent agent with zero project knowledge read the README and ran the K8s quickstart (FSDP fault test).
+
+**README gaps found:**
+1. `STORAGE_CLASS` discovery: README says "(default: nfs)" but doesn't explain how to discover your cluster's storage class (`kubectl get storageclass`). **Minor gap.**
+2. FSDP quickstart step missing: `run_fsdp_k8s.sh` not in the main quickstart steps — only in the verification status note. A fresh engineer wanting FSDP test has to find the command themselves. **Documented gap.**
+3. `source cluster_k8s.env` prerequisite: stated but no guidance on what fails if forgotten.
+
+**README strengths found:**
+- NCCL 2.32.3 requirement: clearly stated in `⚠️` callout box immediately before the prerequisites list. First-time reader WILL see it.
+- `[NCCL-PROFILER-CHECK] [CHECK-FAIL]` promised to be self-explanatory (and it is — message includes exact remedy).
+
+**Alert readability fresh-eyes result — CRITICAL FINDING:**
+
+Four STRAGGLER-INCIDENTs fired. First-time reader verdict: **"NO — not reliably, for one structural reason."**
+
+The cascade alerts (AllReduce bucket=4, stat=mean, severity_ratio=507×) fire FIRST and appear MORE alarming than the actual root-cause alert (AllGather bucket=440KB, stat=mean_tiered, severity_ratio=21×). The first alert in log order names the wrong rank (pid=254, role_rank=0) with 507× severity. The true straggler (pid=255, role_rank=1) is in alert #3 with 21× severity. A reader sorting by severity_ratio descending or reading sequentially will investigate the wrong GPU first.
+
+Reviewer quote: "I would correctly identify the node within 60 seconds. I would correctly identify GPU slot 1 from alert #3 — but only after also spending time on the misleading higher-severity alert for GPU slot 0 (pid=254)."
+
+#### 6.22.2 Fix: triage=PRIMARY/SECONDARY label
+
+Added to `format_alert()` in alert_engine.py. Rules (presentation-layer only):
+- `stat=mean_tiered` → `triage=PRIMARY[likely-root-cause]`
+- `stat=mean` on small bucket (< 1024 bytes) → `triage=SECONDARY[waiter-cascade,see-PRIMARY-alert]`
+- Other stat → `triage=PRIMARY`
+
+This directly addresses the cascade-vs-primary confusion: a first-time reader now sees `triage=SECONDARY[waiter-cascade,see-PRIMARY-alert]` on the high-severity (507×) alert for the wrong rank, and `triage=PRIMARY[likely-root-cause]` on the lower-severity (21×) alert for the actual straggler.
+
+The `stat_name` and `bucket` fields are now passed through the finding dict so `format_alert()` can compute the triage label.
+
+#### 6.22.3 nanoGPT syntax-error fix (double-fi from merge resolution)
+
+The merge of the OUTDIR fix (remote) with the poll-wait startup_checks.sh fix (local) left a dangling `fi` at line 44 of `train_node_shape1_k8s.sh`, causing all nanoGPT K8s training to fail with `syntax error near unexpected token 'fi'`. Fixed by removing the spurious `fi`.
+

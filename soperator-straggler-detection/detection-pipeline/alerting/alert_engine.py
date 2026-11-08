@@ -1512,7 +1512,19 @@ def format_alert(finding, coverage):
     repeat_n = _record_and_count_repeat((host, comm, rank))
     pattern_disp = f"REPEATED(n={repeat_n})" if repeat_n >= _REPEAT_THRESHOLD else "SINGLE"
     burst_disp = _burst_label()
-    header = (f"[ALERT] role_rank={role_rank_disp} role_n={role_n_disp} comm={comm} "
+    # Log-readability fix (fresh-eyes review, 2026-11): cascade alerts (_check_mean
+    # on small AllReduce/AllGather buckets) fire with higher severity_ratio than the
+    # real root-cause tiered alert, causing first-time readers to investigate the wrong
+    # rank. Label them: stat=mean_tiered → PRIMARY (tiered detection, root-cause
+    # candidate); stat=mean on small bucket → SECONDARY/cascade (waiter effect).
+    _stat_name = finding.get("stat_name", "")
+    if _stat_name == "mean_tiered":
+        _triage = "PRIMARY[likely-root-cause]"
+    elif _stat_name == "mean" and int(finding.get("bucket", "0") or "0") < 1024:
+        _triage = "SECONDARY[waiter-cascade,see-PRIMARY-alert]"
+    else:
+        _triage = "PRIMARY"
+    header = (f"[ALERT] triage={_triage} role_rank={role_rank_disp} role_n={role_n_disp} comm={comm} "
               f"pid={rank} gpu_slot={gpu_slot_disp} "
               f"node={host} type={fault_type} confidence={tier} "
               f"severity={severity} pattern={pattern_disp} burst={burst_disp}{incident_id_part}")
@@ -1866,6 +1878,11 @@ class AlertEngine:
         # A burst (N>10 in 60s) suggests systemic noise; isolated (N<=4) is genuine.
         # Presentation-layer only — does not affect detection, threshold, or attribution.
         self._recent_incident_ts = deque()   # timestamps of recent _emit() fires
+        # Option C (MoE AllToAll): separate persistence tracker for cross-bucket
+        # aggregated timing, keyed by (stat, comm, host, member, coll) with no bucket.
+        # Uses same PERSIST_WINDOW/PERSIST_REQUIRED as tiered check for consistency.
+        self._alltoall_tracker = CVPersistenceTracker(0.5, T.PERSIST_WINDOW, T.PERSIST_REQUIRED)
+        self._alltoall_active_keys = set()
         # P27-hotfix2 -- nv-hostengine liveness, same dead-man's-switch
         # discipline as pipeline_down/n_pipeline_down_cycles above: found
         # this session that nv-hostengine (the persistent DCGM daemon every
@@ -2156,6 +2173,19 @@ class AlertEngine:
                 if (comm, bucket, coll) not in seen_cbc:
                     seen_cbc.add((comm, bucket, coll))
                     self._run_check("mean_tiered", self._check_mean_tiered, comm, bucket, coll)
+        # Option C (MoE AllToAll detection): aggregate Send+Recv timing ACROSS ALL BUCKETS
+        # per (comm, coll) per rank. MoE's AllToAll uses variable bucket sizes (dynamic
+        # routing decisions produce different token-count buckets each step), so the per-
+        # (comm, bucket) tiered check's persistence requirement is never met. By summing
+        # across all buckets, the straggler signal (rank=1 fast, others slow) is stable
+        # across iterations regardless of which specific bucket sizes appear. Additive
+        # parallel path -- _check_mean_tiered and _check_mean are entirely unchanged.
+        seen_cc = set()
+        for hostname in self.hostnames:
+            for comm, bucket, coll in self._comm_buckets.get(hostname, []):
+                if (comm, coll) not in seen_cc and coll in ("Send", "Recv"):
+                    seen_cc.add((comm, coll))
+                    self._run_check("alltoall_tiered", self._check_alltoall_tiered, comm, coll)
 
     def _find_dependent_small_comms(self, hostname, comm):
         """P21.6 -- generic dependent-communicator discovery. A communicator
@@ -4767,6 +4797,8 @@ class AlertEngine:
         # through to display.
         finding["role_rank"] = role_rank
         finding["role_n"] = role_n
+        finding["stat_name"] = stat_name    # for triage=PRIMARY/SECONDARY label in format_alert
+        finding["bucket"] = bucket          # for small-bucket cascade detection
         finding["_platform"] = self._platform  # for K8s-condensed JOB-NOT-CONFIRMED
         if _incident_fired_this_call:
             finding["incident_id"] = incident_id
@@ -6087,6 +6119,120 @@ class AlertEngine:
 
         # Reset streak for any keys that are no longer in the straggler tier
         self._reset_tiered_keys(new_active_keys, now_ts, comm, bucket, coll)
+
+    def _check_alltoall_tiered(self, comm, coll):
+        """Option C (MoE AllToAll detection): aggregate Send+Recv timing ACROSS ALL
+        BUCKETS for a given (comm, coll) per rank, then apply the same tier-split
+        detection as _check_mean_tiered. This solves MoE's variable-bucket problem:
+        different routing decisions produce different bucket sizes each step, so no
+        single (comm, bucket) combination accumulates enough samples for persistence.
+        By aggregating across all buckets, the straggler signal is stable regardless
+        of which bucket sizes appear in any given step.
+
+        Detection math is IDENTICAL to _check_mean_tiered (same GAP_RATIO_THRESH,
+        same TIERED_MM_THRESH). Only the aggregation scope changes: (comm, coll) with
+        all buckets summed, vs (comm, bucket, coll) for a single bucket.
+
+        Additive parallel path — _check_mean_tiered and _check_mean are unchanged.
+        Only fires for coll in ("Send", "Recv") and role_n >= 4."""
+        now_ts = time.time()
+        # Query: sum of timing across ALL bucket sizes per (hostname, member) for this (comm, coll)
+        # VictoriaMetrics supports PromQL sum-by aggregation directly.
+        sum_query = (f'sum by (hostname, member, role_rank, role_n, slurm_job_id) '
+                     f'(agg_mean_exec_time_us{{comm="{comm}",coll="{coll}"}})')
+        all_timing = {}
+        for row in _query_instant(self.vm_url, sum_query):
+            m = row.get("metric", {})
+            val = float(row["value"][1])
+            if val <= 0:
+                continue
+            key = (m.get("hostname", ""), m.get("member", ""))
+            if not key[0] or not key[1]:
+                continue
+            # Freshness: use query timestamp (sum-by doesn't return individual timestamps)
+            all_timing[key] = (val, m.get("hostname", ""), m.get("role_rank", "na"),
+                                m.get("role_n", "na"), m.get("slurm_job_id", ""))
+
+        # Need at least 3 ranks for tier detection
+        if len(all_timing) < 3:
+            self._reset_alltoall_keys(set(), now_ts, comm, coll)
+            return
+        # Role_n check: only process comms with enough members
+        role_ns = {v[3] for v in all_timing.values() if v[3] != "na"}
+        try:
+            if role_ns and max(int(r) for r in role_ns) < 4:
+                self._reset_alltoall_keys(set(), now_ts, comm, coll)
+                return
+        except (ValueError, TypeError):
+            pass
+
+        # Apply same tier-split detection as _check_mean_tiered
+        sorted_timing = sorted(all_timing.items(), key=lambda x: x[1][0])
+        tiers = [[sorted_timing[0]]]
+        for i in range(1, len(sorted_timing)):
+            prev = sorted_timing[i - 1][1][0]
+            curr = sorted_timing[i][1][0]
+            gap = (curr - prev) / curr if curr > 0 else 0
+            if gap >= 0.8:  # GAP_RATIO_THRESH
+                tiers.append([])
+            tiers[-1].append(sorted_timing[i])
+
+        if len(tiers) < 2:
+            self._reset_alltoall_keys(set(), now_ts, comm, coll)
+            return
+
+        straggler_tier = tiers[0]  # fastest = straggler (late-arriving pattern)
+        ref_tier = tiers[1]
+        # Guard 1: straggler tier must be small
+        if len(straggler_tier) > max(1, len(all_timing) // 4):
+            self._reset_alltoall_keys(set(), now_ts, comm, coll)
+            return
+        # Guard 2: reference tier needs at least 2 for meaningful comparison
+        if len(ref_tier) < 2:
+            self._reset_alltoall_keys(set(), now_ts, comm, coll)
+            return
+
+        ref_vals = [v[1][0] for v in ref_tier]
+        ref_median = statistics.median(ref_vals)
+        new_active_keys = set()
+
+        for (shost, smember), (timing_us, hostname, role_rank, role_n, slurm_job_id) in straggler_tier:
+            if ref_median <= 0:
+                continue
+            mm_tiered = ref_median / timing_us if timing_us > 0 else float("inf")
+            if mm_tiered < 10.0:  # TIERED_MM_THRESH
+                continue
+            z_tiered = mm_tiered  # use mm as proxy severity (consistent with mean_tiered)
+            qualifies = True
+            key = ("alltoall_tiered", comm, shost, smember, coll)
+            new_active_keys.add(key)
+            persisted, duration_s = self._alltoall_tracker.observe(key, 1.0 if qualifies else 0.0, now_ts)
+            if persisted:
+                # Fire using the same _emit path as _check_mean_tiered
+                self._emit(
+                    "mean_tiered",   # keep same stat name so classifier/dashboards work
+                    hostname, comm, smember,
+                    "alltoall_agg",  # synthetic bucket label indicating cross-bucket aggregation
+                    coll,
+                    z_tiered, mm_tiered,
+                    timing_us,     # straggler's own timing (fast)
+                    ref_median,    # reference tier median (slow)
+                    slurm_job_id or None,
+                    anomaly_ts=now_ts,
+                    role_rank=role_rank,
+                    role_n=role_n,
+                    persist_duration_s=duration_s,
+                    is_likely_root_cause=True,
+                )
+
+        self._reset_alltoall_keys(new_active_keys, now_ts, comm, coll)
+
+    def _reset_alltoall_keys(self, new_active_keys, now_ts, comm, coll):
+        """Parallel to _reset_tiered_keys but scoped to (comm, coll) not (comm, bucket, coll)."""
+        mine = {k for k in self._alltoall_active_keys if k[1] == comm and k[4] == coll}
+        for stale_key in mine - new_active_keys:
+            self._alltoall_tracker.observe(stale_key, 0.0, now_ts)
+        self._alltoall_active_keys = (self._alltoall_active_keys - mine) | new_active_keys
 
     def _reset_tiered_keys(self, new_active_keys, now_ts, comm, bucket, coll):
         """Record 0.0 (not qualifying) for any straggler keys seen in a previous
