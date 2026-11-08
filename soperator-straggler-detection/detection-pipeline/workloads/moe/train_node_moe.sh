@@ -5,6 +5,15 @@ OUTDIR=$2
 PORT=$3
 DUMPDIR=$4   # host-visible path (under /root, bind-mounted)
 
+# Resolve both to absolute via this script's OWN known location, not the
+# ambient cwd -- cwd here is not reliably the caller's launch dir (see
+# train_node_megatron.sh for the live repro of this bug class), and a
+# relative OUTDIR/DUMPDIR also breaks once this script cd's into its own
+# work dir below.
+_PKG_ROOT_FOR_OUTDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+case "$OUTDIR" in /*) ;; *) OUTDIR="$_PKG_ROOT_FOR_OUTDIR/$OUTDIR" ;; esac
+case "$DUMPDIR" in /*) ;; *) DUMPDIR="$_PKG_ROOT_FOR_OUTDIR/$DUMPDIR" ;; esac
+
 _LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../lib/cluster_topology.sh"
 source "$_LIB"
 cluster_topology_job_nodes
@@ -27,13 +36,18 @@ mkdir -p "$DUMPDIR" "$OUTDIR"
 # ($PKG_ROOT/inspector-plugin/libnccl-profiler-inspector.so, confirmed
 # live by install.sh's own "Inspector plugin built: ..." message),
 # regardless of where this package was actually cloned.
-_PKG_ROOT_FOR_PLUGIN_FIX="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-export NCCL_PROFILER_PLUGIN="$_PKG_ROOT_FOR_PLUGIN_FIX/inspector-plugin/libnccl-profiler-inspector.so"
-export NCCL_INSPECTOR_ENABLE=1
-export NCCL_INSPECTOR_DUMP_VERBOSE="${NCCL_INSPECTOR_DUMP_VERBOSE:-0}"
-export NCCL_INSPECTOR_DUMP_THREAD_INTERVAL_MICROSECONDS=500
-export NCCL_INSPECTOR_DUMP_DIR=$DUMPDIR
-export NCCL_INSPECTOR_PROM_DUMP=0
+# INSPECTOR=off (isolation-test control arm, added this round): no profiler
+# plugin loaded at all. Default on -- same convention as
+# run_megatron_tp4pp4dp3.sh / run_fsdp_nanogpt.sh's own INSPECTOR gating.
+if [ "${INSPECTOR:-on}" = "on" ]; then
+  _PKG_ROOT_FOR_PLUGIN_FIX="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+  export NCCL_PROFILER_PLUGIN="$_PKG_ROOT_FOR_PLUGIN_FIX/inspector-plugin/libnccl-profiler-inspector.so"
+  export NCCL_INSPECTOR_ENABLE=1
+  export NCCL_INSPECTOR_DUMP_VERBOSE="${NCCL_INSPECTOR_DUMP_VERBOSE:-0}"
+  export NCCL_INSPECTOR_DUMP_THREAD_INTERVAL_MICROSECONDS=500
+  export NCCL_INSPECTOR_DUMP_DIR=$DUMPDIR
+  export NCCL_INSPECTOR_PROM_DUMP=0
+fi
 
 # P23 -- no CUDA_VISIBLE_DEVICES restriction, same established precedent
 # as every prior real-training test in this project. GPU3 participates

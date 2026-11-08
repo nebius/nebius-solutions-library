@@ -8,6 +8,18 @@ DUMPDIR=$4   # absolute, host-visible path -- a relative
              # training process chdir's (real bug found in the nanoGPT
              # workload) -- this is always passed in absolute already.
 
+# Resolve both to absolute via this script's OWN known location, not the
+# ambient cwd -- cwd at this point is not reliably the caller's launch dir
+# (varies by container/pyxis behavior per node; confirmed live, not just
+# theoretical: a relative OUTDIR produced zero rank-scoped alerts for an
+# entire fault trial on one run, then silently vanishing output entirely
+# -- different failure, same root cause -- on a second, otherwise identical
+# run). A relative OUTDIR/DUMPDIR also breaks once this script cd's into
+# $MEGATRON_DIR below regardless of cwd at start.
+_PKG_ROOT_FOR_OUTDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+case "$OUTDIR" in /*) ;; *) OUTDIR="$_PKG_ROOT_FOR_OUTDIR/$OUTDIR" ;; esac
+case "$DUMPDIR" in /*) ;; *) DUMPDIR="$_PKG_ROOT_FOR_OUTDIR/$DUMPDIR" ;; esac
+
 _LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../lib/cluster_topology.sh"
 source "$_LIB"
 cluster_topology_job_nodes

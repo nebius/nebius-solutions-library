@@ -30,15 +30,27 @@ cluster_topology_available_nodes
 _SCRIPT_DIR_FOR_MOUNT_FIX="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 _PKG_ROOT_FOR_MOUNT_FIX="$(cd "$_SCRIPT_DIR_FOR_MOUNT_FIX/../.." && pwd)"
 _NCCL_SRC_DIR_FOR_MOUNT_FIX="$(cd "$(dirname "$(dirname "$NCCL_LIB_PATH")")" && pwd)"
-for _p in "$_PKG_ROOT_FOR_MOUNT_FIX" "$_NCCL_SRC_DIR_FOR_MOUNT_FIX"; do
+# var/dump and var/runs may be symlinks to a separate shared filesystem
+# outside PKG_ROOT (see DESIGN_NOTES.md storage-migration section) --
+# resolve and mount their real targets too, same fix as
+# workloads/megatron/run_megatron_tp4pp4dp3.sh and workloads/fsdp/run_fsdp_nanogpt.sh.
+_OUTDIR_REAL_FOR_MOUNT_FIX="$(readlink -f "$OUTDIR" 2>/dev/null || echo "$OUTDIR")"
+_DUMPDIR_REAL_FOR_MOUNT_FIX="$(readlink -f "$DUMPDIR_BASE" 2>/dev/null || echo "$DUMPDIR_BASE")"
+for _p in "$_PKG_ROOT_FOR_MOUNT_FIX" "$_NCCL_SRC_DIR_FOR_MOUNT_FIX" "$_OUTDIR_REAL_FOR_MOUNT_FIX" "$_DUMPDIR_REAL_FOR_MOUNT_FIX"; do
   case "$_p" in
     /root|/root/*) ;;  # already covered by the existing /root:/root mount
-    *) MOUNTS="$MOUNTS,$_p:$_p" ;;
+    "$_PKG_ROOT_FOR_MOUNT_FIX"/*) ;;
+    *) case ",$MOUNTS," in *",$_p:$_p,"*) ;; *) MOUNTS="$MOUNTS,$_p:$_p" ;; esac ;;
   esac
 done
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# INSPECTOR isolation-test control arm (added this round): named explicitly
+# in --export= below, since this cluster does not reliably forward ad-hoc
+# exported vars through bare srun (confirmed repeatedly elsewhere in this
+# project's history).
+INSPECTOR="${INSPECTOR:-on}"
 
-echo "### moe-nanogpt steps=$STEPS outdir=$OUTDIR port=$PORT"
+echo "### moe-nanogpt steps=$STEPS outdir=$OUTDIR port=$PORT inspector=$INSPECTOR"
 echo "--- queue check ---"
 if [ -n "$(squeue -u soperatorchecks -h)" ]; then echo "ABORT: soperatorchecks job active"; exit 1; fi
 if [ -n "$(squeue -u "$USER" -h)" ]; then echo "ABORT: existing job for $USER already queued/running"; exit 1; fi
@@ -48,6 +60,7 @@ mkdir -p "$OUTDIR"
 srun --nodes="$NUM_NODES" --ntasks="$NUM_NODES" --ntasks-per-node=1 --gpus-per-node="$GPUS_PER_NODE" -w "$NODE_LIST" \
   --container-image="$IMAGE" \
   --container-mounts="$MOUNTS" \
+  --export=ALL,INSPECTOR="$INSPECTOR" \
   bash -c 'DD="'"$DUMPDIR_BASE"'/$(hostname)"; bash "'"$SCRIPT_DIR"'/train_node_moe.sh" '"$STEPS $OUTDIR $PORT"' $DD' \
   > "$OUTDIR/full_output.log" 2>&1 &
 echo $! > "$OUTDIR/srun_driver.pid"

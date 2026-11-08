@@ -19,17 +19,28 @@ OUTDIR=$2
 PORT=$3
 DUMPDIR=$4   # inside-pod path; shared with aggregator sidecar via EmptyDir volume
 
-# Environment self-checks (NCCL plugin, rank uniqueness, DCGM availability).
-# Mount-timing fix: poll up to 60s for the workspace PVC to appear. The original
-# `if [ -f ... ]; then source ...; fi` pattern silently skipped all checks if the
-# workspace wasn't mounted yet (a real timing-window race on fresh PVC mounts).
+# Resolve both to absolute via this script's OWN known location, not the
+# ambient cwd -- same real bug fix as the Slurm sibling (train_node_shape1.sh):
+# cwd here is not reliably the caller's launch dir, and a relative OUTDIR/
+# DUMPDIR also breaks once this script cd's into its own work dir below.
+# DUMPDIR here is already an absolute EmptyDir mount path, so this is a
+# no-op for it in practice -- it only guards a future caller passing it relative.
+_PKG_ROOT_FOR_OUTDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+case "$OUTDIR" in /*) ;; *) OUTDIR="$_PKG_ROOT_FOR_OUTDIR/$OUTDIR" ;; esac
+case "$DUMPDIR" in /*) ;; *) DUMPDIR="$_PKG_ROOT_FOR_OUTDIR/$DUMPDIR" ;; esac
+
+# Environment self-checks (NCCL plugin, rank uniqueness, DCGM availability)
+
 _CHECKS_SCRIPT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/k8s/startup_checks.sh"
 _cw=0
 while [ $_cw -lt 60 ] && [ ! -f "$_CHECKS_SCRIPT" ]; do sleep 2; _cw=$((_cw + 2)); done
 if [ -f "$_CHECKS_SCRIPT" ]; then
     source "$_CHECKS_SCRIPT"
 else
-    echo "[STARTUP] [WARN] startup_checks.sh not found after 60s (workspace PVC mount delayed?). Skipping self-checks." >&2
+    echo "[STARTUP] [$(hostname)] WARNING: $_CHECKS_SCRIPT not found -- NCCL plugin," \
+         "rank-uniqueness, and hardware-diagnostic self-checks did NOT run this job." >&2
+fi
+
 fi
 
 _LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../lib/cluster_topology_k8s.sh"

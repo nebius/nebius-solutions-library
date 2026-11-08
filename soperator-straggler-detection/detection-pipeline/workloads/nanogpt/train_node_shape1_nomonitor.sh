@@ -5,6 +5,14 @@ OUTDIR=$2
 PORT=$3
 DUMPDIR=$4   # unused, kept for arg-position parity
 
+# Resolve to absolute via this script's OWN known location, not the ambient
+# cwd -- cwd here is not reliably the caller's launch dir (see
+# train_node_megatron.sh for the live repro of this bug class), and a
+# relative OUTDIR also breaks once this script cd's into its own work dir
+# below. DUMPDIR is unused here (arg-position parity only), so not touched.
+_PKG_ROOT_FOR_OUTDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+case "$OUTDIR" in /*) ;; *) OUTDIR="$_PKG_ROOT_FOR_OUTDIR/$OUTDIR" ;; esac
+
 _LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../lib/cluster_topology.sh"
 source "$_LIB"
 cluster_topology_job_nodes

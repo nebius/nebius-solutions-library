@@ -1294,3 +1294,15 @@ Operational notes:
   `stat=mean_tiered` incidents and zero `CHECK-FAILED`; run a fault trial and require the true rank plus a complete `[ALERT]`.
 - The offline replay used for the threshold work (VictoriaMetrics raw export, 90 s freshness, real `_check_mean_tiered`
   with stubbed queries) is not in this repository; it lives with the validation record outside git.
+- Reading `[ALERT]`/`[WAIT-INDUCED-ALERT]`/`[ROLE-BASELINE-ALERT*]` lines: `pattern=SINGLE` vs
+  `pattern=REPEATED(n=N)` tells you whether this exact (host, comm, rank) has fired N+ times in the last 60s —
+  orthogonal to `confidence=`/`severity=` (which reflect hardware-root-cause confirmation via DCGM/eBPF, not
+  recurrence). `[MONITOR-HEARTBEAT]` lines (every 60s, `alive=true alerts_this_period=N total_alerts=M`) confirm the
+  engine is alive and polling even during a quiet stretch — a long gap with no heartbeat means the monitor itself is
+  down, not that nothing happened. See DESIGN_NOTES §6.23.
+- Multiple `node_aggregator_ref.py`/`alert_engine.py` instances from different checkouts can end up running
+  concurrently against the same VictoriaMetrics instance (confirmed live, §6.12.4/§6.23.8) — check `ps aux | grep
+  alert_engine` / `pgrep -af node_aggregator_ref.py` (the latter on each worker node) before trusting a "stale
+  rank" or cross-job-ID warning as a detection bug; it may be a different checkout's leftover process.
+- Full, final, consolidated state of this detector (Slurm side) as of the 2026-11 validation campaign's last round:
+  DESIGN_NOTES §6.24.
