@@ -4740,3 +4740,56 @@ Recommended: Option C (most general; works for any AllToAll without model change
 
 
 
+
+---
+
+### 6.20 K8s live verification: OUTDIR fix and startup_checks.sh fix (2026-11)
+
+#### 6.20.1 Context
+
+Slurm-side validation found and fixed two real bugs:
+1. **OUTDIR/DUMPDIR relative-path bug**: in all launcher scripts, relative OUTDIR/DUMPDIR paths were
+   resolved against the ambient cwd (which changes after `cd` into the work dir), producing silently
+   wrong paths. TORCHRUN_EXIT: 0 with zero alerts and no error — a silent false pass. Fix: convert
+   both to absolute using `_PKG_ROOT_FOR_OUTDIR` derived from the script's own `${BASH_SOURCE[0]}`.
+2. **startup_checks.sh missing from K8s launchers**: the mount-timing fix (`if [ -f "$_CHECKS_SCRIPT" ]`)
+   could silently skip all 3 environment self-checks (NCCL plugin, rank-uniqueness, hardware-diagnostics)
+   when workspace PVC is not yet mounted. Fix: 60-second poll-wait replaces the conditional skip.
+
+Both fixes were applied to K8s launcher scripts via code review (commit 444dfba) but needed live K8s cluster
+verification. This section documents that live verification.
+
+#### 6.20.2 Verification run
+
+**Configuration**: FSDP 2-node × 8 GPU H200, rank=1 injected with 100ms sleep (fault trial), plus healthy trial.
+
+**Verification method**: check that:
+- startup_checks.sh runs and logs all 4 checks (not silently skipped)
+- Fault trial produces real STRAGGLER-INCIDENTs (not silent zero-alert TORCHRUN_EXIT: 0)
+- Healthy trial produces zero false positives
+
+**Results**:
+
+```
+[NCCL-CHECK] [CHECK-WARN] [fsdp-... rank=0] HPC-X SHARP plugin detected: ...
+[RANK-CHECK] [CHECK-PASS] [fsdp-... rank=0] Identity ... unique within pod.
+[DIAG-CHECK] [CHECK-WARN] [fsdp-... rank=0] No hardware diagnostic path found...
+[NCCL-PROFILER-CHECK] [CHECK-PASS] [fsdp-... rank=0] NCCL at '/workspace/nccl-2.32.3/build/lib/libnccl.so.2' supports profiler_v3+ — Inspector plugin will load correctly.
+[STARTUP] [fsdp-... rank=0] Environment self-checks complete.
+```
+
+All 4 checks confirmed running and logging correctly. No silent skip.
+
+Fault trial: TORCHRUN_EXIT: 0 + 2 STRAGGLER-INCIDENTs (stat=mean_tiered, role_rank=1, mm=33× and 107×) — real detection, not a silent false pass. OUTDIR fix confirmed: logs and checkpoint files written to correct location.
+
+Healthy trial: TORCHRUN_EXIT: 0 + 0 incidents. Zero false positives.
+
+**Log readability improvements also confirmed live** (all from same run):
+- `member=257[OS-PID]` in STRAGGLER-INCIDENT header ✓
+- `bucket_mb=0.44` in STRAGGLER-INCIDENT header ✓
+- `alert_window_60s=4 [isolated finding]` in STRAGGLER-INCIDENT header ✓
+- 4 SSH/DCGM lines (deduplicated from 30+) ✓
+
+#### 6.20.3 Verdict
+
+Both fixes verified correct on live K8s cluster. No behavior difference between Slurm (where fixes were originally found and tested) and K8s (where the shared code was applied). The OUTDIR/DUMPDIR and startup_checks.sh fixes transfer correctly across platforms.
