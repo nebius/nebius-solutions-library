@@ -172,6 +172,35 @@ Run everything from the login node. Allow about 30 minutes plus the NCCL build (
 
 ## Known limitations
 
+### Known beta limitations (plain-language summary)
+
+These three are the ones that matter most for a go/no-go POC decision. Everything else below is
+detail; these are structural, currently-accepted gaps, not bugs waiting to be fixed before launch.
+
+1. **No alert reaches PAGE tier today — every finding requires a human to read the log.** This
+   detector will not page or auto-notify anyone on its own right now. Nearly every real finding
+   comes back `confidence=PROBABLE severity=LOG-ONLY`, and that tier is deliberately *not* wired to
+   page, because this project's own measured false-positive rate at that confidence level is
+   **22-25 alerts/hour** — auto-paging on it would flood on-call with false pages, not catch real
+   ones. `PAGE` is reserved for `CONFIRMED` (real hardware evidence, e.g. a DCGM-confirmed fault),
+   which a synthetic/software fault correctly never produces. Setting a safe auto-page threshold is
+   **planned as post-POC work**, once real POC-scale traffic provides enough data to calibrate one
+   responsibly — this was deliberately not guessed at with synthetic-fault data alone. See
+   DESIGN_NOTES.md §6.26 for the full investigation and a genuinely independent reviewer's verdict.
+2. **Megatron TP/PP straggler detection requires 4+ nodes.** At 2 nodes, every TP/PP gradient-sync
+   communicator has exactly 2 members, and a 2-member group's z-score is mathematically invariant
+   (z≈0.7) regardless of whether a real straggler is present — this is a structural property of the
+   statistic, not a detector-quality gap. Validated working correctly starting at 4 nodes. See
+   DESIGN_NOTES.md §6.11/§6.21.
+3. **MoE fault detection does not work with the current fault-injection method.** The injector
+   delays the backward pass, but the real per-expert signal lives in the forward-pass AllToAll
+   routing collective, which completes *before* that delay — so the injected fault lands in the
+   wrong phase and produces no detectable signal (confirmed: 0/3 fault trials fired, with correctly
+   zero false positives on 3/3 healthy trials). The signal is real and detectable in principle (the
+   AllToAll forms an evaluable 16-member communicator) but needs the fault injected *at* the
+   AllToAll call itself, not before backward. **Not yet implemented** — scoped as a named follow-up.
+   See DESIGN_NOTES.md §6.27.2.
+
 - **Shape/strategy coverage (2026-11, DESIGN_NOTES.md 6.12-6.19):** MoE has a real, intermittent (1-in-3 observed)
   collective-participation hang on healthy runs, independent of the detector, not root-caused (6.12.1). Deep
   pipeline-parallel (TP=2/PP=8/DP=3) confirmed a real detection gap: TP/PP groups below `_check_mean_tiered`'s
@@ -281,10 +310,15 @@ Run everything from the login node. Allow about 30 minutes plus the NCCL build (
   unresolved. See DESIGN_NOTES §6.20/§6.24.
 - **Log readability**: `confidence=`/`severity=` alone cannot distinguish a repeated, consistent finding from a
   one-off (both read `PROBABLE`/`LOG-ONLY` for every synthetic fault this project has ever injected, since
-  `CONFIRMED` requires real hardware evidence a synthetic fault correctly never produces). A new, additive
-  `pattern=SINGLE`/`REPEATED(n=N)` field, plus a `[MONITOR-HEARTBEAT]` liveness line and identifying detail on
-  cluster-wide nvlink alerts, closes the gaps found by a genuinely independent fresh-eyes review. See DESIGN_NOTES
-  §6.23.
+  `CONFIRMED` requires real hardware evidence a synthetic fault correctly never produces). Three rounds of
+  independent review across §6.23/§6.25/§6.26: round 1's `pattern=SINGLE/REPEATED(n=N)` field did not resolve the
+  core complaint (every alert still reads identically); round 2 added volume/burst classification
+  (`burst=ISOLATED`/`BURST(n=N,window=30s)`), fixed the `worst_host`/`participation=1.00` contradiction, `pid=`
+  naming, and three layers of duplicate-line fixes; round 3 (a genuinely independent, zero-context review of the
+  complete, unedited output) confirmed these are real, verified improvements for a human actively triaging, but
+  returned a plain **"I would not page off this alone"** — nothing in this pipeline reaches a tier an on-call
+  engineer should act on unattended, which is the known-beta-limitation #1 above, not a presentation defect. See
+  DESIGN_NOTES §6.26.
 
 **Final, consolidated, honest state (Slurm side): DESIGN_NOTES §6.24.**
 

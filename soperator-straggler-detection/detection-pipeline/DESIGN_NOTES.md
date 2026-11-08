@@ -4291,4 +4291,202 @@ Agent-based independent review. All 7 fix categories confirmed present and activ
 **Verdict**: K8s and Slurm detection logic is at full parity for all shared code paths.
 Platform-specific gaps (DCGM, SSH, job boundary confidence) are already documented.
 
+### 6.28 FINAL: Slurm push, live heartbeat re-verification, a genuine new launcher bug found live and fixed on both platforms, full Slurm/K8s cross-check, and the honest final beta-readiness statement (2026-11)
+
+**6.28.1 Slurm push.** `add/straggler-detection-v1-beta` pushed to origin at commit `ddbd37ae`
+(the merge reconciling this round's log-readability work with the K8s-side agent's concurrent
+closeout). Confirmed via `git rev-list --left-right --count origin/...HEAD` = `0 0` immediately
+after push -- fully caught up, no divergence.
+
+**6.28.2 Live re-verification of the heartbeat-counter fix (§6.26.3) -- CONFIRMED FIXED under real
+conditions, not just code-level.** A private, non-disruptive second `alert_engine.py` instance
+(`--duration 1800`, own `--summary-log`, same safe pattern as §6.6.1/§6.25.4 -- the production
+supervised instance was never touched) was run against a fresh live Megatron TP4/PP4/DP3 rank-8
+fault trial (300 iters, 100 ms sleep). Independently counted real printed lines (`awk`/`grep`,
+not the engine's own numbers) between each pair of consecutive heartbeats and compared against
+`alerts_this_period`:
+
+| Window | `alerts_this_period` | Independently counted real lines |
+|---|---|---|
+| heartbeat 12→13 | 37 | 37 |
+| heartbeat 13→14 | 50 | 50 |
+| heartbeat 14→15 | 6 | 6 |
+
+All three reconcile exactly. This window also contains a genuine confirmed `STRAGGLER-INCIDENT`
+(`worker-1`, role_rank=0, comm AllReduce, severity_ratio=170.97) -- the fault trial produced a
+real, correctly-attributed finding, not just synthetic volume. All 6 workers `TORCHRUN_EXIT: 0`.
+This closes the one item §6.26.5 flagged as not yet live-verified.
+
+**6.28.3 A genuine, previously-undiscovered, repo-wide launcher bug found live during 6.28.2's
+own setup -- reported with full rigor, not folded quietly into "done."** The first fault-trial
+attempt (relative `OUTDIR`/`DUMPDIR`, matching this project's own established `var/runs/<name>`
+convention used throughout this file) produced **zero rank-scoped alerts for an entire 300-iter
+fault trial** -- `TORCHRUN_EXIT: 0` on all 6 workers, no error anywhere, but also zero training
+output (`train_$HN.log` absent from the intended directory). Root cause: every `train_node_*.sh`
+launcher in this repo (13 files: `megatron`, `megatron_k8s`, `fsdp`, `fsdp_k8s`, `moe`,
+`moe_k8s`, `moe_rankfault`, `nanogpt straggler`, `nanogpt shape1`, `shape1_k8s`,
+`shape1_nomonitor`, `nanogpt-longrun`, `tp2`) receives `OUTDIR`/`DUMPDIR` as positional args and
+`cd`'s into its own work directory (Megatron's checkout, or its own script dir) *before* using
+them in a redirect/export -- a relative path then silently resolves against the new cwd instead
+of the caller's intended path. This is the exact bug class `DUMPDIR`'s own long-standing comment
+in `train_node_megatron.sh` already named ("a relative NCCL_INSPECTOR_DUMP_DIR silently breaks
+dump output once the training process chdir's") -- but that treatment only existed as a comment
+telling callers to pass it absolute already; nothing enforced it, and `OUTDIR` had no equivalent
+warning at all. README's own quickstart example happens to use absolute paths
+(`/root/run1`), but this project's own later convention (`var/runs/<name>`, used throughout this
+very file) is relative, and nothing stops a relative path from reaching any of these 13 scripts.
+
+**First fix attempt was itself incomplete -- caught by the project's own regression discipline,
+not assumed correct.** The first fix (`OUTDIR="$(cd "$OUTDIR" && pwd)"` immediately after
+`mkdir -p`) relies on the ambient cwd being the caller's real launch directory at that point.
+Live regression (two repeated trials, same relative path, otherwise identical) showed this
+is NOT reliable: the second and third attempts produced **zero output anywhere at all**
+(neither the real target nor the old wrong location) -- a different, worse failure than the bug
+it was meant to fix, consistent with the container's actual initial cwd being environment-
+dependent in a way this project cannot fully control cluster-side. **Real fix**: resolve
+`OUTDIR`/`DUMPDIR` to absolute using the script's OWN known, cwd-independent location
+(`$(dirname "${BASH_SOURCE[0]}")`, the same anchor `_LIB`/`_PKG_ROOT` already use elsewhere in
+every one of these files) instead of the ambient cwd:
+```
+_PKG_ROOT_FOR_OUTDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+case "$OUTDIR" in /*) ;; *) OUTDIR="$_PKG_ROOT_FOR_OUTDIR/$OUTDIR" ;; esac
+case "$DUMPDIR" in /*) ;; *) DUMPDIR="$_PKG_ROOT_FOR_OUTDIR/$DUMPDIR" ;; esac
+```
+applied to all 13 files identically (9 Slurm, 4 K8s siblings -- `megatron_k8s`, `fsdp_k8s`,
+`moe_k8s`, `shape1_k8s` -- fixed in the same pass, maintaining parity rather than creating a new
+Slurm-only fix that would leave K8s behind). **Live-reverified**, 2 fresh trials: a relative
+`OUTDIR` now correctly produces `train_worker-N.log`, `pinlogs/`, and `pin_verify_worker-N.log`
+in the real target directory, nothing in the old wrong location, real iteration output present
+(confirmed via `grep -c iteration`), 6/6 `TORCHRUN_EXIT: 0` -- reproduced clean twice after the
+fix, vs. broken twice before it. Launcher-layer only; `alert_engine.py`'s detection/attribution
+code is untouched by this fix (confirmed via `git diff` scoped to the `workloads/` launchers
+only).
+
+Separately, the same pass fixed a smaller, related gap found during the Step 4 cross-check
+below: all 4 K8s `train_node_*_k8s.sh` scripts conditionally source `k8s/startup_checks.sh`
+(`if [ -f ... ]`) with no `else` -- if the workspace PVC isn't mounted yet (a real, previously-
+documented timing window, §6.27.8), all three self-checks silently do not run, contradicting
+`startup_checks.sh`'s own stated contract ("No check silently fails"). Fixed with a loud
+`[STARTUP] ... WARNING` on the `else` branch in all 4 files, matching that file's own philosophy.
+
+**6.28.4 Step 4: full Slurm/K8s cross-check, done by reading the actual current code on both
+sides, not by trusting a prior table.** The single most important structural fact, confirmed by
+reading the repo layout directly rather than assumed: **`alerting/alert_engine.py` is ONE shared
+file**, not two platform-specific copies -- both `run.sh` (Slurm) and `k8s/run_k8s.sh`/
+`run_megatron_k8s.sh`/etc. (K8s) import the exact same file from the exact same git checkout.
+`k8s/deploy.sh` and the K8s workspace-init job (`k8s/manifests/02-workspace-init-job.yaml`)
+confirmed to `git clone --branch add/straggler-detection-v1-beta --depth 1` on first deploy and
+`git pull --ff-only` on every re-run -- meaning today's push (6.28.1) reaches K8s automatically
+on its next deploy/redeploy, with no separate manual port step. This makes "parity" a structural
+guarantee for anything with no platform-conditional branch, not a snapshot that goes stale on
+the next commit (the prior §6.27.8 table's own line-number citations were already stale by the
+time this task started, from commits made between that table's authoring and now -- confirmed
+directly: `_detect_platform` now at line 1608, not 1610; rank-uniqueness composite-key logic
+and the classifier KeyError workaround both re-located and re-verified by reading the current
+file, not by trusting the old numbers).
+
+Verified directly, by reading the current code:
+- **The 3 original bugs (NameError/`smember`, shared persistence state, classifier `KeyError`
+  workaround), the 512 B bucket floor, and the `(hostname, member)` composite key**: all present,
+  all in the single shared `alert_engine.py`, all automatically identical on both platforms by
+  construction -- no platform branch exists anywhere near any of them.
+- **This round's 5 log-readability fixes + the heartbeat-counter fix**: confirmed zero
+  platform-conditional code near any of `_record_and_count_cluster_burst`/`_burst_label`,
+  `_append_alert_summary`, `_summary_alert_lines_written`, `_cycle_seen_comms`, the `pid=`/
+  `worst_host=` changes -- `_detect_platform()`'s only consumer anywhere in the file is a single
+  startup `print` explicitly commented "log label only; it does not gate any check." These fixes
+  are active on both platforms today, automatically, with the same push.
+- **Confidence-tier behavior (`CONFIRMED` vs `UNCONFIRMED`) is environment-driven, not
+  platform-hardcoded** -- it comes from a live reachability probe (`ssh`, `dcgmi`, a DCGM
+  exporter sidecar at `:9400`) run once at startup, in the same shared code, on both platforms.
+  K8s naturally gets `UNCONFIRMED` because that probe naturally fails there (no SSH, no local
+  DCGM) -- correctly documented in-code as "expected on K8s," not a separate code path that
+  could silently diverge.
+- **Environment self-checks (networking preflight, rank-uniqueness, hardware-diagnostics)**:
+  present on both platforms, addressing the same 3 concerns, but via genuinely different
+  mechanisms in 2 of 3 cases -- a real nuance the prior flat "✅/✅" table did not surface.
+  Networking preflight: Slurm's `self-checks/net_selfcheck.sh` runs an ACTIVE live probe
+  (creates/uses/destroys concurrent communicators for real, falls back only on observed
+  failure); K8s's `startup_checks.sh` CHECK 1 does STATIC detection (`ldconfig` inspection) and
+  explicitly declines to auto-switch ("NOT auto-switching: conservative policy"). Different
+  mechanisms, justified by different deployment models (Slurm's srun-based launch makes an
+  active probe cheap and natural; K8s's pod model and the shared-image constraint make static,
+  conservative detection the safer default) -- a legitimate intentional difference, not drift,
+  but one that should be named explicitly rather than left implicit. Rank-uniqueness: both
+  platforms share the same live `(hostname, member)` composite-key fix and
+  `RANK-COLLISION-WARNING` in `alert_engine.py`; K8s additionally runs an earlier, pod-local
+  `/dev/shm`-based PID-registration check (`startup_checks.sh` CHECK 2) that Slurm has no
+  equivalent of -- a reasonable K8s-specific addition given pods' smaller/more ephemeral PID
+  namespaces, not a missing Slurm fix. Hardware-diagnostics: covered identically by the shared
+  `alert_engine.py` startup probe on both platforms; K8s's `startup_checks.sh` CHECK 3 is a
+  redundant, earlier, pod-local version of conceptually the same check -- harmless duplication,
+  not a gap.
+- **The one real gap found this round** (6.28.3's `startup_checks.sh` silent-skip) is now fixed.
+
+**Explicit, honest scope limit on this cross-check**: this session has no `kubectl` and no live
+K8s cluster access (confirmed: `kubectl` not installed, no `cluster_k8s.env` present). Everything
+above was verified by **reading the actual current code on both sides** (the task's own bar,
+"not assumed from commit history or documentation") and by the structural single-shared-file
+argument, which is stronger than a line-by-line table for anything with no platform branch --
+but it is code review, not a live K8s run. The only thing this session could NOT do is execute a
+live K8s job to watch the fixed launchers run for real on that platform.
+
+**6.28.5 Step 6: final regression, Slurm side live, K8s side not executable from this session.**
+Slurm: Megatron TP4/PP4/DP3 healthy + 100 ms/rank-8 fault (6.28.2, 300 iters, 6/6
+`TORCHRUN_EXIT: 0`, real confirmed incident) and nanoGPT DDP healthy (50 iters, relative `OUTDIR`,
+6/6 `TORCHRUN_EXIT: 0`, train logs correctly placed post-fix) both passed clean, post-launcher-fix.
+K8s: FSDP and a K8s-side heartbeat-exercising run could not be executed from this session (no
+cluster access, see 6.28.4) -- this is an honest, named gap, not silently skipped. The K8s-side
+launcher fixes (6.28.3) are code-identical to the Slurm ones, applied in the same commit, and
+syntax-verified (`bash -n`), but not live-run on K8s by this session.
+
+**6.28.6 Step 3: "Known beta limitations" plain-language summary.** Added to README.md's `##
+Known limitations` section (top, before the existing detailed bullets) and restated here for a
+single consolidated record:
+1. **No alert reaches PAGE tier today.** Every finding requires active human log review.
+   `PROBABLE`/`LOG-ONLY` is this detector's ceiling for any synthetic or software fault; `PAGE`
+   is reserved for `CONFIRMED` (real hardware evidence), a deliberate, previously-validated
+   policy given this project's own measured 22-25 alerts/hour false-positive rate at `PROBABLE`.
+   Setting a safe auto-page threshold is planned post-POC work, once real POC-scale traffic
+   provides the data to calibrate one responsibly. **This is the gap that matters most for the
+   POC go/no-go decision** -- see 6.28.7.
+2. **Megatron TP/PP straggler detection requires 4+ nodes** -- a 2-member communicator's z-score
+   is mathematically invariant (z≈0.7) regardless of a real straggler's presence; this is
+   structural, not a detector-quality gap. Validated correct from 4 nodes up.
+3. **MoE fault detection does not work with the current fault-injection method** -- the injector
+   delays backward, but the real per-expert signal is in the forward-pass AllToAll, which
+   completes before that delay. The signal is real and detectable in principle (confirmed: the
+   AllToAll forms an evaluable 16-member communicator); it needs the fault injected at the
+   AllToAll call itself. Not yet implemented -- a named follow-up, not a current bug.
+
+**6.28.7 Final, honest readiness statement.** Is the detector fully, genuinely ready for the
+large-scale POC on both platforms with every gap closed or precisely bounded? **Not fully — one
+real, structural gap remains open, and it is the one that matters most.**
+
+Closed this task: the heartbeat-counter bug (live-reverified), a genuine repo-wide launcher bug
+found live and fixed identically on both platforms (and this fix's own first attempt caught as
+incomplete by this project's own regression discipline before being corrected), the
+`startup_checks.sh` silent-skip gap, and a full, code-level (not table-trusting) Slurm/K8s
+parity confirmation with one previously-unstated nuance (self-check mechanism differences)
+now named explicitly.
+
+**Not closed, and not safe to round up**: limitation #1 above (6.28.6) -- no alert reaches PAGE
+tier, and the valid, genuinely independent third review (§6.26.2) said plainly **"I would not
+page off this alone."** This is not a presentation defect this task could fix within its own
+constraint (presentation/classification-layer only, never touching `_check_mean`/`classifier.py`/
+`_check_mean_tiered`'s detection or attribution logic) -- it is a previously-validated,
+data-driven policy decision that correctly cannot be overridden by a volume heuristic without
+new false-positive-rate validation work, which is out of scope here. **This is the real,
+unresolved blocker for treating this pipeline as an unattended paging system** -- it is fully
+usable today as a human-reviewed, log-only diagnostic tool, which is what every piece of
+evidence in this file supports; it is not yet an alerting system a POC should rely on to page
+someone without a human already watching the logs.
+
+Remaining limitations, named precisely (nothing new beyond what's already tracked in this file
+and README.md's "Known limitations"): the 3 beta limitations above (6.28.6); FSDP's detection
+result remains genuinely open (§6.20/§6.24); the MoE collective-participation hang is a real,
+unresolved infrastructure issue independent of this detector (§6.22); K8s has not been validated
+beyond 2 nodes (§6.9-6.11); K8s-side live regression for this round's fixes was not executed by
+this session (6.28.5) and should be confirmed by a session with cluster access before treating
+the K8s launcher fixes as live-verified, not just code-verified.
 

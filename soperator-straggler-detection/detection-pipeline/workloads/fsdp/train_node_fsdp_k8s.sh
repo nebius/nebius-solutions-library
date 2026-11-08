@@ -21,11 +21,26 @@ OUTDIR=$2
 PORT=$3
 DUMPDIR=$4
 
+# Resolve both to absolute via this script's OWN known location, not the
+# ambient cwd -- same real bug fix as the Slurm sibling (train_node_fsdp.sh):
+# cwd here is not reliably the caller's launch dir, and a relative OUTDIR/
+# DUMPDIR also breaks once this script cd's into its own work dir below.
 _PKG_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+case "$OUTDIR" in /*) ;; *) OUTDIR="$_PKG_ROOT/$OUTDIR" ;; esac
+case "$DUMPDIR" in /*) ;; *) DUMPDIR="$_PKG_ROOT/$DUMPDIR" ;; esac
 
 # Environment self-checks (NCCL plugin, rank uniqueness, DCGM availability)
 _CHECKS_SCRIPT="$_PKG_ROOT/k8s/startup_checks.sh"
-if [ -f "$_CHECKS_SCRIPT" ]; then source "$_CHECKS_SCRIPT"; fi
+if [ -f "$_CHECKS_SCRIPT" ]; then
+  source "$_CHECKS_SCRIPT"
+else
+  # startup_checks.sh's own header says "No check silently fails" -- this
+  # conditional source was the one way it actually could (confirmed: a fresh
+  # namespace where the workspace PVC isn't mounted yet hits this). Loud
+  # warning instead of silent skip, consistent with that stated contract.
+  echo "[STARTUP] [$(hostname)] WARNING: $_CHECKS_SCRIPT not found -- NCCL plugin," \
+       "rank-uniqueness, and hardware-diagnostic self-checks did NOT run this job." >&2
+fi
 
 _LIB="$_PKG_ROOT/lib/cluster_topology_k8s.sh"
 source "$_LIB"
