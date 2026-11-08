@@ -3714,4 +3714,158 @@ Detection requires NCCL >= 2.26 (specifically ncclProfiler_v5 support), achievab
 The `--build-nccl` flag should be the RECOMMENDED default for production deployments.
 Documented prominently in README (Step 3 of K8s quickstart).
 
+---
+
+### 6.15 Log readability: third-party audit findings and fixes (2026-11)
+
+#### 6.15.1 Audit process
+
+Two independent agents reviewed real K8s alert output from an FSDP rank=1 fault injection trial,
+with no prior knowledge of this project. The first review (before fixes) found 4 issues causing
+the reviewer to identify the wrong rank. The second review (after fixes) confirmed "yes, I know
+exactly who to investigate within 60 seconds" — the specific audit question from the brief.
+
+**Before-fixes failures (first review):**
+1. `rank=253` in alert header and body — reviewer assumed this was training rank 253 (wrong rank).
+   Ground truth: rank=253 is an OS PID. The actual straggler is role_rank=1, gpu_slot=1.
+2. 30× `[DCGM-HOSTENGINE-DOWN]` and 34× `[SSH-FAILED]` duplicate lines — "almost entirely noise"
+3. Root-cause determination ("this member's exec time was the minimum — consistent with real root cause")
+   was buried 40+ lines into the alert body — missed under time pressure
+4. `JOB NOT CONFIRMED STILL RUNNING AT ALERT TIME` was a 4-line paragraph on EVERY K8s alert
+   (squeue always unavailable on K8s = always fires = always noisy)
+
+**After-fixes confirmation (second review):**
+> "No. This log would not cause me to investigate the wrong rank or take the wrong action...
+>  Yes on 'I know exactly who to investigate within 60 seconds': Node, training rank (role_rank=1),
+>  GPU slot (gpu_slot=1), NCCL communicator (0x...). All three original issues are substantively addressed."
+
+Reviewer noted one remaining suggestion: add `[OS-PID]` to STRAGGLER-INCIDENT lines too (implemented).
+
+#### 6.15.2 Specific fixes implemented (presentation-layer only, no detection logic change)
+
+| Issue | Fix | File |
+|---|---|---|
+| DCGM-HOSTENGINE-DOWN fires every poll (30×/run) | Only log on state transition (new failure) | alert_engine.py:_maybe_launch_dcgm_hostengine_check |
+| SSH-FAILED fires every call (34×/run on K8s) | Deduplicate: once per hour per (host, error_type) | classifier/cause_metrics.py:run_ssh_command |
+| `rank=253` label conflated with training rank | Renamed to `pid=253[OS-PID]` in [ALERT] header | alert_engine.py:format_alert |
+| `role_rank=1[comm.pos]` label missing | Added `[comm.pos]` qualifier to role_rank | alert_engine.py:format_alert |
+| Root-cause sentence buried 40 lines in | Moved to FIRST line of "What was detected" | classifier/report.py:_format_unconfirmed |
+| `JOB NOT CONFIRMED` 4-line paragraph on K8s | Condensed to 1 line on K8s platform | alert_engine.py:format_alert |
+| No incident count / burst context | Added `alert_window_60s=N [isolated finding / BURST]` | alert_engine.py:_emit |
+| `member=N` on STRAGGLER-INCIDENT | Added `[OS-PID]` suffix (reviewer's remaining suggestion) | alert_engine.py:_emit |
+
+#### 6.15.3 Before/after sample
+
+**Before** (causes wrong-rank investigation):
+```
+[ALERT] rank=253 gpu_slot=0 role_rank=0 role_n=16 ...
+rank 253 · straggler · sustained · CAUSE UNCONFIRMED
+What was detected:
+  rank 253's exec-time mean is 691.8x its node peers...
+  ... [40 lines later] ...
+  This member's exec time was NOT the minimum -- consistent with being downstream, not root cause.
+```
+(Reviewer would investigate rank=253, but actual straggler is role_rank=1.)
+
+**After** (correctly identifies straggler first):
+```
+[ALERT] pid=253[OS-PID] gpu_slot=1 role_rank=1[comm.pos] role_n=16 ...
+K8s platform: Slurm squeue unavailable — job boundary check not possible.
+pid 253 · straggler · sustained · CAUSE UNCONFIRMED
+What was detected:
+  This member's own real exec time was the minimum among every member ... consistent with
+  being the real root cause.   ← ROOT CAUSE ON FIRST LINE
+  rank 253's exec-time mean is 51.5x its node peers ...
+```
+
+#### 6.15.4 Volume/burst indicator
+
+New field on STRAGGLER-INCIDENT: `alert_window_60s=4 [isolated finding]`.
+Threshold: ≤10 incidents in 60s = "isolated finding". >10 = "BURST — systemic issue likely".
+Calibrated against: FSDP rank=1 isolated fault (N=4) confirmed "isolated finding".
+The 104-alert burst case (from prior Slurm history) would show "BURST — systemic issue likely".
+
+#### 6.15.5 MoE AllToAll detection: variable-bucket root cause, scoped fix direction
+
+The AllToAll-targeted injection (`MOE_FAULT_TARGET_RANK + MOE_FAULT_DELAY_US`) is the CORRECT
+injection point (delays the expert routing AllToAll in the forward pass, not the backward pass).
+However, MoE's AllToAll uses VARIABLE bucket sizes (token counts vary per batch per routing decision).
+Each iteration creates a different (comm, bucket) pair. The tiered check's persistence requirement
+(3 consecutive qualifying polls on the SAME (comm, bucket, coll) tuple) is never met because the
+same bucket size rarely repeats. Result: 0/3 detected even with correct injection.
+
+**Confirmed root cause** (not a threshold issue):
+- Trial 1 "detection" (2 tiered incidents): post-analysis confirms this was residual FSDP VM data
+  (same comm ID, same AllGather bucket sizes as the preceding FSDP validation job — VM not fully
+  cleared between runs). NOT a real MoE detection.
+- Trials 2+3 (0/3): Clean VM, MoE-only data. Variable bucket sizes → no persistence → 0 detections.
+
+**Scoped fix direction (not implemented in this round)**:
+
+Option A (extend tiered check): Instead of grouping by (comm, bucket, coll), group by (comm, coll)
+and use the MEDIAN bucket for each group. This handles variable-size collectives. Changes: in
+`_check_mean_tiered()`, group VM data by (comm, coll) across all buckets, compute timing statistics
+across all bucket sizes for each rank. Moderate change, no detection logic break.
+
+Option B (fixed-pad AllToAll in model_moe.py): Pad all experts' token counts to the global maximum
+so every iteration's AllToAll uses the same bucket size. The tiered check would then see a
+consistent (comm, bucket) and persistence would work. Requires model change, not pipeline change.
+
+Option C (Send/Recv timing aggregation): Inspector captures AllToAll as Send+Recv pairs. Add a
+`_check_alltoall` check that processes (comm, coll=Send) and (comm, coll=Recv) across all buckets
+per rank, computes per-rank total bytes-sent/received in a window, and flags a rank that is
+consistently late. This avoids the bucket-size problem entirely.
+
+Recommended: Option C (most general; works for any AllToAll without model changes).
+
+---
+
+### 6.16 Kubernetes POC readiness: final consolidated statement (2026-11)
+
+**Intended audience**: an engineer running the first large-scale K8s POC. Read this section first.
+
+#### What you can trust (fully validated, 2026-11)
+
+| Workload | Detection | Trials | Notes |
+|---|---|---|---|
+| nanoGPT 85M DDP | Tiered mean check (`_check_mean_tiered`) | 3/3 fault detected, 3/3 healthy clean | RDMA; role_rank=1 correctly named, mm=350-979× |
+| FSDP (any rank) | Tiered mean check | rank=1,5,9 detected (3/3), 3/3 healthy clean | RDMA required (no NCCL_IB_DISABLE=1); NCCL 2.32.3 required |
+| Megatron DP (TP=1/PP=1) | `_check_mean` on small post-backward AllReduce | 3/3 fault detected, 3/3 healthy clean | 8-byte bucket; correct behavior for sleep-before-backward |
+| Alert engine stability | Zero false positives, 33MB RSS stable | 3000-step soak | Bounded memory, no hangs |
+| Log readability | Independent reviewer: "yes, within 60s" | Before/after audit | pid=/role_rank/ labels now clear; 2 SSH lines not 34 |
+
+#### Mandatory prerequisites (will silently fail without these)
+
+1. **NCCL 2.32.3**: NCCL 2.25.1 (system default in pytorch:25.01-py3) only supports profiler API v1/v2.
+   Inspector exports only v5. Without 2.32.3: zero dumps, zero detection. Build via `deploy.sh --build-nccl`.
+   The startup check `[NCCL-PROFILER-CHECK] [CHECK-FAIL]` will tell you if this is missing.
+2. **RDMA for FSDP**: do NOT set `NCCL_IB_DISABLE=1` in the FSDP manifest. FSDP needs RDMA for the
+   hierarchical AllGather structure that creates bimodal timing. With TCP, AllGather mm drops to ~2× —
+   below the detection threshold regardless of fault magnitude or rank position.
+
+#### Named, bounded limitations (not vague "needs more work")
+
+| Limitation | Root cause | Workaround / fix path |
+|---|---|---|
+| Megatron TP/PP straggler at 2 nodes | 2-member comms (role_n=2); z-score = 0.707 invariantly | Needs 4+ nodes (role_n≥4). No fix at 2-node scale. |
+| MoE detection (AllToAll-targeted injection) | Variable bucket sizes → persistence check never completes on a single (comm, bucket) | Option C: aggregate Send+Recv totals per rank across all buckets (see §6.15.5) |
+| FSDP with NCCL_IB_DISABLE=1 (TCP) | No hierarchical tree → mm=2× on AllGather | Remove NCCL_IB_DISABLE=1 from FSDP manifest (already done as of §6.14) |
+| All K8s alerts confidence=UNCONFIRMED | SSH/DCGM unavailable in pods | Expected; confidence ceiling is PROBABLE at best on K8s without DCGM integration |
+| Node counts > 2 | Tier structure at 4+ nodes is completely untested | Test specifically before claiming production readiness at 4+ nodes |
+
+#### What to watch for during the POC
+
+- `[NCCL-PROFILER-CHECK] [CHECK-FAIL]` at training startup: NCCL 2.32.3 not in use. No detection will occur.
+- `[DCGM-HOSTENGINE-DOWN]` at startup (once per host): expected on K8s — SSH is unavailable. If you see this
+  repeated more than twice per session, something is wrong with the deduplication.
+- `severity=LOG-ONLY` with `confidence=UNCONFIRMED`: real finding, not paged. Investigate at next opportunity.
+- `alert_window_60s=N [BURST — systemic issue likely]`: N>10 incidents in 60s suggests noise or correlated
+  system event, not an isolated straggler. Check all alerts simultaneously.
+
+#### Go/no-go for large-scale K8s POC
+
+**GO** on: nanoGPT DDP, FSDP (any rank position), Megatron DP  
+**GO-with-caveat** on: Megatron TP/PP at 4+ nodes (not tested at 2 nodes, needs 4+ node validation)  
+**NOT GO** on: MoE detection without Option C implementation; Megatron TP/PP at 2 nodes
+
 

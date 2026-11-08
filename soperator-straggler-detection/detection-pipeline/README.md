@@ -36,6 +36,17 @@ remains 2-node-only).
 > - **Node counts > 2**: NOT TESTED. Tier structure at 4+ nodes is an unknown.
 
 **Prerequisites** (cluster-agnostic; substitute your cluster's values where shown):
+
+> **⚠️ NCCL 2.32.3 is required for straggler detection.** The system NCCL in pytorch:25.01-py3
+> (2.25.1) only supports profiler API v1/v2; Inspector exports only v5. Without NCCL 2.32.3,
+> Inspector writes zero dumps — training runs fine, but detection produces zero alerts silently.
+> The startup check `[NCCL-PROFILER-CHECK]` will log `[CHECK-FAIL]` with the exact remedy.
+> Build NCCL 2.32.3 by passing `--build-nccl` to `deploy.sh` (adds ~2 min), or run:
+> ```bash
+> bash pinning/nccl/fetch_build_nccl.sh --dest /workspace/nccl-2.32.3 \
+>   --gencode "-gencode=arch=compute_90,code=sm_90"
+> ```
+
 - `kubectl` >= 1.27 configured to your cluster
 - At least 2 GPU nodes schedulable (not exclusively reserved for other workloads)
 - A `ReadWriteMany` StorageClass (shown as `<RWX_STORAGECLASS>` below; `nfs` and similar work)

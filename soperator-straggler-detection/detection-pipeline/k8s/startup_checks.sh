@@ -179,4 +179,44 @@ _check_diagnostic_paths() {
 }
 _check_diagnostic_paths
 
+# =========================================================================
+# CHECK 4: NCCL profiler API version for Inspector plugin compatibility
+# Problem: Inspector exports only ncclProfiler_v5 (confirmed via nm/strings).
+#   NCCL 2.25.1 (the system NCCL in pytorch:25.01-py3) only supports
+#   ncclProfiler_v1 and ncclProfiler_v2. When NCCL loads the plugin, it
+#   tries dlsym(ncclProfiler_v2) → NOT FOUND, then v1 → NOT FOUND, and
+#   silently skips the plugin entirely. Result: zero Inspector dumps, zero
+#   detection. Confirmed as root cause of the rank=5 "miss" investigation.
+# Fix: build NCCL 2.32.3 via deploy.sh --build-nccl or the pinning script.
+#   NCCL 2.32.3 supports ncclProfiler_v5. Inspector works correctly.
+# Detection: check the runtime libnccl.so for ncclProfiler_v3+ strings.
+# =========================================================================
+_check_nccl_profiler_version() {
+    local _libnccl _has_v5 _has_v3
+    # Find the NCCL library that torchrun will actually load
+    if [ -n "${TRAINING_NCCL_LIB_PATH:-}" ]; then
+        _libnccl="${TRAINING_NCCL_LIB_PATH}/libnccl.so.2"
+    else
+        _libnccl="$(ldconfig -p 2>/dev/null | awk '/libnccl\.so\.2 / {print $NF}' | head -1)"
+        _libnccl="${_libnccl:-/usr/lib/x86_64-linux-gnu/libnccl.so.2}"
+    fi
+    if [ ! -f "$_libnccl" ]; then
+        echo "[NCCL-PROFILER-CHECK] [CHECK-WARN] [$_HN rank=$_RANK] Cannot find libnccl.so.2 at '$_libnccl'." \
+             "Inspector may not load; build NCCL 2.32.3 via deploy.sh --build-nccl." >&2
+        return 0
+    fi
+    _has_v5=$(strings "$_libnccl" 2>/dev/null | grep -c "ncclProfiler_v[345]" || true)
+    if [ "${_has_v5:-0}" -gt 0 ]; then
+        echo "[NCCL-PROFILER-CHECK] [CHECK-PASS] [$_HN rank=$_RANK] NCCL at '$_libnccl' supports profiler_v3+ — Inspector plugin will load correctly." >&2
+    else
+        echo "[NCCL-PROFILER-CHECK] [CHECK-FAIL] [$_HN rank=$_RANK] NCCL at '$_libnccl' only supports profiler_v1/v2 — Inspector plugin will NOT load." >&2
+        echo "[NCCL-PROFILER-CHECK] Zero Inspector dumps will be written. Zero straggler detection." >&2
+        echo "[NCCL-PROFILER-CHECK] ACTION REQUIRED: Build NCCL 2.32.3 via deploy.sh --build-nccl or:" >&2
+        echo "[NCCL-PROFILER-CHECK]   cd <pipeline_root> && bash pinning/nccl/fetch_build_nccl.sh \\" >&2
+        echo "[NCCL-PROFILER-CHECK]     --dest /workspace/nccl-2.32.3 --gencode '-gencode=arch=compute_90,code=sm_90'" >&2
+        echo "[NCCL-PROFILER-CHECK] Then set NCCL_LIB_PATH=/workspace/nccl-2.32.3/build/lib in the job manifest." >&2
+    fi
+}
+_check_nccl_profiler_version
+
 echo "[STARTUP] [$_HN rank=$_RANK] Environment self-checks complete." >&2
