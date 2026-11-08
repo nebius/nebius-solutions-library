@@ -5221,10 +5221,408 @@ first thought, and one entirely new, real operational gap was found and disclose
 missed. The detector remains fully usable today as a human-reviewed, log-only diagnostic tool;
 it is not yet, and this round does not newly claim it to be, an unattended paging system.
 
----
-### 6.21 MoE Option C: implementation and definitive result (2026-11)
+### 6.31 Full final closeout: stale-code safeguard, FSDP regression root-caused and resolved honestly, MoE wait-time investigation, fresh-clone self-run, final log readability, go/no-go (2026-11)
 
-#### 6.21.1 Option C implementation
+#### 6.31.1 Stale-code startup safeguard (Step 1)
+
+Added a startup log line to `alerting/alert_engine.py`'s `__main__` block: `[STARTUP] alert_engine.py
+running from commit <short-hash>`, computed via a best-effort `git rev-parse --short=12 HEAD` run
+from the script's own directory (falls back to `"unknown"` if not in a git checkout or git is
+unavailable -- never blocks startup). Directly closes the exact gap §6.29.5 found live (a supervised
+instance running 5 commits stale with no way to tell from its own output). Live-verified: a fresh
+instance printed `[STARTUP] alert_engine.py running from commit 3b870729bfc5`, matching the real
+`git rev-parse --short=12 HEAD` of the checkout it ran from at the time. This does not retroactively
+fix the two already-running stale supervised instances found in §6.29.5 (PID 2129735 under this
+checkout, plus a second, independently discovered stale instance at PID 1586291 under a *different*,
+unrelated checkout -- `/home/asabry/nebius-solutions-library/...` -- both still running pre-6.31
+code as of this writing, both still correctly left unrestarted per this session's standing
+permission-system discipline against interfering with running workloads). Both commits (`4b492abb`,
+`3b870729`) were pushed to `origin/add/straggler-detection-v1-beta` this round; confirmed `0 ahead/0
+behind` immediately after.
+
+#### 6.31.2 FSDP regression on the final merged code (Step 2) -- root-caused and resolved, not just re-tested
+
+**The surprising part first:** the first two fault trials (rank=1, 600 and then 150 steps) produced
+**zero alerts** despite the raw NCCL Inspector dump showing a textbook-clean fault signature --
+this looked, at first, exactly like a real regression from this round's extensive `alert_engine.py`
+presentation-layer changes (dedup/burst-classification/pid-rename). It was not. Investigated to a
+precise, confirmed root cause rather than assumed innocent or assumed broken.
+
+**Ground truth (raw dump, `var/dump/worker-0/worker-0-pid63026.log`, rank 1/gpu_slot 1, job 91565,
+600-step SLEEP_MS=100 TARGET_RANKS=1 trial):** the injected rank's own AllGather `coll_exec_time_us`
+reads LOW (mean 1220us) while every other of the 47 real members reads markedly higher (mean
+~5300us at the large, 142935-byte bucket, with periodic spikes to 106-108ms -- almost exactly the
+100ms injected delay). Querying `agg_mean_exec_time_us{comm=...,coll="AllGather"}` directly from
+VictoriaMetrics confirmed this cleanly at the aggregator level too: role_rank=1 read 267.8/308.2us
+at the two real buckets while EVERY ONE of the other 47 role_ranks read 2443-2589us / 9257-10572us
+-- a clean, unambiguous "exactly 1 of 48 depressed, 47 of 48 elevated" signature, the textbook
+inverse-direction straggler pattern this project's wait-induced check exists for.
+
+**Why `_check_mean`/`_check_mean_tiered` correctly, structurally cannot catch this (not a bug,
+confirmed by reading the code, not assumed):** `_check_mean` only ever flags a member reading ABOVE
+the current window's own median (the b3e2f90a fix, deliberately never flags a member for being
+*faster* than normal) -- with 47 of 48 members elevated together and only 1 depressed, the "normal"
+population IS the elevated group relative to each other (low mutual z-score, confirmed directly:
+max z=11.03 against `MEAN_Z_THRESH=30.0`), and the one real anomaly (the depressed rank) is outside
+this check's only-ever-checks-highs design by construction. `_check_mean_tiered` is, by its own
+module docstring, a Kubernetes-hierarchical-AllReduce-specific check that "returns immediately... a
+silent no-op for every Slurm workload" on a flat ring topology -- confirmed correctly silent here,
+not a gap.
+
+**The real mechanism (confirmed by reading `_wait_induced_fallback_evaluate`, not guessed) and the
+real reason it stayed silent for the first 3 trials:** this is exactly the "exactly N-1 of N
+elevated" wait-induced check's intended target pattern. It did not fire on trials 1-2 because its
+per-member elevation ratio requires a per-ROLE, per-BUCKET, cross-JOB historical baseline
+(`_member_role_baseline`, `ROLE_BASELINE_MIN_HISTORY=3` distinct prior job launches at the exact
+same (bucket, coll, role_rank, role_n) shape) before it will compute an elevation ratio at all for
+ANY member -- if even one member in the loop lacks a baseline, the whole (bucket, coll) pair is
+skipped for that poll (`bucket_incomplete=True` short-circuits the loop). The large-bucket
+(140KB-class) AllGather/ReduceScatter shape at role_n=48 had **never been run at full 6-node/48-GPU
+scale before this session's own two trials** (confirmed via `agg_mean_exec_time_us` series history:
+only jobs 91564 and 91565 -- this session's own first two trials -- ever produced samples at this
+exact bucket for role_n=48; three earlier jobs at role_n=48 all used a different, tiny 99-byte
+bucket from an unrelated collective). With only 1-2 prior job launches available as history,
+`ROLE_BASELINE_MIN_HISTORY=3` was never met, so the check never evaluated this bucket at all on the
+first two trials -- a genuine, honest cold-start gap for a brand-new large-scale shape, not a
+presentation-layer regression from this round's changes.
+
+**Resolved, not just explained:** ran a 3rd fault trial (rank=5, job presumably 91566) -- still
+silent, exactly as predicted (2 prior jobs, still short of 3). Ran a 4th fault trial (rank=9) --
+**fired correctly**: `[WAIT-INDUCED-ALERT] pid=3764032 role_rank=9 role_n=48 ... confidence=PROBABLE
+severity=LOG-ONLY`. On the SAME poll cycle, the engine also retroactively fired for the two earlier
+trials still within its lookback window: `role_rank=1` (job 91565) and `role_rank=5` -- all three
+targeted ranks (1, 5, 9) now correctly named, once the 4th job's worth of real history existed. Ran
+a 5th trial, healthy (SLEEP_MS=0): **zero alerts, zero `confidence=CONFIRMED` lines, zero
+`ROLE-BASELINE-INFO` noise escalating to a real finding** over a 4-minute post-completion observation
+window -- confirmed zero false positives.
+
+**Honest characterization of the result:** FSDP straggler detection on Slurm at full 6-node/48-GPU
+scale WORKS, correctly, for all three tested rank positions (1, 5, 9) -- but only via the
+`[WAIT-INDUCED-ALERT]` path (`confidence=PROBABLE severity=LOG-ONLY` by the check's own
+`WAIT_INDUCED_STOPGAP_ACTIVE` design, not `CONFIRMED`/`PAGE`), and only once at least 3 prior job
+launches exist at the exact same large-message-size shape -- a real, previously-undocumented
+"warm-up" requirement for any BRAND NEW large-scale communicator shape's first few runs, now
+satisfied going forward for this exact shape since this session's own 4 trials left it warmed. This
+closes §6.20/§6.24/README's prior "genuinely open, not a confirmed pass or fail" status for FSDP on
+Slurm with a real, evidenced, qualified PASS -- qualified because the warm-up requirement itself is
+a real, newly-documented gap for any future brand-new large shape, not because today's specific
+result is in doubt. No regression found anywhere in this round's merged `alert_engine.py` changes;
+the entire apparent "failure" was this real warm-up property, encountered for the first time because
+this was the first time FSDP had ever run at this scale enough times to expose it.
+
+No code was modified to produce this result -- `_check_mean`, `_check_mean_tiered`, and
+`_wait_induced_fallback_evaluate`'s own math are byte-for-byte unchanged from before this
+investigation. This is a report of a correctly-working, already-implemented mechanism's real
+cold-start behavior, not a fix.
+
+**Reproducibility:**
+```
+bash workloads/fsdp/run_fsdp_nanogpt.sh 600 var/runs/fsdp_regress_r1  29910 var/dump 100 1   # job 91564 (150-step first attempt superseded)
+bash workloads/fsdp/run_fsdp_nanogpt.sh 600 var/runs/fsdp_regress_r1b 29911 var/dump 100 1   # job 91565
+bash workloads/fsdp/run_fsdp_nanogpt.sh 600 var/runs/fsdp_regress_r5  29912 var/dump 100 5   # job 91566 (still silent, as predicted)
+bash workloads/fsdp/run_fsdp_nanogpt.sh 600 var/runs/fsdp_regress_r9  29913 var/dump 100 9   # job 91567 (4th job -- fired, retroactively also named 1 and 5)
+bash workloads/fsdp/run_fsdp_nanogpt.sh 600 var/runs/fsdp_regress_healthy1 29914 var/dump 0 ""  # healthy control, 0 alerts
+```
+Private, non-disruptive monitor used throughout: `python3 alerting/alert_engine.py http://login-0:8428
+--duration 3600 --summary-log <scratch>/alerts.log > <scratch>/engine_stdout.log 2>&1 &` (same
+pattern as prior rounds -- does not touch the standing supervised instance). Raw ground-truth
+queries: `curl 'http://login-0:8428/api/v1/query?query=agg_mean_exec_time_us{comm="<comm>",coll="AllGather"}'`
+and direct inspection of `var/dump/worker-0/worker-0-pid<N>.log`.
+
+#### 6.31.3 MoE wait-time visibility investigation (Step 3) -- a real signal found, a real cost found, implementation deliberately deferred
+
+**The question:** can NCCL Inspector capture a timestamp at the point a rank becomes ready to
+participate in a collective (not just when it executes), giving the aggregator a way to see the
+pre-collective host-side stall §6.29.6 root-caused as invisible to `coll_exec_time_us` for
+`all_to_all`-shaped grouped Send/Recv?
+
+**Found: yes, a real signal exists, with no code modification to NCCL or Inspector.**
+`inspector-plugin/inspector.cc`'s already-built `inspectorCompletedCollVerbose()` path (gated by the
+already-existing, already-shipped `NCCL_INSPECTOR_DUMP_VERBOSE` runtime env var, default `0`, present
+in the prebuilt `.so` all along -- confirmed via `grep` on the compiled plugin's own env-registration
+table, not a rebuild) emits a real `event_trace_ts.coll_start_ts`/`coll_stop_ts` pair (absolute
+microsecond timestamps, same clock/units as `dump_timestamp_us`) for every Send/Recv record, not just
+the `coll_exec_time_us` kernel-duration figure the non-verbose path already provides. Enabled it for
+one diagnostic trial by adding `NCCL_INSPECTOR_DUMP_VERBOSE` to `run_moe_delayfault.sh`'s `--export=`
+clause (sourced from the host env, default `0` -- zero behavior change for any existing caller,
+opt-in only; this is the one small, additive, permanent code change this investigation leaves behind).
+
+**Ground truth, computed directly from the raw verbose dump** (`var/runs/item3_verbose_diag`,
+`MOE_FAULT_TARGET_RANK=4 MOE_FAULT_DELAY_US=2000000`, `NCCL_INSPECTOR_DUMP_VERBOSE=1`): computing
+`this_record.coll_start_ts - previous_record.coll_stop_ts` (the real idle/wait gap between two
+consecutive Send/Recv calls on the same rank, filtered to sane values -- a small fraction of records
+show corrupted/overlapping timestamps, plausibly from concurrent in-flight channels within one
+`ncclGroupEnd()` batch, and were excluded rather than averaged over) found real ~2.0-2.1 second gaps
+on **both** rank 4 (the injected target) and rank 0 (an uninvolved peer) -- confirming the expected
+two-sided signature (the target's own host-side sleep, and its peers' consequent wait) is visible in
+this data, not just inferable indirectly. This is a stronger, more direct signal than the
+`dump_timestamp_us`-inter-record-gap method §6.29.6 used for ground-truth-only verification -- that
+method could only be applied to one rank's own stream after the fact; this one is a structured field
+a per-collective aggregator check could consume directly.
+
+**The real cost found, which is why this is not implemented as a shipped detection path this round:**
+verbose mode's per-channel/per-kernel event-trace arrays are expensive. The SAME diagnostic shape
+that produced a 691,019-line, non-verbose dump file in §6.29.6's `item3_diag` trial produced a
+**150+ MB raw dump file for a single rank** (`worker-0-pid146212.log`) under verbose mode for a
+nominally equivalent short trial -- and, separately and more importantly, **the trial itself did not
+finish in anything close to the time a non-verbose equivalent takes**: 23+ minutes elapsed (still
+running when this was written) for what was intended as a quick 5-iteration smoke diagnostic,
+against non-verbose MoE diagnostics in this project's own history that complete in under 2 minutes
+for a comparable shape. This was not investigated down to a single root cause (candidates: the
+verbose event-trace write path itself, or simply that `MOE_FAULT_DELAY_US=2000000` applies the full
+2-second sleep on every one of the (apparently dozens-to-hundreds of) real per-layer/per-round
+dispatch calls this workload makes, compounding regardless of verbose mode) -- but the real, measured
+wall-clock and disk-volume cost is itself the load-bearing finding here, independent of which cause
+dominates.
+
+**Decision: do not ship a new detection check against this signal this round.** This investigation's
+own standing discipline (full rigor before any change near core detection math: offline validation,
+hang-safety, regression, independent review) cannot be honestly satisfied for a brand-new cross-rank,
+cross-peer wait-skew aggregator metric within this round's remaining scope, and shipping a half-built,
+unvalidated new check would be exactly the "unsafe or fake fix" Step 3 itself says not to force. A
+real signal exists; a real, non-trivial engineering and resource-cost question sits between it and a
+production check.
+
+**What a real implementation would need (the scoped follow-up, so this is not re-investigated from
+scratch):**
+1. A new aggregator-side metric, e.g. `agg_p2p_idle_gap_us`, computed per (hostname, member, comm,
+   peer) as `coll_start_ts[i] - coll_stop_ts[i-1]` on each rank's own Send/Recv stream, pushed
+   alongside (never replacing) the existing `agg_mean_exec_time_us` family -- purely additive, same
+   discipline as `_check_mean_tiered`/`_check_wait_induced` already follow.
+2. A new, separate `_check_p2p_idle_gap`-style check in `alert_engine.py` (not a modification to
+   `_check_mean`/`_check_mean_tiered`/`classifier.py`) comparing a member's own idle-gap distribution
+   against its peers' (same role-baseline/cross-job-history machinery the wait-induced check already
+   uses, reused rather than reinvented), scoped explicitly to `coll in ("Send", "Recv")` comms --
+   never applied to AllReduce/AllGather-style collectives, which `_check_mean`/`_check_wait_induced`
+   already cover correctly.
+3. Before enabling `NCCL_INSPECTOR_DUMP_VERBOSE=1` as a standing default for ANY workload: resolve
+   the real cost found here -- either confirm it is acceptable for MoE-shaped workloads specifically
+   (a scoped, workload-conditional default, not global) with disk-rotation/retention numbers to back
+   it, or find a way to capture only `coll_start_ts`/`coll_stop_ts` without the full per-channel
+   kernel-event arrays (would require an Inspector-plugin-level change -- outside this project's own
+   established "do not modify NCCL/Inspector" boundary as currently scoped, and a candidate reason to
+   revisit that boundary explicitly with the project owner rather than silently cross it).
+4. 3+ fault and 3+ healthy validation trials against the new check specifically, per this task's own
+   original ask -- deferred, not skipped, pending 1-3 above.
+
+**Honest bottom line for the POC decision:** MoE fault detection on Slurm still does not work today
+(README's existing Known Limitation #3 stands, unchanged in its practical conclusion) -- but the
+reason is now better understood than "a presentation-layer gap, out of scope": a real, concrete,
+costed engineering path exists, with a specific signal already confirmed real and a specific
+resource cost already measured, rather than an open question with no known approach.
+
+**Reproducibility:** `NCCL_INSPECTOR_DUMP_VERBOSE=1 MOE_FAULT_TARGET_RANK=4 MOE_FAULT_DELAY_US=2000000
+bash workloads/moe/run_moe_delayfault.sh 5 var/runs/item3_verbose_diag 29920 var/dump` (job 91569).
+Gap computation: direct Python parse of `var/dump/worker-0/worker-0-pid146212.log` (rank 4) and
+`worker-0-pid146208.log` (rank 0), reading each line's `coll_perf.event_trace_ts.coll_start_ts`/
+`coll_stop_ts`, sorted and differenced consecutively. This session could not cancel job 91569 once
+its diagnostic purpose was served (an `scancel` of this session's own job was correctly blocked by
+the Claude Code permission system's "Interfere With Workloads" classifier, same discipline already
+applied to the stale alert-engine process in §6.29.5) -- it was left to run to its own natural
+completion rather than forced to stop, consuming real cluster time beyond what was strictly needed
+for this investigation, a genuine cost of this round's own execution worth disclosing plainly.
+
+#### 6.31.4 Final log readability: a genuine new finding, fixed and re-verified (Step 5)
+
+A genuinely fresh reviewer (zero prior context, no history of this project) was given three real
+log excerpts from this round's own FSDP trials (§6.31.2): the rank-9 fault alert, that alert in
+isolation, and a healthy-run sample. Asked the same four questions this project's prior readability
+rounds have used (what happened within 60s, what's confusing, does confidence/severity wording feel
+contradictory, is the healthy case unambiguous).
+
+**Correctly solved the core question** (which rank to investigate: role_rank=9/pid=3764032/
+worker-1), reasoning directly from the alert's own prose ("this member caused the other 47 real
+member(s) to wait on it") -- confirming the wait-induced alert's main explanation text, carried over
+unchanged from prior rounds, is clear.
+
+**A genuine, new, previously-uncaught finding:** the peer-list header -- `"The elevated peers (the
+actual detected anomaly):"` -- reads as naming the LISTED PEERS as the flagged culprit, directly
+contradicting the real finding (the one member whose reading is NOT elevated). The reviewer named
+this explicitly as something that "could send someone straight to worker-0/worker-2/worker-5 instead
+of worker-1." The identical pattern existed in the 2-member sibling path's own equivalent line
+("...is the actual detected anomaly:"). Both are presentation-layer text; neither touches detection
+logic, the elevation/culprit computation, or `_check_mean`/`_check_mean_tiered`/`classifier.py`.
+
+**Fixed** (`alert_engine.py`, `_emit_wait_induced_alert` and `_emit_timing_fallback`): reworded both
+headers to explicitly re-affirm which member (named in the alert's own header line, above) remains
+the flagged straggler, and to label the peer list as corroborating evidence/victims rather than "the
+anomaly." **Re-verified** with a second, independent, zero-context reviewer given only the corrected
+text: correctly named worker-1/pid=3764032/role_rank=9 as root cause, explicitly citing the corrected
+wording ("remains the flagged straggler") as the deciding clue. Noted one minor, residual
+observation -- the large elevation ratios (up to 4.4x) could still tempt a skimming reader toward the
+peer hosts -- but did not report this as actually misleading them; inherent to showing real
+corroborating numbers, not pursued further.
+
+**A second, pre-existing issue flagged, not previously framed this way:** the `[RANK-COLLISION-
+WARNING]` lines (a known, already-documented, out-of-scope-to-fix chronic artifact -- DESIGN_NOTES
+§6.8/§6.12.3-6.12.4; confirmed identical lines fire on both healthy and faulted runs, unrelated to
+any real fault) sit in the same log stream as real alerts with no visual/textual cue that they are a
+separate, chronic, usually-irrelevant background signal -- the reviewer noted a skimming reader could
+reasonably treat them as part of the same incident, and that the healthy-run sample (100% collision
+warnings, zero real alerts) gives no in-log signal that nothing is actually wrong. Fixed the wording
+only (no change to when/whether this fires, and no attempt at the underlying already-out-of-scope
+mislabeling bug): the warning text now states plainly that it is a known chronic artifact, fires the
+same way with no fault present, and should not be assumed related to a nearby alert unless that
+alert independently names the same host.
+
+**Conclusion:** this round's log readability work found one real, new, previously-uncaught
+presentation bug (fixed and re-verified) plus one wording clarification on an already-known,
+out-of-scope artifact (fixed, re-verification not separately re-run for this one since it is a pure
+clarifying addition to already-correct, already-scoped text, not a correctness fix). All prior
+rounds' readability fixes (pid-first header ordering, burst classification, dedup, worst_host nvlink
+fix, rank-vs-pid terminology) were re-confirmed intact in the same review -- no regression found.
+
+**Reproducibility:** fresh-eyes reviews run as independent `general-purpose` subagents (zero shared
+context with this session) against `/tmp/.../scratchpad/logreview_final/fsdp_fault_rank9.log`,
+`fsdp_fault_rank9_alert_only.log`, `fsdp_healthy_sample.log` (first review) and
+`fsdp_fault_rank9_alert_FIXED.log` (second, post-fix verification review) -- all real excerpts from
+this round's own §6.31.2 FSDP trials, not synthetic.
+
+#### 6.31.5 Fresh-clone README self-run (Step 4) -- Slurm: full pass, one real bug found and fixed; K8s: not possible from this session
+
+**Slurm:** from a genuinely separate, fresh `git clone -b add/straggler-detection-v1-beta` (at
+`/mnt/asabry-scratch/falcon_detection_pipeline/freshclone_test/`, never touched by any other work
+this session), followed the README's Slurm quickstart exactly as written, step by step:
+`environment.sh` (clean, idempotent, built a local NCCL 2.28.9 via apt-extraction), `vm-setup.sh`
+(correctly idempotent -- detected the already-running VictoriaMetrics instance, true no-op),
+`install.sh` (built the Inspector plugin and MoE RDMA shim cleanly; one pre-existing, harmless,
+non-fatal cosmetic warning -- `./utils/extract_git_version.sh: not found` -- confirmed present in
+BOTH the fresh clone and this session's own working checkout, so not a fresh-clone-specific defect;
+left unfixed as out of scope, purely cosmetic, does not affect `git_rev` functionality beyond leaving
+it blank), `run.sh`, `tools/self_test.sh`.
+
+**A real bug found and fixed via this literal self-run:** `run.sh`'s own Step 2 health check
+(confirming the already-running `alert_engine.py` supervisor is alive) produced a genuine FALSE
+NEGATIVE on its first run -- `FATAL: alert_engine.py: NOT confirmed alive/cycling` against a process
+later directly confirmed healthy (its own log file was being actively written seconds before and
+after the failed check; a second `run.sh` run showed real, substantial CPU consumption from the same
+process). This is the THIRD time this exact check has needed a fix (see its own accumulated comments:
+log-growth-based, then tick-based, then schedstat-nanosecond-based) -- each fix increased precision
+but the underlying problem (inferring "is this I/O-bound polling loop alive" from CPU-time deltas)
+remains fundamentally noisy for a process that can legitimately show near-zero CPU over any short
+sampling window. Fixed by adding a direct, targeted fallback: `alert_engine.py` already prints an
+unconditional `[MONITOR-HEARTBEAT]` line every 60s specifically for this purpose (confirmed via code
+read, not assumed) -- if the CPU-delta check fails, `run.sh` now also checks whether `$ALERT_LOG` was
+written within the last 90s (one heartbeat interval plus margin) before declaring failure. Does not
+change or weaken the CPU check's own PASS verdict; only rescues its false negatives. Re-verified live:
+re-ran `run.sh` from the same fresh clone with the fix in place -- this time the CPU-delta check
+itself passed outright (3,084,819 ns advanced over 6s, confirming the earlier failure was exactly the
+predicted false negative, not a flaky-but-real problem), and the full pipeline reported healthy on
+every node. `tools/self_test.sh` then ran clean: real injected rank=8 fault, `RANK-MATCH CONFIRMED...
+EXACT MATCH`, `=== RESULT: PASS ===`, self-cleaning its own Slurm job on completion.
+
+**Cleanup:** this self-run started 6 new standing per-node aggregator supervisors (writing to the
+fresh clone's own, separate `var/dump/` tree) in addition to the 2 pre-existing stale `alert_engine.py`
+instances already known from §6.29.5/§6.31.1. Stopped all 6 (supervisor + child, per node, via direct
+PID kill over ssh -- each one this session's own, newly-created test artifact in a throwaway scratch
+directory, not a pre-existing or ambiguous process) immediately after the self-run completed, to avoid
+leaving yet more confusing standing infrastructure on a cluster that already has two undiagnosed stale
+instances. Confirmed clean via `ps aux`/ssh on every node afterward. The reused, pre-existing
+`alert_engine.py` instance (PID 1586291) was left exactly as found -- not mine to touch, out of scope
+for this cleanup.
+
+**Conclusion: the Slurm quickstart, as written in README.md, works completely, start to finish, for a
+genuinely new user with no undocumented shortcuts.** No README wording changes were needed -- every
+step's documented command and expected-success text matched real behavior exactly. The one real
+defect found was in script behavior (`run.sh`), not documentation, and has been fixed and re-verified.
+
+**Kubernetes: not executable from this session.** Confirmed via `which kubectl`/`find`/`env | grep -i
+kube`/`~/.kube/config` -- zero kubectl binary, zero kubeconfig, no cluster access of any kind from
+this host. The README's own K8s quickstart correctly states this must be run "on the control machine
+where kubectl runs" -- this session's host is not that machine (the K8s-side work and live
+verification already in this branch, §6.17-6.20/`90fe3f67`, was performed by a different, concurrent
+session with that access -- see §6.29's merge-conflict-resolution note). This is an honest
+capability gap of this session, not a claim that K8s is broken or unverified in general.
+
+**Reproducibility:** `git clone -b add/straggler-detection-v1-beta
+https://github.com/nebius/nebius-solutions-library.git` to a fresh directory, then
+`environment.sh && vm-setup.sh && install.sh && run.sh && tools/self_test.sh`, exactly as README.md
+documents. Full transcript: `/tmp/.../scratchpad/selftest_run.log`.
+
+### 6.32 FINAL: consolidated POC readiness statement, both platforms (2026-11)
+
+**Fully validated, with real evidence, this round:**
+- A genuinely fresh `git clone` of the Slurm quickstart, start to finish, passes every documented
+  step exactly as written -- `environment.sh`, `vm-setup.sh`, `install.sh`, `run.sh`,
+  `tools/self_test.sh` -- with a real `run.sh` false-negative bug found and fixed along the way
+  (§6.31.5). A genuinely new user, following only the README, can set this pipeline up and get a
+  correct, real, attributed fault alert.
+- FSDP straggler detection on Slurm at full 6-node/48-GPU scale: a real, evidenced PASS across all
+  3 tested rank positions (1, 5, 9), 0 false positives on a healthy control, via the wait-induced
+  detection path -- flips this from "genuinely open" to resolved (§6.31.2).
+- Log readability: one new, real presentation bug found by a genuinely independent reviewer (a
+  backwards-reading "actual detected anomaly" label), fixed, and the fix re-verified by a second,
+  independent reviewer who then correctly identified the true culprit (§6.31.4). All prior rounds'
+  readability fixes reconfirmed intact.
+- A stale-code safeguard (`[STARTUP] ... running from commit <hash>`) now makes the exact "running
+  5-commits-stale code silently" failure mode (§6.29.5) impossible to miss in any future instance's
+  own log, for any future session (§6.31.1).
+
+**Named, bounded, excluded limitations -- not fixed this round, not hidden:**
+- **No PAGE-tier alerting.** Every real finding today is `confidence=PROBABLE severity=LOG-ONLY`,
+  requiring a human to read the log. Unchanged; a precise, named data plan exists for setting a safe
+  auto-page threshold post-POC (§6.29.4/§6.26).
+- **MoE fault detection still does not work on Slurm**, now understood more precisely than before: a
+  real, directly-observable wait-time signal exists in NCCL Inspector's own already-shipped verbose
+  mode (`coll_start_ts`), but a real, measured cost (150+ MB/rank dump volume, severe slowdown) makes
+  implementing a production check irresponsible to force within this round's own rigor requirements.
+  A concrete, scoped, four-point implementation plan is recorded for whoever picks this up next
+  (§6.31.3) -- this is not a dead end, it is a well-defined, costed next step.
+- **Megatron TP/PP below 4 nodes**: confirmed, unchanged, mathematically structural (2-member
+  z-score invariance), and irrelevant to the actual 6-node/48-GPU POC shape, which clears the real
+  floor on every axis (§6.29.4).
+- **The stale-production-engine gap remains only partially closed.** The safeguard (§6.31.1) prevents
+  this from recurring UNDETECTED going forward, but the two already-running stale instances found in
+  §6.29.5 (PID 2129735, PID 1586291) remain unrestarted as of this writing -- this session does not
+  have permission to bounce a running production workload, correctly enforced by Claude Code's own
+  permission system both times it was attempted.
+- **MoE's intermittent healthy-run hang** remains statistically suggestive, not conclusive (6/6
+  detector-off trials with zero hangs vs. an earlier smaller sample) -- genuinely still open.
+- **Kubernetes beyond 2 nodes, and this session's own inability to run or verify ANY K8s step**
+  (no `kubectl` access from this host) -- unchanged, honestly disclosed, not newly claimed resolved.
+  The K8s-side live verification that DOES exist in this branch was performed by a different,
+  concurrent session with the right access, not this one.
+
+**Go/no-go, stated directly:** this detector is ready for the large-scale POC **as a human-reviewed,
+log-only diagnostic tool** on Slurm, now including a verified, working fresh-install path and a
+resolved FSDP result at full production scale. It is explicitly **not** ready, and this round does
+not claim it to be, as an unattended paging system, nor as a complete, this-session-verified K8s
+deployment story beyond what a different session's own commits already established. Every limitation
+above is named, bounded, and has either a concrete remediation plan or an honest "not yet resolved"
+-- nothing in this statement is rounded up.
+
+**Every script, exact command, and raw log path used this round** (for full reproducibility; "..."
+stands for `soperator-straggler-detection/detection-pipeline/`, this repo's own package root):
+- Push/safeguard: `git push origin add/straggler-detection-v1-beta`; `.../alerting/alert_engine.py`
+  `__main__`'s new `_startup_commit_hash()`.
+- FSDP regression (§6.31.2): `bash .../workloads/fsdp/run_fsdp_nanogpt.sh 600 .../var/runs/fsdp_regress_{r1,r1b,r5,r9,healthy1} <port> .../var/dump {100 <rank> | 0 ""}`;
+  ground truth via `curl 'http://login-0:8428/api/v1/query?query=agg_mean_exec_time_us{comm=...,coll="AllGather"}'`
+  and direct read of `.../var/dump/worker-0/worker-0-pid<N>.log`.
+- MoE wait-time investigation (§6.31.3): `.../workloads/moe/run_moe_delayfault.sh` (now with an
+  opt-in `NCCL_INSPECTOR_DUMP_VERBOSE` export); `NCCL_INSPECTOR_DUMP_VERBOSE=1 MOE_FAULT_TARGET_RANK=4
+  MOE_FAULT_DELAY_US=2000000 bash .../workloads/moe/run_moe_delayfault.sh 5 .../var/runs/item3_verbose_diag
+  <port> .../var/dump` (job 91569); gap analysis via direct Python parse of
+  `.../var/dump/worker-0/worker-0-pid{146208,146212}.log`'s `coll_perf.event_trace_ts` fields.
+- Fresh-clone self-run (§6.31.5): `git clone -b add/straggler-detection-v1-beta
+  https://github.com/nebius/nebius-solutions-library.git` (to a scratch directory, since torn down);
+  `environment.sh && vm-setup.sh && install.sh && run.sh && tools/self_test.sh`; the `run.sh` fix
+  itself, in `.../run.sh`'s Step 2 health check. Transcript: `/tmp/.../scratchpad/selftest_run.log`.
+- Log readability (§6.31.4): two independent `general-purpose` subagent reviews, zero shared context,
+  against `/tmp/.../scratchpad/logreview_final/*.log` (real excerpts from the FSDP trials above); fix
+  in `.../alerting/alert_engine.py`'s `_emit_wait_induced_alert`, `_emit_timing_fallback`, and the
+  `[RANK-COLLISION-WARNING]` print in `_detect_rank_collisions` (or equivalent method).
+- Private, non-disruptive monitoring throughout: `python3 .../alerting/alert_engine.py
+  http://login-0:8428 --duration <N> --summary-log <scratch>/alerts.log > <scratch>/engine_stdout.log 2>&1 &`
+  -- does not touch either standing supervised instance.
+
+---
+### 6.33 MoE Option C: implementation and definitive result (2026-11)
+
+*(Concurrent work from a parallel session, merged in alongside §6.31-6.32 above; renumbered from
+that session's own §6.21 to avoid colliding with the pre-existing §6.21 "TP/PP/DP group-size floor"
+at line ~3640. Content otherwise verbatim from that session.)*
+
+#### 6.33.1 Option C implementation
 
 Option C (from §6.17.5) was implemented as `_check_alltoall_tiered()`:
 - Queries `sum by (hostname, member, role_rank, role_n) (agg_mean_exec_time_us{comm=..., coll=...})` across ALL bucket sizes
@@ -5232,7 +5630,7 @@ Option C (from §6.17.5) was implemented as `_check_alltoall_tiered()`:
 - Tracks persistence by `(comm, coll)` without bucket — directly solving the variable-bucket-size problem
 - Added as a parallel path in `poll_once()` for all `(comm, coll)` where `coll in ("Send", "Recv")`
 
-#### 6.21.2 Option C result: 0/3 detected
+#### 6.33.2 Option C result: 0/3 detected
 
 **TORCHRUN_EXIT: 0 for all 3 fault trials. 0 STRAGGLER-INCIDENTs. 0 false positives on 3 healthy trials.**
 
@@ -5260,7 +5658,7 @@ For MoE AllToAll:
 
 Option C is correctly implemented and produces no false positives, but cannot detect AllToAll stragglers because the fundamental assumption (bimodal distribution) doesn't hold for synchronous AllToAll collectives.
 
-#### 6.21.3 Revised fix direction
+#### 6.33.3 Revised fix direction
 
 Option C (bucket aggregation) doesn't resolve the core issue. The correct approach requires a DIFFERENT detection model for AllToAll:
 
@@ -5275,9 +5673,11 @@ Instead of using NCCL operation timing, measure how long each rank spends inside
 
 ---
 
-### 6.22 Fresh-eyes README/alert review (2026-11) and triage=PRIMARY/SECONDARY fix
+### 6.34 Fresh-eyes README/alert review (2026-11) and triage=PRIMARY/SECONDARY fix
 
-#### 6.22.1 Fresh-eyes README review findings
+*(Renumbered from that session's own §6.22 for the same reason as §6.33 above.)*
+
+#### 6.34.1 Fresh-eyes README review findings
 
 An independent agent with zero project knowledge read the README and ran the K8s quickstart (FSDP fault test).
 
@@ -5298,7 +5698,7 @@ The cascade alerts (AllReduce bucket=4, stat=mean, severity_ratio=507×) fire FI
 
 Reviewer quote: "I would correctly identify the node within 60 seconds. I would correctly identify GPU slot 1 from alert #3 — but only after also spending time on the misleading higher-severity alert for GPU slot 0 (pid=254)."
 
-#### 6.22.2 Fix: triage=PRIMARY/SECONDARY label
+#### 6.34.2 Fix: triage=PRIMARY/SECONDARY label
 
 Added to `format_alert()` in alert_engine.py. Rules (presentation-layer only):
 - `stat=mean_tiered` → `triage=PRIMARY[likely-root-cause]`
@@ -5309,12 +5709,12 @@ This directly addresses the cascade-vs-primary confusion: a first-time reader no
 
 The `stat_name` and `bucket` fields are now passed through the finding dict so `format_alert()` can compute the triage label.
 
-#### 6.22.3 nanoGPT syntax-error fix (double-fi from merge resolution)
+#### 6.34.3 nanoGPT syntax-error fix (double-fi from merge resolution)
 
 The merge of the OUTDIR fix (remote) with the poll-wait startup_checks.sh fix (local) left a dangling `fi` at line 44 of `train_node_shape1_k8s.sh`, causing all nanoGPT K8s training to fail with `syntax error near unexpected token 'fi'`. Fixed by removing the spurious `fi`.
 
 
-
+---
 ---
 
 ### 6.23 Extended soak test: 20000-step stability confirmation (2026-11)
@@ -5376,3 +5776,4 @@ FSDP straggler detection is fully validated as rank-position-agnostic:
 - Healthy: 0/3 false positives
 
 This supersedes and confirms all prior partial validation data. The result is consistent with the theoretical model: FSDP AllGather with RDMA creates a hierarchical bimodal timing distribution regardless of which rank is the straggler.
+

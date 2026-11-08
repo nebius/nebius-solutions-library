@@ -2018,10 +2018,23 @@ class AlertEngine:
                     slot_to_members[(job_id, slot)].add(member)
             for (job_id, slot), members in slot_to_members.items():
                 if len(members) > 1:
+                    # Log-readability fix (final independent fresh-eyes review, 2026-11): this
+                    # check has a known, pre-existing, not-yet-fixed cross-job-ID mislabeling bug
+                    # (DESIGN_NOTES.md 6.8/6.12.3-6.12.4 -- out of scope to fix here) that makes it
+                    # fire chronically, on unrelated stale history, independent of whether any real
+                    # fault is present this cycle -- confirmed live: identical lines appear in both
+                    # healthy and faulted runs. A fresh reader, with no other context, correctly
+                    # flagged "investigate immediately" sitting right next to a real, unrelated
+                    # [WAIT-INDUCED-ALERT] as reading like part of the same incident. Softened to
+                    # say what's actually known, without changing whether/when this fires.
                     print(f"[RANK-COLLISION-WARNING] host={hostname} slurm_job_id={job_id} "
                           f"gpu_slot={slot} claimed simultaneously by {len(members)} different "
-                          f"member identifiers: {sorted(members)} -- real identity collision, "
-                          f"investigate immediately.", flush=True)
+                          f"member identifiers: {sorted(members)} -- known chronic artifact of a "
+                          f"pre-existing, not-yet-fixed bug in this check itself (see DESIGN_NOTES.md "
+                          f"6.8/6.12.3); fires the same way on healthy runs with no fault present, "
+                          f"so it is NOT, by itself, evidence of any problem with this job -- do not "
+                          f"treat it as related to any [ALERT]/[WAIT-INDUCED-ALERT] nearby in this "
+                          f"log unless that finding independently names the same host.", flush=True)
 
     def _refresh_hostnames(self, force=False):
         if self._static_hostnames:
@@ -3811,9 +3824,18 @@ class AlertEngine:
         ]
         if other_lines:
             elevated_thresh = 1.0 / p18k.PATH_B_AND_TIMING_SUPPRESS_RATIO
+            # Log-readability fix (final independent fresh-eyes review, 2026-11): "is the actual
+            # detected anomaly" read as naming THIS list (the partner) as the flagged culprit,
+            # directly contradicting the paragraph just above it ("member=... is flagged as the
+            # straggler") -- a fresh reviewer, given no other context, correctly flagged this as
+            # the kind of wording that could send someone to the wrong host. member={member}
+            # (named above, real GPU slot {slot}, host={member_host}) remains the one flagged as
+            # the straggler; the partner's elevation below is supporting evidence FOR that
+            # finding, not a second, separate anomaly of its own.
             lines.append(f"Its partner in this comm, whose elevation (>{elevated_thresh:.3f}x its "
                           f"own baseline AND >{TIMING_FALLBACK_MAD_MULTIPLE} real baseline-pool "
-                          "MADs above it -- P27.2.6) is the actual detected anomaly:")
+                          "MADs above it -- P27.2.6) is the corroborating evidence for that finding "
+                          f"(member={member} above remains the flagged straggler, not this partner):")
             lines.extend(other_lines)
         lines.append("")
         # P27.3-followup -- real cause attribution for the flagged
@@ -3935,7 +3957,15 @@ class AlertEngine:
             f"message-size bucket (bucket={bucket} bytes, coll={coll}). Sustained for "
             f"{T.PERSIST_REQUIRED} consecutive real samples before firing.",
             "",
-            "The elevated peers (the actual detected anomaly):",
+            # Log-readability fix (final independent fresh-eyes review, 2026-11): a fresh reader
+            # given only this alert, with zero other context, read "the actual detected anomaly"
+            # here as naming THIS peer list as the finding -- directly contradicting the flagged
+            # culprit (pid={culprit}, node={culprit_host}, named in the header above) and risking
+            # investigation of the wrong hosts entirely. These members are the VICTIMS (made to
+            # wait by the real culprit above), corroborating evidence for that finding, not a
+            # second, separate anomaly of their own.
+            f"The elevated peers below are the victims this made wait (corroborating evidence -- "
+            f"pid={culprit} on {culprit_host}, named above, remains the flagged straggler):",
         ]
         lines.extend(peer_lines)
         lines.append("")
@@ -6615,8 +6645,28 @@ class AlertEngine:
             time.sleep(poll_interval)
 
 
+def _startup_commit_hash():
+    """Best-effort git commit hash this process is actually running from --
+    prints at startup so a long-running supervised instance can never again
+    silently serve stale code across commits without it being visible in its
+    own log (confirmed live: a supervised instance was found running 5
+    commits stale with no way to tell from its output alone)."""
+    import subprocess
+    try:
+        out = subprocess.run(
+            ["git", "rev-parse", "--short=12", "HEAD"],
+            cwd=os.path.dirname(os.path.abspath(__file__)),
+            capture_output=True, text=True, timeout=5)
+        if out.returncode == 0:
+            return out.stdout.strip()
+    except Exception:
+        pass
+    return "unknown"
+
+
 if __name__ == "__main__":
     import argparse
+    print(f"[STARTUP] alert_engine.py running from commit {_startup_commit_hash()}", flush=True)
     ap = argparse.ArgumentParser()
     ap.add_argument("vm_url")
     ap.add_argument("--duration", type=float, default=120,

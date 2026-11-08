@@ -66,7 +66,7 @@ mkdir -p "$OUTDIR" "$DUMPDIR_BASE"
 srun --nodes="$NUM_NODES" --ntasks="$NUM_NODES" --ntasks-per-node=1 --gpus-per-node="$GPUS_PER_NODE" -w "$NODE_LIST" \
   --container-image="$IMAGE" \
   --container-mounts="$MOUNTS" \
-  --export=ALL,MOE_FAULT_TARGET_RANK="$TARGET_RANK",MOE_FAULT_DELAY_US="$DELAY_US" \
+  --export=ALL,MOE_FAULT_TARGET_RANK="$TARGET_RANK",MOE_FAULT_DELAY_US="$DELAY_US",NCCL_INSPECTOR_DUMP_VERBOSE="${NCCL_INSPECTOR_DUMP_VERBOSE:-0}" \
   bash -c 'DD="'"$DUMPDIR_BASE"'/$(hostname)"; bash "'"$SCRIPT_DIR"'/train_node_moe.sh" '"$STEPS $OUTDIR $PORT"' $DD' \
   > "$OUTDIR/full_output.log" 2>&1 &
 echo $! > "$OUTDIR/srun_driver.pid"
