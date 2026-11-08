@@ -4341,6 +4341,7 @@ Agent-based independent review. All 7 fix categories confirmed present and activ
 **Verdict**: K8s and Slurm detection logic is at full parity for all shared code paths.
 Platform-specific gaps (DCGM, SSH, job boundary confidence) are already documented.
 
+
 ### 6.28 FINAL: Slurm push, live heartbeat re-verification, a genuine new launcher bug found live and fixed on both platforms, full Slurm/K8s cross-check, and the honest final beta-readiness statement (2026-11)
 
 **6.28.1 Slurm push.** `add/straggler-detection-v1-beta` pushed to origin at commit `ddbd37ae`
@@ -4539,6 +4540,322 @@ unresolved infrastructure issue independent of this detector (§6.22); K8s has n
 beyond 2 nodes (§6.9-6.11); K8s-side live regression for this round's fixes was not executed by
 this session (6.28.5) and should be confirmed by a session with cluster access before treating
 the K8s launcher fixes as live-verified, not just code-verified.
+
+---
+
+**Editorial note (merge of two parallel work streams, 2026-11-08):** the sections immediately
+below (§6.17-§6.20, from a concurrently-running K8s-focused session's own commits merged into
+this branch) reuse section numbers that already exist earlier in this same document (§6.9-§6.11,
+§6.17, §6.20, §6.22, §6.24 above) -- a real numbering collision from two independent sessions
+each continuing their own local sequence, left as a known, disclosed documentation-debt item
+rather than silently renumbered (this file is a narrative log, not executable, and a full
+renumbering pass risks breaking the many existing cross-references scattered through both
+streams' content more than it helps). Read each section by its title and content, not by
+assuming numeric sequence is unique across the whole file. The Slurm-side closeout sections that
+follow after this K8s content (§6.29, §6.30) are this same session's own continuation of §6.28
+immediately above and are unaffected by this collision.
+
+
+### 6.17 Rank=5 investigation and FSDP RDMA fix (2026-11)
+
+#### 6.17.1 The rank=5 "failure" — full root-cause chain
+
+Initial report (§6.13.5): FSDP straggler detection, rank=5 as the injected fault, 0/3 detected.
+The proposed hypothesis was TCP ring topology (rank=5 is mid-ring, rank=1 is early-ring, different
+bimodal distribution strength). This was investigated and **definitively refuted**.
+
+**Actual root cause chain (three interacting issues):**
+
+**Issue A — NCCL profiler API version mismatch:**
+NCCL 2.25.1 (`libnccl.so.2.25.1`, the system NCCL in pytorch:25.01-py3) only supports profiler
+API versions `ncclProfiler_v1` and `ncclProfiler_v2`. Inspector exports only `ncclProfiler_v5`.
+When NCCL loads the Inspector plugin, it tries `dlsym(handle, "ncclProfiler_v2")` → NOT FOUND,
+then `dlsym(handle, "ncclProfiler_v1")` → NOT FOUND, then gives up. No dumps written.
+Confirmed by `strings /usr/lib/x86_64-linux-gnu/libnccl.so.2 | grep -i profiler`:
+  - Strings present: `ncclProfiler_v2`, `ncclProfiler_v1`, `PROFILER/Plugin: failed to find ncclProfiler_v2.`
+  - Strings absent: `ncclProfiler_v5`, `ncclProfiler_v3`, `ncclProfiler_v4`
+
+**Issue B — NCCL_IB_DISABLE=1 added incorrectly to FSDP:**
+The FSDP manifest (07-fsdp-job.yaml.tmpl) had `NCCL_IB_DISABLE=1` added during the previous
+session's HPC-X segfault investigation. FSDP creates ONE NCCL process group (like nanoGPT DDP);
+HPC-X only segfaults on MULTIPLE concurrent process groups (Megatron TP+PP+DP). This was an
+incorrect assumption. FSDP + HPC-X (RDMA) works correctly.
+
+**Issue C — the two faces of HPC-X (confirmed by brief):**
+With NCCL_IB_DISABLE=1 (TCP transport), NCCL uses a flat ring AllGather — no hierarchical tree
+structure, no bimodal timing. AllGather mm drops to ~2× regardless of which rank is the straggler.
+With RDMA (HPC-X or similar), the hierarchical tree creates genuine bimodal timing (mm=27-979×).
+The brief predicted this: "If the root cause is confirmed to be the TCP-ring fallback... the
+rank-position gap and the HPC-X segfault are the same root problem wearing two faces."
+**Confirmed true for FSDP.** The NCCL_IB_DISABLE=1 workaround (needed for Megatron but not for
+FSDP) caused both: lost RDMA (removed bimodal timing) and misled investigation toward ring topology.
+
+#### 6.17.2 Timing data comparison: TCP vs RDMA
+
+| Transport | Injected rank | AllGather 440KB mm | Tiered check fired? |
+|---|---|---|---|
+| TCP (NCCL_IB_DISABLE=1) | rank=1 | 2.1× | ❌ No |
+| TCP (NCCL_IB_DISABLE=1) | rank=5 | 1.9× | ❌ No |
+| RDMA (no IB disable) | rank=1 | 979× | ✅ Yes (role_rank=1) |
+| RDMA (no IB disable) | rank=5 | 27× | ✅ Yes (role_rank=5) |
+| RDMA (no IB disable) | rank=9 | 979× | ✅ Yes (role_rank=9) |
+
+**Conclusion**: ring position has no effect on detection. ALL rank positions are detected equally
+under RDMA. The bimodal timing signal is a function of the hierarchical network topology
+(present under RDMA, absent under TCP), not of which rank is the straggler.
+
+#### 6.17.3 Fixes applied
+
+1. **NCCL 2.32.3 built** (`pinning/nccl/fetch_build_nccl.sh`, ~2 min on H200):
+   NCCL 2.32.3 supports `ncclProfiler_v5`. Inspector writes dumps. Detection works with any NCCL >= 2.26 that supports ncclProfiler_v5. Set via `NCCL_LIB_PATH` in the FSDP manifest.
+   Path: `/workspace/nccl-2.32.3/build/lib/libnccl.so.2.32.3`.
+   `cluster_k8s.env` updated: `NCCL_232_LIB_PATH="/workspace/nccl-2.32.3/build/lib"`.
+
+2. **NCCL_IB_DISABLE=1 removed from 07-fsdp-job.yaml.tmpl**:
+   FSDP does not trigger the HPC-X multi-communicator teardown bug (single process group).
+   Removing IB disable restores RDMA → bimodal hierarchical timing → tiered check detection.
+
+3. **Mount-timing window fixed in all K8s training scripts**:
+   `startup_checks.sh` sourcing replaced with a 60-second poll-wait loop in all K8s train scripts
+   (`train_node_shape1_k8s.sh`, `train_node_fsdp_k8s.sh`, `train_node_moe_k8s.sh`,
+   `train_node_megatron_k8s.sh`). Silently-skipped checks are now explicitly warned.
+
+4. **run_megatron_k8s.sh prerequisite documented**:
+   Added explicit `PREREQUISITE: k8s/deploy.sh must be run first` comment at the top.
+
+#### 6.17.4 Re-validated FSDP results (with RDMA + NCCL 2.32.3)
+
+| Trial | Type | TORCHRUN_EXIT | mean_tiered fired? | role_rank | mm |
+|---|---|---|---|---|---|
+| Fault rank=1 | 2000 steps, 100ms | 0 | ✅ Yes | 1 | 979× |
+| Fault rank=5 | 2000 steps, 100ms | 0 | ✅ Yes | 5 | 27× |
+| Fault rank=9 | 2000 steps, 100ms | 0 | ✅ Yes | 9 | 979× |
+| Healthy 1-3 | 1000 steps, 0ms | 0 | ✅ No | — | — |
+
+**FSDP detection is now fully validated**: 3 fault ranks detected (1, 5, 9), 3 healthy trials
+clean. The detection is rank-position-agnostic. No HPC-X segfault on FSDP (single process group).
+
+#### 6.17.5 Inspector cold-start: NCCL profiler API version limitation
+
+When a fresh workspace is initialized with `deploy.sh`, the system NCCL (2.25.1) is used by
+default. NCCL 2.25.1 only supports profiler_v1/v2; Inspector only exports profiler_v5. No dumps.
+Detection requires NCCL >= 2.26 (specifically ncclProfiler_v5 support), achievable by:
+1. Building NCCL 2.32.3 via `deploy.sh --build-nccl` or the pinning script (~2 min)
+2. Using a container with a newer system NCCL (>= 2.26)
+The `--build-nccl` flag should be the RECOMMENDED default for production deployments.
+Documented prominently in README (Step 3 of K8s quickstart).
+
+---
+
+### 6.18 Log readability: third-party audit findings and fixes (2026-11)
+
+#### 6.18.1 Audit process
+
+Two independent agents reviewed real K8s alert output from an FSDP rank=1 fault injection trial,
+with no prior knowledge of this project. The first review (before fixes) found 4 issues causing
+the reviewer to identify the wrong rank. The second review (after fixes) confirmed "yes, I know
+exactly who to investigate within 60 seconds" — the specific audit question from the brief.
+
+**Before-fixes failures (first review):**
+1. `rank=253` in alert header and body — reviewer assumed this was training rank 253 (wrong rank).
+   Ground truth: rank=253 is an OS PID. The actual straggler is role_rank=1, gpu_slot=1.
+2. 30× `[DCGM-HOSTENGINE-DOWN]` and 34× `[SSH-FAILED]` duplicate lines — "almost entirely noise"
+3. Root-cause determination ("this member's exec time was the minimum — consistent with real root cause")
+   was buried 40+ lines into the alert body — missed under time pressure
+4. `JOB NOT CONFIRMED STILL RUNNING AT ALERT TIME` was a 4-line paragraph on EVERY K8s alert
+   (squeue always unavailable on K8s = always fires = always noisy)
+
+**After-fixes confirmation (second review):**
+> "No. This log would not cause me to investigate the wrong rank or take the wrong action...
+>  Yes on 'I know exactly who to investigate within 60 seconds': Node, training rank (role_rank=1),
+>  GPU slot (gpu_slot=1), NCCL communicator (0x...). All three original issues are substantively addressed."
+
+Reviewer noted one remaining suggestion: add `[OS-PID]` to STRAGGLER-INCIDENT lines too (implemented).
+
+#### 6.18.2 Specific fixes implemented (presentation-layer only, no detection logic change)
+
+| Issue | Fix | File |
+|---|---|---|
+| DCGM-HOSTENGINE-DOWN fires every poll (30×/run) | Only log on state transition (new failure) | alert_engine.py:_maybe_launch_dcgm_hostengine_check |
+| SSH-FAILED fires every call (34×/run on K8s) | Deduplicate: once per hour per (host, error_type) | classifier/cause_metrics.py:run_ssh_command |
+| `rank=253` label conflated with training rank | Renamed to `pid=253[OS-PID]` in [ALERT] header | alert_engine.py:format_alert |
+| `role_rank=1[comm.pos]` label missing | Added `[comm.pos]` qualifier to role_rank | alert_engine.py:format_alert |
+| Root-cause sentence buried 40 lines in | Moved to FIRST line of "What was detected" | classifier/report.py:_format_unconfirmed |
+| `JOB NOT CONFIRMED` 4-line paragraph on K8s | Condensed to 1 line on K8s platform | alert_engine.py:format_alert |
+| No incident count / burst context | Added `alert_window_60s=N [isolated finding / BURST]` | alert_engine.py:_emit |
+| `member=N` on STRAGGLER-INCIDENT | Added `[OS-PID]` suffix (reviewer's remaining suggestion) | alert_engine.py:_emit |
+
+#### 6.18.3 Before/after sample
+
+**Before** (causes wrong-rank investigation):
+```
+[ALERT] rank=253 gpu_slot=0 role_rank=0 role_n=16 ...
+rank 253 · straggler · sustained · CAUSE UNCONFIRMED
+What was detected:
+  rank 253's exec-time mean is 691.8x its node peers...
+  ... [40 lines later] ...
+  This member's exec time was NOT the minimum -- consistent with being downstream, not root cause.
+```
+(Reviewer would investigate rank=253, but actual straggler is role_rank=1.)
+
+**After** (correctly identifies straggler first):
+```
+[ALERT] pid=253[OS-PID] gpu_slot=1 role_rank=1[comm.pos] role_n=16 ...
+K8s platform: Slurm squeue unavailable — job boundary check not possible.
+pid 253 · straggler · sustained · CAUSE UNCONFIRMED
+What was detected:
+  This member's own real exec time was the minimum among every member ... consistent with
+  being the real root cause.   ← ROOT CAUSE ON FIRST LINE
+  rank 253's exec-time mean is 51.5x its node peers ...
+```
+
+#### 6.18.4 Volume/burst indicator
+
+New field on STRAGGLER-INCIDENT: `alert_window_60s=4 [isolated finding]`.
+Threshold: ≤10 incidents in 60s = "isolated finding". >10 = "BURST — systemic issue likely".
+Calibrated against: FSDP rank=1 isolated fault (N=4) confirmed "isolated finding".
+The 104-alert burst case (from prior Slurm history) would show "BURST — systemic issue likely".
+
+#### 6.18.5 MoE AllToAll detection: variable-bucket root cause, scoped fix direction
+
+The AllToAll-targeted injection (`MOE_FAULT_TARGET_RANK + MOE_FAULT_DELAY_US`) is the CORRECT
+injection point (delays the expert routing AllToAll in the forward pass, not the backward pass).
+However, MoE's AllToAll uses VARIABLE bucket sizes (token counts vary per batch per routing decision).
+Each iteration creates a different (comm, bucket) pair. The tiered check's persistence requirement
+(3 consecutive qualifying polls on the SAME (comm, bucket, coll) tuple) is never met because the
+same bucket size rarely repeats. Result: 0/3 detected even with correct injection.
+
+**Confirmed root cause** (not a threshold issue):
+- Trial 1 "detection" (2 tiered incidents): post-analysis confirms this was residual FSDP VM data
+  (same comm ID, same AllGather bucket sizes as the preceding FSDP validation job — VM not fully
+  cleared between runs). NOT a real MoE detection.
+- Trials 2+3 (0/3): Clean VM, MoE-only data. Variable bucket sizes → no persistence → 0 detections.
+
+**Scoped fix direction (not implemented in this round)**:
+
+Option A (extend tiered check): Instead of grouping by (comm, bucket, coll), group by (comm, coll)
+and use the MEDIAN bucket for each group. This handles variable-size collectives. Changes: in
+`_check_mean_tiered()`, group VM data by (comm, coll) across all buckets, compute timing statistics
+across all bucket sizes for each rank. Moderate change, no detection logic break.
+
+Option B (fixed-pad AllToAll in model_moe.py): Pad all experts' token counts to the global maximum
+so every iteration's AllToAll uses the same bucket size. The tiered check would then see a
+consistent (comm, bucket) and persistence would work. Requires model change, not pipeline change.
+
+Option C (Send/Recv timing aggregation): Inspector captures AllToAll as Send+Recv pairs. Add a
+`_check_alltoall` check that processes (comm, coll=Send) and (comm, coll=Recv) across all buckets
+per rank, computes per-rank total bytes-sent/received in a window, and flags a rank that is
+consistently late. This avoids the bucket-size problem entirely.
+
+Recommended: Option C (most general; works for any AllToAll without model changes).
+
+---
+
+### 6.19 Kubernetes POC readiness: final consolidated statement (2026-11)
+
+**Intended audience**: an engineer running the first large-scale K8s POC. Read this section first.
+
+#### What you can trust (fully validated, 2026-11)
+
+| Workload | Detection | Trials | Notes |
+|---|---|---|---|
+| nanoGPT 85M DDP | Tiered mean check (`_check_mean_tiered`) | 3/3 fault detected, 3/3 healthy clean | RDMA; role_rank=1 correctly named, mm=350-979× |
+| FSDP (any rank) | Tiered mean check | rank=1,5,9 detected (3/3), 3/3 healthy clean | RDMA required (no NCCL_IB_DISABLE=1); NCCL 2.32.3 required |
+| Megatron DP (TP=1/PP=1) | `_check_mean` on small post-backward AllReduce | 3/3 fault detected, 3/3 healthy clean | 8-byte bucket; correct behavior for sleep-before-backward |
+| Alert engine stability | Zero false positives, 33MB RSS stable | 3000-step soak | Bounded memory, no hangs |
+| Log readability | Independent reviewer: "yes, within 60s" | Before/after audit | pid=/role_rank/ labels now clear; 2 SSH lines not 34 |
+
+#### Mandatory prerequisites (will silently fail without these)
+
+1. **NCCL 2.32.3**: NCCL 2.25.1 (system default in pytorch:25.01-py3) only supports profiler API v1/v2.
+   Inspector exports only v5. Without 2.32.3: zero dumps, zero detection. Build via `deploy.sh --build-nccl`.
+   The startup check `[NCCL-PROFILER-CHECK] [CHECK-FAIL]` will tell you if this is missing.
+2. **RDMA for FSDP**: do NOT set `NCCL_IB_DISABLE=1` in the FSDP manifest. FSDP needs RDMA for the
+   hierarchical AllGather structure that creates bimodal timing. With TCP, AllGather mm drops to ~2× —
+   below the detection threshold regardless of fault magnitude or rank position.
+
+#### Named, bounded limitations (not vague "needs more work")
+
+| Limitation | Root cause | Workaround / fix path |
+|---|---|---|
+| Megatron TP/PP straggler at 2 nodes | 2-member comms (role_n=2); z-score = 0.707 invariantly | Needs 4+ nodes (role_n≥4). No fix at 2-node scale. |
+| MoE detection (AllToAll-targeted injection) | Variable bucket sizes → persistence check never completes on a single (comm, bucket) | Option C: aggregate Send+Recv totals per rank across all buckets (see §6.18.5) |
+| FSDP with NCCL_IB_DISABLE=1 (TCP) | No hierarchical tree → mm=2× on AllGather | Remove NCCL_IB_DISABLE=1 from FSDP manifest (already done as of §6.17) |
+| All K8s alerts confidence=UNCONFIRMED | SSH/DCGM unavailable in pods | Expected; confidence ceiling is PROBABLE at best on K8s without DCGM integration |
+| Node counts > 2 | Tier structure at 4+ nodes is completely untested | Test specifically before claiming production readiness at 4+ nodes |
+
+#### What to watch for during the POC
+
+- `[NCCL-PROFILER-CHECK] [CHECK-FAIL]` at training startup: NCCL 2.32.3 not in use. No detection will occur.
+- `[DCGM-HOSTENGINE-DOWN]` at startup (once per host): expected on K8s — SSH is unavailable. If you see this
+  repeated more than twice per session, something is wrong with the deduplication.
+- `severity=LOG-ONLY` with `confidence=UNCONFIRMED`: real finding, not paged. Investigate at next opportunity.
+- `alert_window_60s=N [BURST — systemic issue likely]`: N>10 incidents in 60s suggests noise or correlated
+  system event, not an isolated straggler. Check all alerts simultaneously.
+
+#### Go/no-go for large-scale K8s POC
+
+**GO** on: nanoGPT DDP, FSDP (any rank position), Megatron DP  
+**GO-with-caveat** on: Megatron TP/PP at 4+ nodes (not tested at 2 nodes, needs 4+ node validation)  
+**NOT GO** on: MoE detection without Option C implementation; Megatron TP/PP at 2 nodes
+
+
+
+
+---
+
+### 6.20 K8s live verification: OUTDIR fix and startup_checks.sh fix (2026-11)
+
+#### 6.20.1 Context
+
+Slurm-side validation found and fixed two real bugs:
+1. **OUTDIR/DUMPDIR relative-path bug**: in all launcher scripts, relative OUTDIR/DUMPDIR paths were
+   resolved against the ambient cwd (which changes after `cd` into the work dir), producing silently
+   wrong paths. TORCHRUN_EXIT: 0 with zero alerts and no error — a silent false pass. Fix: convert
+   both to absolute using `_PKG_ROOT_FOR_OUTDIR` derived from the script's own `${BASH_SOURCE[0]}`.
+2. **startup_checks.sh missing from K8s launchers**: the mount-timing fix (`if [ -f "$_CHECKS_SCRIPT" ]`)
+   could silently skip all 3 environment self-checks (NCCL plugin, rank-uniqueness, hardware-diagnostics)
+   when workspace PVC is not yet mounted. Fix: 60-second poll-wait replaces the conditional skip.
+
+Both fixes were applied to K8s launcher scripts via code review (commit 444dfba) but needed live K8s cluster
+verification. This section documents that live verification.
+
+#### 6.20.2 Verification run
+
+**Configuration**: FSDP 2-node × 8 GPU H200, rank=1 injected with 100ms sleep (fault trial), plus healthy trial.
+
+**Verification method**: check that:
+- startup_checks.sh runs and logs all 4 checks (not silently skipped)
+- Fault trial produces real STRAGGLER-INCIDENTs (not silent zero-alert TORCHRUN_EXIT: 0)
+- Healthy trial produces zero false positives
+
+**Results**:
+
+```
+[NCCL-CHECK] [CHECK-WARN] [fsdp-... rank=0] HPC-X SHARP plugin detected: ...
+[RANK-CHECK] [CHECK-PASS] [fsdp-... rank=0] Identity ... unique within pod.
+[DIAG-CHECK] [CHECK-WARN] [fsdp-... rank=0] No hardware diagnostic path found...
+[NCCL-PROFILER-CHECK] [CHECK-PASS] [fsdp-... rank=0] NCCL at '/workspace/nccl-2.32.3/build/lib/libnccl.so.2' supports profiler_v3+ — Inspector plugin will load correctly.
+[STARTUP] [fsdp-... rank=0] Environment self-checks complete.
+```
+
+All 4 checks confirmed running and logging correctly. No silent skip.
+
+Fault trial: TORCHRUN_EXIT: 0 + 2 STRAGGLER-INCIDENTs (stat=mean_tiered, role_rank=1, mm=33× and 107×) — real detection, not a silent false pass. OUTDIR fix confirmed: logs and checkpoint files written to correct location.
+
+Healthy trial: TORCHRUN_EXIT: 0 + 0 incidents. Zero false positives.
+
+**Log readability improvements also confirmed live** (all from same run):
+- `member=257[OS-PID]` in STRAGGLER-INCIDENT header ✓
+- `bucket_mb=0.44` in STRAGGLER-INCIDENT header ✓
+- `alert_window_60s=4 [isolated finding]` in STRAGGLER-INCIDENT header ✓
+- 4 SSH/DCGM lines (deduplicated from 30+) ✓
+
+#### 6.20.3 Verdict
+
+Both fixes verified correct on live K8s cluster. No behavior difference between Slurm (where fixes were originally found and tested) and K8s (where the shared code was applied). The OUTDIR/DUMPDIR and startup_checks.sh fixes transfer correctly across platforms.
+
+---
 
 ### 6.29 Push confirmation, relative-path live re-verification, a genuine new wrapper bug found and fixed live, and the two items that cannot be closed by engineering (2026-11)
 

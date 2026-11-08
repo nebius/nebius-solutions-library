@@ -164,19 +164,19 @@ def _format_unconfirmed(f, subject, ruled_out=None, impossible=None, class2_flag
     if "statistic" in ev:
         mm_str = f"{ev['mm']:.1f}x" if ev['mm'] != float("inf") else "far above (peer group showed none)"
         z_str = f"{ev['z']:.1f}" if ev['z'] != float("inf") else "undefined (zero peer variance)"
-        lines.append(f"  {subject}'s exec-time {ev['statistic']} is {mm_str} its node peers "
-                      f"({ev['statistic']}, z={z_str}).")
-        # Same concrete real-number disclosure as _format_confirmed/
-        # _format_probable above, polished to the same .1f/us convention
-        # (this one previously rendered raw, unformatted Python values --
-        # e.g. "Raw value: 1053.234, peer mean: 29.5017" -- harder to read
-        # than necessary for the exact same real data).
-        comparison_line = _real_exec_comparison_line(ev)
-        if comparison_line:
-            lines.append(comparison_line)
+        # Log-readability fix: show root-cause determination FIRST, before the
+        # technical ratio/z values. Independent review found "consistent with being
+        # the real root cause" was buried 40+ lines in and missed under time pressure.
+        # This is the key diagnostic: tells the reader whether to investigate THIS
+        # rank directly vs look for a correlated upstream finding. Presentation-only.
         root_cause_line = _root_cause_line(f)
         if root_cause_line:
             lines.append(root_cause_line)
+        lines.append(f"  {subject}'s exec-time {ev['statistic']} is {mm_str} its node peers "
+                      f"({ev['statistic']}, z={z_str}).")
+        comparison_line = _real_exec_comparison_line(ev)
+        if comparison_line:
+            lines.append(comparison_line)
     else:
         lines.append(f"  Node aggregate diff {ev['diff_sd_units']:.2f} SD units, no within-node outlier.")
     lines.append("")

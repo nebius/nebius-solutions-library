@@ -2,6 +2,12 @@
 # Launch a Megatron TP/PP training job with the straggler-detection pipeline
 # on Kubernetes. Source cluster_k8s.env first, then run this script.
 #
+# PREREQUISITE: k8s/deploy.sh must have been run first to create the namespace,
+# workspace PVC, VictoriaMetrics, and alert engine Deployment. This script
+# submits a training Job only — it does NOT start the alert engine. The alert
+# engine runs as a K8s Deployment (deployed by deploy.sh); check its logs with:
+#   kubectl logs -n straggler-detection deployment/alert-engine -f | grep -v DCGM
+#
 # Usage:
 #   source cluster_k8s.env
 #   k8s/run_megatron_k8s.sh [train_iters] [port] [pin_mode] [sleep_ms] [target_ranks]

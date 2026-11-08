@@ -84,19 +84,22 @@ spec:
               value: "${JOB_RUN_NAME}-0.${JOB_RUN_NAME}-headless.straggler-detection.svc.cluster.local"
             - name: TRAINING_GPUS_PER_NODE
               value: "${TRAIN_GPUS}"
+            # NCCL 2.32.3: required for profiler plugin (ncclProfiler_v5) support.
+            # NCCL 2.25.1 (host default) only supports profiler_v1/v2; Inspector
+            # exports only v5, so dumps are not written without 2.32.3.
+            # Pass "" to use host NCCL (no Inspector, no detection).
             - name: TRAINING_NCCL_LIB_PATH
-              value: ""
+              value: "${NCCL_LIB_PATH}"
             - name: NCCL_INSPECTOR_DUMP_DIR
               value: /inspector-dumps
             - name: PIN_MODE
               value: "${PIN_MODE}"
-            # NCCL_IB_DISABLE=1: required workaround for HPC-X SHARP RDMA plugin
-            # segfault with multiple NCCL process groups (FSDP sharding groups)
-            # on pytorch:25.01-py3. startup_checks.sh will also set
-            # NCCL_NET_PLUGIN to a non-existent path to prevent HPC-X teardown
-            # segfault. See DESIGN_NOTES §6.9.1 for the full diagnosis.
-            - name: NCCL_IB_DISABLE
-              value: "1"
+            # NCCL_IB_DISABLE: NOT set for FSDP. FSDP creates ONE NCCL process group
+            # (like nanoGPT DDP); HPC-X only segfaults on MULTIPLE concurrent process
+            # groups (Megatron TP+PP+DP). FSDP trains fine over RDMA without disabling IB.
+            # Keeping RDMA is essential for detection: with TCP (NCCL_IB_DISABLE=1), the
+            # hierarchical AllGather structure is lost and mm drops to ~2×, below threshold.
+            # If you observe HPC-X segfaults on FSDP specifically, see DESIGN_NOTES §6.13.
             - name: STRAGGLER_MODE
               value: "${STRAGGLER_MODE}"
             - name: STRAGGLER_PHASE

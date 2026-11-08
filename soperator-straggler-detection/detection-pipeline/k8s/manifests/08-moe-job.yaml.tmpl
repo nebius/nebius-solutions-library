@@ -94,10 +94,22 @@ spec:
             # MoE's AllToAll expert routing also creates multiple NCCL process groups.
             - name: NCCL_IB_DISABLE
               value: "1"
+            # sleep-before-backward fault injection (WRONG for MoE — sleep runs after
+            # the AllToAll in forward, so the AllToAll never sees the straggler signal).
+            # Use MOE_FAULT_TARGET_RANK + MOE_FAULT_DELAY_US instead (see below).
             - name: STRAGGLER_SLEEP_MS
               value: "${SLEEP_MS}"
             - name: STRAGGLER_TARGET_RANKS
               value: "${TARGET_RANKS}"
+            # AllToAll-targeted fault injection (CORRECT for MoE):
+            # Delay injected INSIDE model_moe.py's MoEMLP.forward(), immediately before
+            # the dist_nn_func.all_to_all_single() dispatch call. This creates a straggler
+            # signal in the AllToAll collective that the tiered check can detect.
+            # Set MOE_FAULT_TARGET_RANK=N and MOE_FAULT_DELAY_US=100000 (100ms).
+            - name: MOE_FAULT_TARGET_RANK
+              value: "${MOE_FAULT_TARGET_RANK}"
+            - name: MOE_FAULT_DELAY_US
+              value: "${MOE_FAULT_DELAY_US}"
             - name: NCCL_INSPECTOR_DUMP_VERBOSE
               value: "0"
           command:

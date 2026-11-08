@@ -39,6 +39,7 @@ else
   # warning instead of silent skip, consistent with that stated contract.
   echo "[STARTUP] [$(hostname)] WARNING: $_CHECKS_SCRIPT not found -- NCCL plugin," \
        "rank-uniqueness, and hardware-diagnostic self-checks did NOT run this job." >&2
+
 fi
 
 # Wait for the rendezvous DNS entry to be resolvable before starting torchrun.

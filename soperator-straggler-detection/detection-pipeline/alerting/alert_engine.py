@@ -1502,11 +1502,7 @@ def format_alert(finding, coverage):
     gpu_slot_disp = finding.get("dcgm_gpu_slot_used") if finding.get("dcgm_gpu_slot_known") else "unknown"
     role_rank_disp = finding.get("role_rank", "na")
     role_n_disp = finding.get("role_n", "na")
-    # Log-readability fix (independent fresh-eyes review, 2026-11): pattern=
-    # distinguishes "this exact (host, comm, rank) has fired repeatedly in
-    # the last _REPEAT_WINDOW_S seconds" from a one-off -- orthogonal to
-    # confidence=/severity= (see _record_and_count_repeat's docstring).
-    # Presentation only: never gates, delays, or suppresses this alert.
+    # pattern=/burst= added for log-readability (presentation only, no detection change).
     repeat_n = _record_and_count_repeat((host, comm, rank))
     pattern_disp = f"REPEATED(n={repeat_n})" if repeat_n >= _REPEAT_THRESHOLD else "SINGLE"
     burst_disp = _burst_label()
@@ -1568,17 +1564,27 @@ def format_alert(finding, coverage):
     # here -- even though the tier above may already have been capped at
     # PROBABLE for this exact reason, so the reader knows WHY.
     if finding.get("job_already_completed"):
-        cascade_line += (
-            f"\n\nJOB NOT CONFIRMED STILL RUNNING AT ALERT TIME: this job's own "
-            f"Slurm state could not be confirmed as actively running (RUNNING) "
-            f"at the moment this alert fired -- most likely because it already "
-            f"completed. A real, common cause at exactly this boundary: "
-            f"individual ranks reach their own last real collective at slightly "
-            f"different moments as a job exits (one rank writes a checkpoint "
-            f"first, another doesn't), producing a genuine timing asymmetry that "
-            f"looks like a live straggler but isn't something anyone can act on "
-            f"for a job that has already finished. Treat with reduced confidence."
-        )
+        # Log-readability fix: on K8s, squeue is structurally unavailable so this
+        # fires on EVERY alert with the same 4-line text. Condense to one line on K8s
+        # to avoid drowning the actual detection content. Full text preserved for Slurm.
+        _plat = finding.get("_platform", "")
+        if "kubernetes" in _plat:
+            cascade_line += (
+                f"\n\nK8s platform: Slurm squeue unavailable — job boundary check not "
+                f"possible. Alert may trail job exit; treat confidence as PROBABLE at best."
+            )
+        else:
+            cascade_line += (
+                f"\n\nJOB NOT CONFIRMED STILL RUNNING AT ALERT TIME: this job's own "
+                f"Slurm state could not be confirmed as actively running (RUNNING) "
+                f"at the moment this alert fired -- most likely because it already "
+                f"completed. A real, common cause at exactly this boundary: "
+                f"individual ranks reach their own last real collective at slightly "
+                f"different moments as a job exits (one rank writes a checkpoint "
+                f"first, another doesn't), producing a genuine timing asymmetry that "
+                f"looks like a live straggler but isn't something anyone can act on "
+                f"for a job that has already finished. Treat with reduced confidence."
+            )
 
     # item-6 -- real job context, informational only (never read
     # by determine_confirmed_path or any tier-affecting logic -- see
@@ -1876,6 +1882,11 @@ class AlertEngine:
         self._dcgm_fallback_thread = None
         self._dcgm_fallback_streak = {}  # key -> (member, consecutive sweeps)
         self._mean_gate_logged = set()
+        # Volume/burst classification: track timestamps of recent STRAGGLER-INCIDENT
+        # events to show "N incidents in last 60s" context in each alert header.
+        # A burst (N>10 in 60s) suggests systemic noise; isolated (N<=4) is genuine.
+        # Presentation-layer only — does not affect detection, threshold, or attribution.
+        self._recent_incident_ts = deque()   # timestamps of recent _emit() fires
         # P27-hotfix2 -- nv-hostengine liveness, same dead-man's-switch
         # discipline as pipeline_down/n_pipeline_down_cycles above: found
         # this session that nv-hostengine (the persistent DCGM daemon every
@@ -4723,9 +4734,22 @@ class AlertEngine:
             except (ValueError, TypeError):
                 _bucket_mb = ""
             _ratio_label = "mm [min_max_ratio]" if stat_name in ("mean", "mean_tiered") else "z_score"
-            header = (f"[STRAGGLER-INCIDENT] incident_id={incident_id} stat={stat_name} host={hostname} comm={comm} member={member} "
+            # Volume/burst classification: count incidents in last 60s.
+            # Reviewers confirmed this context is essential: "isolated (N=4)" vs
+            # "burst (N=104)" changes action immediately. Deque tracks timestamps.
+            _now_ts = time.time()
+            while self._recent_incident_ts and self._recent_incident_ts[0] < _now_ts - 60:
+                self._recent_incident_ts.popleft()
+            self._recent_incident_ts.append(_now_ts)
+            _incident_count = len(self._recent_incident_ts)
+            _burst_label = "BURST — systemic issue likely, check all simultaneously" if _incident_count > 10 else "isolated finding"
+            _window_ctx = f" alert_window_60s={_incident_count} [{_burst_label}]"
+            # Log-readability fix: label member= as [OS-PID] on the STRAGGLER-INCIDENT
+            # line too — reviewer confirmed this avoids "incident-only readers" conflating
+            # the NCCL member ID with a training rank even if they never reach the ALERT block.
+            header = (f"[STRAGGLER-INCIDENT] incident_id={incident_id} stat={stat_name} host={hostname} comm={comm} member={member}[OS-PID] "
                       f"gpu_slot={slot_disp} bucket={bucket}{_bucket_mb} coll={coll} severity_ratio={severity_ratio:.2f} [{_ratio_label}] "
-                      f"persisted_s={dur_disp} role_rank={role_rank} role_n={role_n}{job_ctx_disp}")
+                      f"persisted_s={dur_disp} role_rank={role_rank} role_n={role_n}{_window_ctx}{job_ctx_disp}")
             print(header, flush=True)
             self._append_alert_summary(header)
             self._push_visibility_metric(
@@ -4768,6 +4792,7 @@ class AlertEngine:
         # through to display.
         finding["role_rank"] = role_rank
         finding["role_n"] = role_n
+        finding["_platform"] = self._platform  # for K8s-condensed JOB-NOT-CONFIRMED
         if _incident_fired_this_call:
             finding["incident_id"] = incident_id
         # Real gap found live: is_likely_root_cause was only ever pushed as
@@ -5276,9 +5301,14 @@ class AlertEngine:
                 if not alive:
                     self.n_dcgm_hostengine_down_cycles += 1
                     self.dcgm_hostengine_down[host] = True
-                    print(f"[DCGM-HOSTENGINE-DOWN] hostname={host} :: {reason} -- every DCGM-sourced "
-                          f"cause-check on this host is degraded to 'couldn't check' until this recovers",
-                          file=sys.stderr, flush=True)
+                    # Log-readability fix: only print on state change (new failure).
+                    # Previously fired on EVERY check interval when SSH unavailable
+                    # on K8s, producing 30+ identical lines per run with zero added
+                    # signal — a known K8s structural condition, not a recoverable event.
+                    if not was_down:
+                        print(f"[DCGM-HOSTENGINE-DOWN] hostname={host} :: {reason} -- every DCGM-sourced "
+                              f"cause-check on this host is degraded to 'couldn't check' until this recovers",
+                              file=sys.stderr, flush=True)
                 elif was_down:
                     self.dcgm_hostengine_down[host] = False
                     print(f"[DCGM-HOSTENGINE-RECOVERED] hostname={host}", file=sys.stderr, flush=True)

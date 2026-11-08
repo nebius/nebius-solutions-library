@@ -30,16 +30,15 @@ case "$OUTDIR" in /*) ;; *) OUTDIR="$_PKG_ROOT_FOR_OUTDIR/$OUTDIR" ;; esac
 case "$DUMPDIR" in /*) ;; *) DUMPDIR="$_PKG_ROOT_FOR_OUTDIR/$DUMPDIR" ;; esac
 
 # Environment self-checks (NCCL plugin, rank uniqueness, DCGM availability)
+
 _CHECKS_SCRIPT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/k8s/startup_checks.sh"
+_cw=0
+while [ $_cw -lt 60 ] && [ ! -f "$_CHECKS_SCRIPT" ]; do sleep 2; _cw=$((_cw + 2)); done
 if [ -f "$_CHECKS_SCRIPT" ]; then
-  source "$_CHECKS_SCRIPT"
+    source "$_CHECKS_SCRIPT"
 else
-  # startup_checks.sh's own header says "No check silently fails" -- this
-  # conditional source was the one way it actually could (confirmed: a fresh
-  # namespace where the workspace PVC isn't mounted yet hits this). Loud
-  # warning instead of silent skip, consistent with that stated contract.
-  echo "[STARTUP] [$(hostname)] WARNING: $_CHECKS_SCRIPT not found -- NCCL plugin," \
-       "rank-uniqueness, and hardware-diagnostic self-checks did NOT run this job." >&2
+    echo "[STARTUP] [$(hostname)] WARNING: $_CHECKS_SCRIPT not found -- NCCL plugin," \
+         "rank-uniqueness, and hardware-diagnostic self-checks did NOT run this job." >&2
 fi
 
 _LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../../lib/cluster_topology_k8s.sh"

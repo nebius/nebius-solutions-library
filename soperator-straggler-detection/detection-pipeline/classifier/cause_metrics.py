@@ -13,6 +13,14 @@ import sys
 import time
 import concurrent.futures
 
+# Log-readability fix: deduplicate SSH-FAILED logs. On K8s, ssh is permanently
+# unavailable — logging every failure every poll cycle produced 34+ identical
+# [SSH-FAILED] lines per run with zero added signal. Rate-limit to once per
+# hour per (host, error_type) pair. Only structural failures are deduped;
+# timeout errors (each may have different context) are always logged.
+_SSH_FAILED_LOGGED = {}   # (host, error_class) → last_logged_timestamp
+_SSH_FAILED_LOG_INTERVAL_S = 3600  # 1 hour dedup window per host+error
+
 # Stage 3 fix: query_matmul_tflops's own default path below was missed by
 # Stage 2's item-4 sys.path/hardcoded-path sweep (that sweep fixed health_
 # exclusions.py's degraded_gpus_live default the same way -- this is the
@@ -184,7 +192,14 @@ def ssh(host, cmd, timeout=15):
         return "", msg, 1
     except OSError as e:
         msg = f"ssh {host} failed to run: {type(e).__name__}: {e}"
-        print(f"[SSH-FAILED] {msg}", file=sys.stderr, flush=True)
+        # Deduplicate: log once per hour per (host, error type). OSError
+        # from missing ssh binary fires on every poll — dedup prevents the
+        # 34+ identical lines per run that added no signal on K8s.
+        _key = (host, type(e).__name__)
+        _now = time.time()
+        if _now - _SSH_FAILED_LOGGED.get(_key, 0) > _SSH_FAILED_LOG_INTERVAL_S:
+            _SSH_FAILED_LOGGED[_key] = _now
+            print(f"[SSH-FAILED] {msg}", file=sys.stderr, flush=True)
         return "", msg, 1
 
 
