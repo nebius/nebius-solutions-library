@@ -43,6 +43,14 @@ MOE_NUM_EXPERTS = 8
 # cycles that a real network/host straggler wouldn't.
 MOE_FAULT_TARGET_RANK = int(os.environ.get("MOE_FAULT_TARGET_RANK", "-1"))
 MOE_FAULT_DELAY_US = float(os.environ.get("MOE_FAULT_DELAY_US", "0"))
+# Item-3 diagnostic (2026-11): prints the RAW value this process's own
+# environment actually resolved, once per process at import time -- the only
+# way to directly confirm srun's --export=ALL propagated these two vars
+# into the pyxis container rather than silently falling back to their
+# "no fault" defaults (-1 / 0), which would make the fault-injection
+# condition below permanently false with no visible error anywhere.
+print(f"[MOE-FAULT-CONFIG] pid={os.getpid()} target_rank={MOE_FAULT_TARGET_RANK} "
+      f"delay_us={MOE_FAULT_DELAY_US}", flush=True)
 
 class LayerNorm(nn.Module):
     """ LayerNorm but with an optional bias. PyTorch doesn't support simply bias=False """
@@ -199,11 +207,23 @@ class MoEMLP(nn.Module):
         if self.rank == MOE_FAULT_TARGET_RANK and MOE_FAULT_DELAY_US > 0:
             time.sleep(MOE_FAULT_DELAY_US / 1e6)
 
+        # Item-3 ground-truth instrumentation (2026-11): a plain, additive-only
+        # wall-clock print bracketing the real dispatch collective itself, so a
+        # fault trial's claim "the AllToAll collective was actually delayed"
+        # can be verified directly from this rank's own log, not just assumed
+        # from the sleep's placement in the source. Every rank prints this
+        # (cheap; one time.time() + one print per forward per block), not
+        # gated on MOE_FAULT_TARGET_RANK, so a healthy run gives the real
+        # baseline dispatch_ms to compare a fault run against -- never
+        # suppressed or omitted when no fault is injected.
+        _t_dispatch0 = time.time()
         # step 2: dispatch -- real tokens, autograd-aware so gradients
         # flow back through routing during backward()
         recv = dist_nn_func.all_to_all_single(
             torch.empty(sum(output_splits), C, device=x.device, dtype=x.dtype),
             x_sorted, output_splits, input_splits)
+        print(f"[MOE-DISPATCH-TIMING] rank={self.rank} block={id(self)} round={self._fwd_idx} "
+              f"dispatch_ms={(time.time() - _t_dispatch0) * 1000:.1f}", flush=True)
 
         processed = self.expert(recv) if self.rank < self.num_experts else recv
 

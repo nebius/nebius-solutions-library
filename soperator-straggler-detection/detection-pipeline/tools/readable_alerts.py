@@ -9,10 +9,14 @@ communicator, and a one-line verdict.
   tools/readable_alerts.py [--log FILE] [--summary FILE] [--since ISO8601]
 
 Reading guide (what the raw fields mean):
-  rank=<N>      OS PROCESS ID (pid) of the training process on that node -- NOT the training rank.
-                Pids repeat across nodes/runs; always read it together with node=.
+  pid=<N>       OS PROCESS ID of the training process on that node -- NOT the training rank
+                (older log lines from a not-yet-restarted engine instance may still say rank=;
+                same value, same meaning). Pids repeat across nodes/runs; always read it with node=.
   gpu_slot      GPU index on that node.          comm=0x..  an NCCL communicator (a group of ranks).
-  role_rank/n   this member's position / size within its communicator's role (na = not resolved).
+  role_rank/n   this member's position / size within its communicator's role (na = not resolved) --
+                scoped to the comm= on the SAME line: the same pid can legitimately show a
+                different role_rank/role_n under a different comm= (it belongs to multiple real
+                communicators at once), never a contradiction or a bug.
   confidence    CONFIRMED (independent cause corroborated) > PROBABLE > UNCONFIRMED. LOG-ONLY never pages.
   Times are microseconds in the raw log; shown here as us/ms."""
 import argparse, collections, re, sys, os
@@ -84,11 +88,19 @@ def main():
         if a.since and when and when < a.since: continue
         what, why, kind = describe(b); f = b["f"]
         counts[kind] += 1
-        who = "cluster" if kind == "cluster-scope" else f"{f.get('node','?')} GPU {f.get('gpu_slot','?')} (pid {f.get('rank','?')})"
+        # Real bug found live (independent item-4 re-review, 2026-11): hardcoded
+        # f.get('rank', ...) -- the OLD field name, before the rank=->pid= rename
+        # (08d7fa01). kv() stores whatever key literally appears on the line, so a
+        # current-format line (pid=) was silently rendering "(pid ?)" here, never
+        # caught because every log this tool had been tested against so far
+        # happened to come from a stale, not-yet-restarted engine instance still
+        # emitting the old rank= name. Accepts either key; real current-format
+        # lines use pid=, rank= is kept as a fallback for old pasted/stale lines.
+        who = "cluster" if kind == "cluster-scope" else f"{f.get('node','?')} GPU {f.get('gpu_slot','?')} (pid {f.get('pid', f.get('rank','?'))})"
         key = f.get("comm", "cluster")
         groups.setdefault(key, []).append((when, f.get("confidence", "-"), f.get("severity", "-"), kind, who, what, why, f))
         if kind == "culprit": culprits.append(who)
-    print("ALERTS, grouped by communicator (rank= in raw logs is an OS pid, shown here as 'pid')\n")
+    print("ALERTS, grouped by communicator (pid= in raw logs is an OS pid, not the training rank)\n")
     for comm, rows in groups.items():
         print(f"communicator {comm if comm != 'cluster' else '(cluster-wide)'}")
         for when, conf, sev, kind, who, what, why, f in rows:

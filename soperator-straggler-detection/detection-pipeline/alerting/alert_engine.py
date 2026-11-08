@@ -1502,12 +1502,6 @@ def format_alert(finding, coverage):
     gpu_slot_disp = finding.get("dcgm_gpu_slot_used") if finding.get("dcgm_gpu_slot_known") else "unknown"
     role_rank_disp = finding.get("role_rank", "na")
     role_n_disp = finding.get("role_n", "na")
-    # Log-readability fix (third independent review, 2026-11): role_n=
-    # appearing as 4 on one line and 48 on another for the SAME pid/node is
-    # real and legitimate, not a bug. comm= moved to sit directly next to
-    # role_rank=/role_n= so the three fields that describe ONE communicator's
-    # view of this process read as a visual unit. pid= (no suffix needed --
-    # context makes it clear it's a process ID, not a training rank).
     # pattern=/burst= added for log-readability (presentation only, no detection change).
     repeat_n = _record_and_count_repeat((host, comm, rank))
     pattern_disp = f"REPEATED(n={repeat_n})" if repeat_n >= _REPEAT_THRESHOLD else "SINGLE"
@@ -1524,8 +1518,10 @@ def format_alert(finding, coverage):
         _triage = "SECONDARY[waiter-cascade,see-PRIMARY-alert]"
     else:
         _triage = "PRIMARY"
-    header = (f"[ALERT] triage={_triage} role_rank={role_rank_disp} role_n={role_n_disp} comm={comm} "
-              f"pid={rank} gpu_slot={gpu_slot_disp} "
+    # pid-first ordering (remote review): identifies the actor before per-group
+    # attributes to reduce "same pid, contradictory role_n" confusion.
+    header = (f"[ALERT] triage={_triage} pid={rank} role_rank={role_rank_disp} role_n={role_n_disp} comm={comm} "
+              f"gpu_slot={gpu_slot_disp} "
               f"node={host} type={fault_type} confidence={tier} "
               f"severity={severity} pattern={pattern_disp} burst={burst_disp}{incident_id_part}")
     # P21.6 -- cascade-mislocalization fix: shown prominently, right after
@@ -3909,11 +3905,14 @@ class AlertEngine:
         _wi_burst = _burst_label()
         lines = [
             # role_n= scoping fix: see format_alert's own comment -- comm=
-            # moved next to role_rank=/role_n= so the triple reads as one
+            # sits next to role_rank=/role_n= so the triple reads as one
             # communicator's view, since the same pid legitimately shows a
-            # different role_n under a different comm.
-            f"[WAIT-INDUCED-ALERT] role_rank={d['role_rank']} role_n={d['role_n']} comm={comm} "
-            f"pid={culprit} gpu_slot={slot} node={culprit_host} type=compute "
+            # different role_n under a different comm; pid= leads the line
+            # (independent item-4 re-review, 2026-11 -- see format_alert's
+            # own comment for why the reorder alone, without comm=,
+            # wasn't enough).
+            f"[WAIT-INDUCED-ALERT] pid={culprit} role_rank={d['role_rank']} role_n={d['role_n']} comm={comm} "
+            f"gpu_slot={slot} node={culprit_host} type=compute "
             f"confidence={tier} severity={severity} pattern={_wi_pattern} burst={_wi_burst}",
             "",
             f"WAIT-INDUCED STRAGGLER ({len(per_member)}-member comm): this member's OWN current "
@@ -4195,11 +4194,12 @@ class AlertEngine:
         action_note = "" if validated else " action=NONE"
         lines = [
             # role_n= scoping fix: see format_alert's own comment -- comm=
-            # moved next to role_rank=/role_n= so the triple reads as one
+            # sits next to role_rank=/role_n= so the triple reads as one
             # communicator's view, since the same pid legitimately shows a
-            # different role_n under a different comm.
-            f"{header_tag} role_rank={data['role_rank']} role_n={data['role_n']} comm={comm} "
-            f"pid={member} gpu_slot={slot} node={data['hostname']} type=compute "
+            # different role_n under a different comm; pid= leads the line
+            # (independent item-4 re-review, 2026-11).
+            f"{header_tag} pid={member} role_rank={data['role_rank']} role_n={data['role_n']} comm={comm} "
+            f"gpu_slot={slot} node={data['hostname']} type=compute "
             f"confidence={tier} severity={severity} pattern={_rb_pattern} burst={_rb_burst}{action_note}",
             "",
             f"ROLE-BASELINE DEVIATION: this member's current reading (current_mean_us="

@@ -213,14 +213,21 @@ detail; these are structural, currently-accepted gaps, not bugs waiting to be fi
    (z≈0.7) regardless of whether a real straggler is present — this is a structural property of the
    statistic, not a detector-quality gap. Validated working correctly starting at 4 nodes. See
    DESIGN_NOTES.md §6.11/§6.21.
-3. **MoE fault detection does not work with the current fault-injection method.** The injector
-   delays the backward pass, but the real per-expert signal lives in the forward-pass AllToAll
-   routing collective, which completes *before* that delay — so the injected fault lands in the
-   wrong phase and produces no detectable signal (confirmed: 0/3 fault trials fired, with correctly
-   zero false positives on 3/3 healthy trials). The signal is real and detectable in principle (the
-   AllToAll forms an evaluable 16-member communicator) but needs the fault injected *at* the
-   AllToAll call itself, not before backward. **Not yet implemented** — scoped as a named follow-up.
-   See DESIGN_NOTES.md §6.27.2.
+3. **MoE fault detection does not work, for a deeper reason than injection timing alone.** The
+   originally-suspected cause (the injector delaying the backward pass, after the forward-pass
+   AllToAll routing collective already completed) is real but not the whole story: the
+   already-implemented, correctly-placed fix (inject immediately before the dispatch AllToAll
+   itself — `workloads/moe/run_moe_delayfault.sh`) was tried and still produces **zero detections**
+   (0/2 real trials, including a diagnostic with an unmistakable 2-second delay), even though the
+   delay is confirmed real and correctly timed via NCCL Inspector's own raw dump data. Root cause:
+   the aggregator's entire timing statistic is built on each collective's own measured execution
+   duration, not the gap before it starts — a host-side pre-collective sleep (this project's only
+   fault-injection mechanism, for every workload) produces exactly that kind of gap, which this
+   metric cannot see for MoE's AllToAll (implemented as grouped point-to-point Send/Recv), unlike
+   AllReduce-style collectives (where the same injection style is confirmed working repeatedly
+   elsewhere in this project). A genuine fix needs new aggregator-side measurement logic for this
+   collective type — out of scope for a presentation-layer-only change, and not attempted here.
+   See DESIGN_NOTES.md §6.27.2 and §6.29.6.
 
 - **Shape/strategy coverage (2026-11, DESIGN_NOTES.md 6.12-6.19):** MoE has a real, intermittent (1-in-3 observed)
   collective-participation hang on healthy runs, independent of the detector, not root-caused (6.12.1). Deep

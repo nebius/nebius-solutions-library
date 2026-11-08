@@ -60,7 +60,10 @@ echo "--- queue check ---"
 if [ -n "$(squeue -u soperatorchecks -h)" ]; then echo "ABORT: soperatorchecks job active"; exit 1; fi
 if [ -n "$(squeue -u "$USER" -h)" ]; then echo "ABORT: existing job for $USER already queued/running"; exit 1; fi
 
-mkdir -p "$OUTDIR"
+mkdir -p "$OUTDIR" "$DUMPDIR_BASE"
+# Real bug found live (same class found in run_megatron_tp4pp4dp3.sh):
+# DUMPDIR_BASE was never created before srun's --container-mounts list is
+# built, so a not-yet-created DUMPDIR_BASE makes pyxis fail the whole job.
 
 srun --nodes="$NUM_NODES" --ntasks="$NUM_NODES" --ntasks-per-node=1 --gpus-per-node="$GPUS_PER_NODE" -w "$NODE_LIST" \
   --container-image="$IMAGE" \

@@ -102,12 +102,40 @@ def _default_vm_url():
         pass
     return "http://worker-0:8428"
 
-HEADER_RE = re.compile(
-    r"rank=(?P<member>\S+)\s+gpu_slot=(?P<gpu_slot>\S+)\s+role_rank=(?P<role_rank>\S+)\s+"
-    r"role_n=(?P<role_n>\S+)\s+comm=(?P<comm>\S+)\s+node=(?P<hostname>\S+)"
-)
+# Real bug found live (independent item-4 re-review, 2026-11): this used to
+# be ONE regex requiring an exact field order (rank= gpu_slot= role_rank=
+# role_n= comm= node=) -- already silently broken since the rank=->pid=
+# rename (08d7fa01) landed in alert_engine.py, since "rank=" no longer
+# appears in a real header at all (0 matches, not a partial/wrong parse --
+# this tool's entry point (a) has been non-functional against any real
+# current-format header since that commit). Made order-independent (one
+# small regex per field, searched anywhere in the line) so it survives
+# alert_engine.py's own header field reordering (and any future one)
+# instead of re-breaking every time that file's presentation layer changes.
+# "pid=" is the current name; "rank=" is still accepted as a fallback so a
+# human can paste an old-format line (e.g. from a stale, not-yet-restarted
+# alert_engine.py process -- a real, separate issue found this same round)
+# and still get a parse instead of a silent None.
+_FIELD_RES = {
+    "member": re.compile(r"(?:pid|rank)=(\S+)"),
+    "gpu_slot": re.compile(r"gpu_slot=(\S+)"),
+    "role_rank": re.compile(r"role_rank=(\S+)"),
+    "role_n": re.compile(r"role_n=(\S+)"),
+    "comm": re.compile(r"comm=(\S+)"),
+    "hostname": re.compile(r"node=(\S+)"),
+}
 BODY_BUCKET_RE = re.compile(r"bucket=(?P<bucket>\S+)\s+bytes,\s*coll=(?P<coll>\S+)")
-CHECK_HEADER_TAGS = ("[ALERT]", "[WAIT-INDUCED-ALERT]", "[ROLE-BASELINE-ALERT]")
+# Real bug found live (independent item-4 re-review, 2026-11): [ROLE-BASELINE-ALERT]
+# was renamed to [ROLE-BASELINE-INFO] for the (common) unvalidated case back in
+# alert_engine.py's own log-audit fix (see its _emit_role_baseline_alert), but this
+# tool's tag list was never updated to match -- meaning grep_plain_alerts's
+# substring classification ("[ROLE-BASELINE-ALERT]" in line) silently matched
+# ZERO real [ROLE-BASELINE-INFO] lines (the form that actually fires in virtually
+# every real case, since ROLE_BASELINE_UNVALIDATED_GATING_ACTIVE defaults True),
+# so Check 3's plain-log evidence was silently empty for any current-format log.
+# Both forms included here; [ROLE-BASELINE-ALERT] stays too since the validated
+# case still uses it.
+CHECK_HEADER_TAGS = ("[ALERT]", "[WAIT-INDUCED-ALERT]", "[ROLE-BASELINE-ALERT]", "[ROLE-BASELINE-INFO]")
 
 
 # ---------------------------------------------------------------------------
@@ -125,10 +153,12 @@ def parse_log_line(text):
     re-discovers them live from VM instead. Returns None if the pasted
     text doesn't match any real header this project emits -- an honest
     "couldn't parse this," never a partial guess."""
-    m = HEADER_RE.search(text)
-    if not m:
-        return None
-    out = m.groupdict()
+    out = {}
+    for key, pat in _FIELD_RES.items():
+        m = pat.search(text)
+        if not m:
+            return None
+        out[key] = m.group(1)
     bm = BODY_BUCKET_RE.search(text)
     out["bucket"] = bm.group("bucket") if bm else None
     out["coll"] = bm.group("coll") if bm else None
@@ -398,7 +428,11 @@ def render_report(vm_url, hostname, comm, start_ts, end_ts, ref, log_path):
         confirmed_members = {s["metric"].get("member") for s in vm_rows}
         for s in vm_rows:
             lines.append(f"  {vm_line_fn(s['metric'], s)}")
-        log_matches = log_by_check.get(log_tag, [])
+        # log_tag may be a single tag or a tuple of tags that share one check
+        # (e.g. [ROLE-BASELINE-ALERT] validated + [ROLE-BASELINE-INFO] unvalidated
+        # are the same check, just two real header forms -- see CHECK_HEADER_TAGS).
+        log_tags = (log_tag,) if isinstance(log_tag, str) else log_tag
+        log_matches = [a for t in log_tags for a in log_by_check.get(t, [])]
         if start_ts is None:
             # No real timestamp resolvable at all for this identity -- every
             # log match is identity-only by construction; cap to the most
@@ -421,7 +455,7 @@ def render_report(vm_url, hostname, comm, start_ts, end_ts, ref, log_path):
                              f"member={a['parsed']['member']} role_rank={a['parsed']['role_rank']}")
                 lines.append(f"    raw: {a['line']}")
         if not vm_rows and not log_matches:
-            lines.append(f"  SILENT -- no {log_tag} evidence found for this identity")
+            lines.append(f"  SILENT -- no {'/'.join(log_tags)} evidence found for this identity")
         ref_block = ref_entry["checks"].get(ref_key, {})
         lines.append(f"  reference-table note for this shape (status={ref_block.get('status', 'UNVALIDATED')}, "
                      f"source={ref_block.get('evidence_ref') or 'n/a'}):")
@@ -441,7 +475,8 @@ def render_report(vm_url, hostname, comm, start_ts, end_ts, ref, log_path):
                       f"baseline_source={m.get('baseline_source', 'n/a')} "
                       f"value={s.get('values', [None])[-1]}"))
     render_check_section(
-        "Check 3: [ROLE-BASELINE-ALERT]", "role_baseline", "[ROLE-BASELINE-ALERT]", "role_baseline",
+        "Check 3: [ROLE-BASELINE-ALERT]/[ROLE-BASELINE-INFO]", "role_baseline",
+        ("[ROLE-BASELINE-ALERT]", "[ROLE-BASELINE-INFO]"), "role_baseline",
         lambda m, s: (f"FIRED (time-confirmed): member={m.get('member')} role_rank={m.get('role_rank')} "
                       f"role_n={m.get('role_n')} baseline_source={m.get('baseline_source', 'n/a')} "
                       f"volatile={m.get('volatile', 'n/a')} value={s.get('values', [None])[-1]}"))

@@ -54,7 +54,13 @@ echo "--- queue check ---"
 if [ -n "$(squeue -u soperatorchecks -h)" ]; then echo "ABORT: soperatorchecks job active"; exit 1; fi
 if [ -n "$(squeue -u "$USER" -h)" ]; then echo "ABORT: existing job for $USER already queued/running"; exit 1; fi
 
-mkdir -p "$OUTDIR"
+mkdir -p "$OUTDIR" "$DUMPDIR_BASE"
+# Real bug found live: DUMPDIR_BASE was never created before srun's
+# --container-mounts list is built below, which bind-mounts it by path --
+# a DUMPDIR_BASE that doesn't already exist on the host makes pyxis fail
+# the whole job ("couldn't start container" / enroot-mount: No such file
+# or directory), every time a caller uses a not-yet-created dump dir
+# (confirmed live with a fresh relative-OUTDIR trial).
 
 # Real bug found live (this session): megatron.core.datasets.helpers_cpp
 # is JIT-compiled via a plain `make` on first import (see Megatron-LM's
