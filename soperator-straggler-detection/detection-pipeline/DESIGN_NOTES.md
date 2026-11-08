@@ -5314,3 +5314,65 @@ The `stat_name` and `bucket` fields are now passed through the finding dict so `
 The merge of the OUTDIR fix (remote) with the poll-wait startup_checks.sh fix (local) left a dangling `fi` at line 44 of `train_node_shape1_k8s.sh`, causing all nanoGPT K8s training to fail with `syntax error near unexpected token 'fi'`. Fixed by removing the spurious `fi`.
 
 
+
+---
+
+### 6.23 Extended soak test: 20000-step stability confirmation (2026-11)
+
+**Workload**: nanoGPT 85M DDP, 2 nodes × 8 H200, 20000 steps (≈10 min at 29ms/iter with MFU=74%).
+**Comparison**: prior soak was 3000 steps (≈3 min). This run is 6.7× longer in iteration count.
+**Fault injection**: None.
+
+| Metric | t=0 (start) | t=end (20000 steps) |
+|---|---|---|
+| Alert engine VmRSS | 33.0 MB | 33.9 MB |
+| Alert engine VmPeak | 254 MB | 559 MB (virtual only; RSS stable) |
+| STRAGGLER-INCIDENTs | — | 0 |
+| TORCHRUN_EXIT | — | 0 (both pods) |
+| Hangs / crashes | — | None |
+
+**Verdict**: Memory strictly bounded. RSS rose by < 1MB over 6.7× longer run than prior soak. Zero false positives. Zero stability issues. Confirms the 33MB baseline observed in the 3000-step soak is stable at longer duration.
+
+---
+
+### 6.24 Consolidated FSDP final regression (2026-11): 9 fault + 3 healthy trials
+
+Single-pass, back-to-back confirmation on the final pushed code (commit 91c77c8+). All 12 trials run sequentially from a clean state with NCCL 2.32.3 and RDMA (no NCCL_IB_DISABLE=1).
+
+#### 6.24.1 Fault trials (9 total)
+
+| Trial | Injected rank | EXIT | Tiered incidents | Detected role_rank | mm on 440KB AllGather |
+|---|---|---|---|---|---|
+| r1-t1 | rank=1 | 0 | 2 | 1 | 800× |
+| r1-t2 | rank=1 | 0 | 2 | 1 | 19× |
+| r1-t3 | rank=1 | 0 | 2 | 1 | 979× |
+| r5-t1 | rank=5 | 0 | 2 | 5 | 17× |
+| r5-t2 | rank=5 | 0 | 2 | 5 | 38× |
+| r5-t3 | rank=5 | 0 | 2 | 5 | 34× |
+| r9-t1 | rank=9 | 0 | 2 | 9 | 979× |
+| r9-t2 | rank=9 | 0 | 2 | 9 | 22× |
+| r9-t3 | rank=9 | 0 | 2 | 9 | 18× |
+
+**9/9 fault trials detected.** `role_rank` matches injected rank in every case. mm ranges from 17× to 979× — the tiered check's TIERED_MM_THRESH=10 is comfortably exceeded in all trials. The wide range reflects natural variation in NCCL hierarchical tree timing across runs (confirmed expected behavior from prior analysis).
+
+#### 6.24.2 Healthy trials (3 total)
+
+| Trial | EXIT | Incidents |
+|---|---|---|
+| h-t1 | 0 | 0 |
+| h-t2 | 1* | 0 |
+| h-t3 | 0 | 0 |
+
+*h-t2 EXIT=1: a pod was force-killed by external cleanup operations during active training, not a real training error. Incidents=0 confirmed from alert engine logs before cleanup.
+
+**0 false positives across 3 healthy trials.**
+
+#### 6.24.3 Verdict
+
+FSDP straggler detection is fully validated as rank-position-agnostic:
+- rank=1 (early in ring): detected 3/3, mm=19-979×
+- rank=5 (mid ring): detected 3/3, mm=17-38×
+- rank=9 (second-node, same relative position as rank=1): detected 3/3, mm=18-979×
+- Healthy: 0/3 false positives
+
+This supersedes and confirms all prior partial validation data. The result is consistent with the theoretical model: FSDP AllGather with RDMA creates a hierarchical bimodal timing distribution regardless of which rank is the straggler.
