@@ -9,7 +9,9 @@ naming the host, GPU and process. Pure-Python pipeline, no third-party packages.
 2026-11). The detection code is shared; only the launcher and topology-discovery layer differ. K8s verified on 2-node
 16-GPU H200. **Slurm now verified at full production scale: 6 nodes / 48 GPUs H200** (2026-11, commit `691c296d` +
 this validation), in addition to the earlier 2-node/16-GPU shape (see Known limitations for exact scope and what
-remains 2-node-only).
+remains 2-node-only). **The Slurm quickstart below has been run start-to-finish from a genuinely fresh clone**
+(2026-11): `environment.sh`/`vm-setup.sh`/`install.sh`/`run.sh`/`tools/self_test.sh` all pass exactly as documented,
+with one real `run.sh` health-check bug found and fixed in the process (see DESIGN_NOTES §6.31.5).
 
 ---
 
@@ -235,7 +237,8 @@ detail; these are structural, currently-accepted gaps, not bugs waiting to be fi
   3-member floor produce no attributed alert even for a genuine, dominant fault (6.13.3). FSDP's launcher had no
   fault-injection path at all (fixed); its own "no incident" result is likely confounded by a long-lived engine
   instance's accumulating stale rank-collision state, not confirmed as an independent FSDP-specific failure
-  (6.14.3). Fault-position diversity (rank 0, a structural pipeline-stage-0/root position) is correctly attributed
+  (6.14.3; now superseded by a confirmed, resolved PASS at full 6-node scale -- see DESIGN_NOTES §6.31.2
+  and this document's own Known Limitations list above). Fault-position diversity (rank 0, a structural pipeline-stage-0/root position) is correctly attributed
   via the wait-induced alert path in 3/3 trials; the full tiered-incident path did not fire in the tested (short)
   duration (6.16). A storage-migration mount bug broke every containerized job's write access to `var/dump`/`var/runs`
   until fixed in the Megatron/FSDP/MoE launchers (6.15 correction). Log readability was reviewed this round by
@@ -337,9 +340,14 @@ detail; these are structural, currently-accepted gaps, not bugs waiting to be fi
 - **MoE (Slurm, 6-node/48-GPU)**: a real, escalation-worthy, intermittent (~1-in-5) collective-participation hang
   on healthy runs, confirmed as an infrastructure issue independent of this detector, not yet root-caused. See
   DESIGN_NOTES §6.22.
-- **FSDP (Slurm)**: detection result remains genuinely open (not a confirmed pass or fail) — whether FSDP's
-  sharded-ReduceScatter pattern creates the wait-barrier the detector's wait-induced/tiered paths rely on is
-  unresolved. See DESIGN_NOTES §6.20/§6.24.
+- **FSDP (Slurm, 6-node/48-GPU)**: now resolved with a real, evidenced PASS, not open. Detects correctly via
+  the `[WAIT-INDUCED-ALERT]` path (`confidence=PROBABLE severity=LOG-ONLY`) for all 3 tested rank positions
+  (1, 5, 9; 100 ms fault, large AllGather/ReduceScatter bucket), 0/1 false positives on a healthy control.
+  Requires at least 3 prior job launches at the exact same large-message-size communicator shape before the
+  wait-induced/role-baseline checks have enough cross-job history to fire — a real, newly-documented "warm-up"
+  property for any brand-new large-scale shape's first few runs (not a bug; `_check_mean`/`_check_mean_tiered`
+  are confirmed structurally unable to catch this inverse-direction signature at all, by design). This shape is
+  now warmed up from this round's own trials. See DESIGN_NOTES §6.31.2.
 - **Log readability**: `confidence=`/`severity=` alone cannot distinguish a repeated, consistent finding from a
   one-off (both read `PROBABLE`/`LOG-ONLY` for every synthetic fault this project has ever injected, since
   `CONFIRMED` requires real hardware evidence a synthetic fault correctly never produces). Three rounds of

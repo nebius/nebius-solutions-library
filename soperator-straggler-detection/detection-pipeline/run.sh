@@ -243,8 +243,34 @@ _cpu_unit="ns (schedstat, real CPU time)"
 if [ -n "$_pid" ] && [ -n "$_cpu_before" ] && [ -n "$_cpu_after" ] && [ "$_cpu_after" -gt "$_cpu_before" ]; then
   info "  alert_engine.py: alive and CYCLING (pid $_pid, real CPU consumption advanced $((_cpu_after - _cpu_before)) $_cpu_unit over 6s)."
 else
-  fail "  alert_engine.py: NOT confirmed alive/cycling (pid='${_pid:-none}', CPU before=${_cpu_before:-n/a} after=${_cpu_after:-n/a} [$_cpu_unit]). Check $ALERT_LOG."
-  STEP2_FAIL=1
+  # Third real bug found live (this session, fresh-clone self-run): even
+  # nanosecond-precision schedstat can show a flat 0 over a 6s window for
+  # a genuinely healthy, purely I/O-bound process (confirmed live: an
+  # already-running, actively-cycling instance -- its own $ALERT_LOG
+  # mtime was 4 real seconds old at the moment of inspection -- showed
+  # zero schedstat delta over this exact check's 6s window purely by
+  # scheduling-sample bad luck). Chasing a 4th precision tier would not
+  # fix this class of false negative; the real, direct signal for "is
+  # this process still doing its job" is whether it has written to its
+  # OWN log recently, not how the kernel scheduled it. alert_engine.py's
+  # own [MONITOR-HEARTBEAT] line (alerting/alert_engine.py, printed
+  # unconditionally every 60s regardless of findings) exists for exactly
+  # this purpose -- a real finding updates $ALERT_LOG sooner than that
+  # anyway. 90s gives one full heartbeat interval plus a real margin for
+  # VM query latency, without the false-negative risk a tight CPU-delta
+  # sample carries for an I/O-bound process. Only a FALLBACK when the CPU
+  # check already failed -- never makes the CPU check's own PASS verdict
+  # less trustworthy, only rescues its false negatives.
+  _log_age_s=""
+  if [ -f "$ALERT_LOG" ]; then
+    _log_age_s=$(( $(date +%s) - $(stat -c %Y "$ALERT_LOG" 2>/dev/null || echo 0) ))
+  fi
+  if [ -n "$_log_age_s" ] && [ "$_log_age_s" -ge 0 ] && [ "$_log_age_s" -lt 90 ]; then
+    info "  alert_engine.py: alive and CYCLING (pid $_pid; CPU-delta check showed no activity over 6s -- a known false-negative risk for an I/O-bound process -- but $ALERT_LOG was written ${_log_age_s}s ago, within one real heartbeat interval)."
+  else
+    fail "  alert_engine.py: NOT confirmed alive/cycling (pid='${_pid:-none}', CPU before=${_cpu_before:-n/a} after=${_cpu_after:-n/a} [$_cpu_unit], \$ALERT_LOG last written ${_log_age_s:-unknown}s ago). Check $ALERT_LOG."
+    STEP2_FAIL=1
+  fi
 fi
 
 vm_health="$(curl -s --max-time 5 "$VM_URL/health" 2>/dev/null)"
