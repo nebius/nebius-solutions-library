@@ -1516,12 +1516,29 @@ def format_alert(finding, coverage):
     # node=worker-3 fires under 3 different comm= values: two role_n=4
     # TP-sized groups and one role_n=48 world group, each its own real
     # communicator). comm= moved to sit directly next to role_rank=/role_n=
-    # (rather than after pid=/gpu_slot=) so the three fields that describe
-    # ONE communicator's view of this process read as a visual unit --
-    # role_rank=/role_n= are always scoped to the comm= immediately
-    # following them on the same line, never a cross-line or global value.
-    header = (f"[ALERT] role_rank={role_rank_disp} role_n={role_n_disp} comm={comm} "
-              f"pid={rank} gpu_slot={gpu_slot_disp} "
+    # so the three fields that describe ONE communicator's view of this
+    # process read as a visual unit -- role_rank=/role_n= are always scoped
+    # to the comm= immediately following them on the same line, never a
+    # cross-line or global value.
+    #
+    # Log-readability fix (independent item-4 re-review, 2026-11): that
+    # comm=-adjacency alone was reviewed fresh and found NOT sufficient on
+    # its own -- a cold reader's first reaction to the same pid showing two
+    # different role_n values is still "did this rank's group size change?"
+    # before consciously parsing comm= as the scope key (nothing on the
+    # line *labels* comm= as a scope boundary; a reader has to already know
+    # the communicator model). The reviewer's own concrete, lowest-risk
+    # fix: put pid= first, since identifying the actor before its per-group
+    # attributes reduces the "same pid, contradictory number" reaction.
+    # Applied here and identically in _emit_wait_induced_alert and
+    # _emit_role_baseline_alert. A fuller fix (an explicit semantic scope
+    # label on comm=, e.g. scope=TP/DP/world) was also suggested but is NOT
+    # done here -- it needs new comm-kind classification metadata this
+    # project does not yet compute anywhere, which is real new logic, not
+    # a reorder, and is out of scope for a presentation-layer-only fix this
+    # close to the POC; named as a follow-up in DESIGN_NOTES.md.
+    header = (f"[ALERT] pid={rank} role_rank={role_rank_disp} role_n={role_n_disp} comm={comm} "
+              f"gpu_slot={gpu_slot_disp} "
               f"node={host} type={fault_type} confidence={tier} "
               f"severity={severity} pattern={pattern_disp} burst={burst_disp}{incident_id_part}")
     # P21.6 -- cascade-mislocalization fix: shown prominently, right after
@@ -3872,11 +3889,14 @@ class AlertEngine:
         _wi_burst = _burst_label()
         lines = [
             # role_n= scoping fix: see format_alert's own comment -- comm=
-            # moved next to role_rank=/role_n= so the triple reads as one
+            # sits next to role_rank=/role_n= so the triple reads as one
             # communicator's view, since the same pid legitimately shows a
-            # different role_n under a different comm.
-            f"[WAIT-INDUCED-ALERT] role_rank={d['role_rank']} role_n={d['role_n']} comm={comm} "
-            f"pid={culprit} gpu_slot={slot} node={culprit_host} type=compute "
+            # different role_n under a different comm; pid= leads the line
+            # (independent item-4 re-review, 2026-11 -- see format_alert's
+            # own comment for why the reorder alone, without comm=,
+            # wasn't enough).
+            f"[WAIT-INDUCED-ALERT] pid={culprit} role_rank={d['role_rank']} role_n={d['role_n']} comm={comm} "
+            f"gpu_slot={slot} node={culprit_host} type=compute "
             f"confidence={tier} severity={severity} pattern={_wi_pattern} burst={_wi_burst}",
             "",
             f"WAIT-INDUCED STRAGGLER ({len(per_member)}-member comm): this member's OWN current "
@@ -4158,11 +4178,12 @@ class AlertEngine:
         action_note = "" if validated else " action=NONE"
         lines = [
             # role_n= scoping fix: see format_alert's own comment -- comm=
-            # moved next to role_rank=/role_n= so the triple reads as one
+            # sits next to role_rank=/role_n= so the triple reads as one
             # communicator's view, since the same pid legitimately shows a
-            # different role_n under a different comm.
-            f"{header_tag} role_rank={data['role_rank']} role_n={data['role_n']} comm={comm} "
-            f"pid={member} gpu_slot={slot} node={data['hostname']} type=compute "
+            # different role_n under a different comm; pid= leads the line
+            # (independent item-4 re-review, 2026-11).
+            f"{header_tag} pid={member} role_rank={data['role_rank']} role_n={data['role_n']} comm={comm} "
+            f"gpu_slot={slot} node={data['hostname']} type=compute "
             f"confidence={tier} severity={severity} pattern={_rb_pattern} burst={_rb_burst}{action_note}",
             "",
             f"ROLE-BASELINE DEVIATION: this member's current reading (current_mean_us="

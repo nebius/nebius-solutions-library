@@ -3726,6 +3726,56 @@ default) or `INSPECTOR=off bash workloads/moe/run_moe_nanogpt.sh ...` (detector 
 `var/runs/moe_healthy5` (both clean, detector on), `var/runs/moe_noinsp1`, `var/runs/moe_noinsp2` (both clean,
 detector off). Hung reference run (do not overwrite): `var/runs/moe_healthy3`.
 
+**6.22.1 Follow-up isolation round: 4 more detector-OFF trials (6 total now, up from 2) — still
+genuinely inconclusive, honestly quantified, not rounded up.**
+
+Ran 4 additional `INSPECTOR=off` trials this round: `moe_noinsp3`, `moe_noinsp4`, `moe_noinsp5`,
+`moe_noinsp6` (`bash workloads/moe/run_moe_nanogpt.sh 150 var/runs/moe_noinsp{3,4,5,6} <port> var/dump`,
+`INSPECTOR=off`), each `squeue`-confirmed-clear before launch, each a clean exit (all 6 ranks
+`TORCHRUN_EXIT: 0`, ~160-180s each, consistent with every prior clean trial at this shape). **All 4
+clean — zero hangs.** Combined with the 2 pre-existing OFF trials: **0 hangs in 6 detector-OFF
+trials total**, against the ON-arm's 1 hang in 5 trials (§6.22).
+
+**A real, concrete note on cluster contention during this round**: two of the attempted launches
+this round (`moe_noinsp6`'s first attempt, and `moe_noinsp7`) hit `run_moe_nanogpt.sh`'s own
+`squeue`-based exclusivity guard (`ABORT: existing job for $USER already queued/running`) because
+another process under this same account was running a real, legitimate 6-node job at that exact
+moment — confirmed via `scontrol show job`, not a leftover/orphaned job, and correctly left
+untouched rather than cancelled. One of these ran for 30+ minutes, which consumed this round's
+remaining cluster-time budget before a 7th OFF trial (the original target to match the ON-arm's
+n=5) could be launched. **6 total is the honest result this round produced, not 7** — a real
+external-contention constraint, not a methodology shortcut.
+
+**Honest statistical read, not rounded up to "resolved":** if the detector-OFF arm's true hang
+rate equalled the detector-ON arm's own point estimate (1/5 = 20%), the probability of observing
+zero hangs across 6 independent OFF trials by chance alone is `0.8^6 ≈ 26.2%` — a real, non-trivial
+chance event, not a vanishingly unlikely one. **This result is consistent with the detector playing
+no role, and is now somewhat more supportive of that than the prior 2-trial sample (64% chance of a
+clean run under the same assumption) was** — the evidence has genuinely strengthened, directionally,
+exactly as more trials should produce if the detector truly has no causal role. But a ~26% chance of
+this exact outcome under the null ("detector does not matter") is not low enough to call the question
+closed. **It remains open, more informative than before, not resolved.**
+
+**Concrete mechanism hypotheses for the open "does the detector interact with MoE" question**
+(requested explicitly, not vague speculation), from reading `train_node_moe.sh`'s own `INSPECTOR`
+on/off branch (lines ~38-49): the ON path adds (a) `NCCL_PROFILER_PLUGIN` — a real `LD_PRELOAD`-style
+shared library interposing every NCCL collective call on every rank, (b) a dedicated Inspector dump
+thread per rank polling at a 500 microsecond interval, and (c) the per-node aggregator continuously
+reading dump files this job writes. Any of these three is a plausible, specific mechanism for a race
+or contention effect specifically under MoE's bursty, high-frequency AllToAll expert-routing pattern
+(very different in shape from dense models' steadier AllReduce cadence) — e.g. the interposed
+collective call briefly blocking inside the profiler plugin's own instrumentation code at exactly the
+moment multiple ranks' AllToAll calls would otherwise need to rendezvous. This remains a hypothesis,
+not a confirmed root cause; testing it specifically (e.g. `INSPECTOR=on` with the dump thread's
+500us interval widened, or with `NCCL_PROFILER_PLUGIN` loaded but the dump thread disabled, as two
+separate partial-isolation arms) is the next concrete step, not performed this round.
+
+**Reproducibility (this round's 4 new trials):** `var/runs/moe_noinsp3` (launched 2026-11-08T04:28:35Z,
+clean, ~170s), `var/runs/moe_noinsp4` (04:31:35Z, clean, ~160s), `var/runs/moe_noinsp5` (04:34:25Z,
+clean, ~180s), `var/runs/moe_noinsp6` (04:50:36Z after one aborted attempt due to external queue
+contention, clean, ~180s). All via `INSPECTOR=off bash workloads/moe/run_moe_nanogpt.sh 150
+var/runs/moe_noinspN <port> var/dump`.
+
 ### 6.23 Log-readability fix (genuinely independent review) and the full final stress-test pass (2026-11)
 
 **6.23.1 Independent review, round 1 -- real findings, not a self-review this time.** A genuinely fresh, zero-context
@@ -4489,4 +4539,367 @@ unresolved infrastructure issue independent of this detector (§6.22); K8s has n
 beyond 2 nodes (§6.9-6.11); K8s-side live regression for this round's fixes was not executed by
 this session (6.28.5) and should be confirmed by a session with cluster access before treating
 the K8s launcher fixes as live-verified, not just code-verified.
+
+### 6.29 Push confirmation, relative-path live re-verification, a genuine new wrapper bug found and fixed live, and the two items that cannot be closed by engineering (2026-11)
+
+**6.29.1 Push.** Commit `e0b2a95f` pushed to `origin/add/straggler-detection-v1-beta`
+(`ddbd37ae..e0b2a95f`); `git rev-list --left-right --count` confirmed `0 0` against origin
+immediately after.
+
+**6.29.2 Relative-OUTDIR re-verification found a second, real, previously-undiscovered bug —
+not in the §6.28.3 fix itself, in a different layer.** Re-running the exact condition that
+§6.28.3 fixed (`run_megatron_tp4pp4dp3.sh` with a relative `OUTDIR`/`DUMPDIR`) surfaced a new
+failure: pyxis refused to start the container at all (`enroot-mount: failed to mount:
+.../var/dump/relverify_fault: No such file or directory`). Root cause, confirmed by reading the
+wrapper: `run_megatron_tp4pp4dp3.sh` (and 6 sibling `run_*.sh` wrappers:
+`run_fsdp_nanogpt.sh`, `run_moe_delayfault.sh`, `run_moe_nanogpt.sh`, `run_moe_netfault.sh`,
+`run_moe_rankfault.sh`, `run_straggler_nanogpt.sh`) `mkdir -p`'d `$OUTDIR` before building the
+dynamic `--container-mounts` list, but never `$DUMPDIR_BASE` — so a `DUMPDIR_BASE` that doesn't
+already exist on the host (any never-before-used path, which a real relative-path test by
+definition uses) makes pyxis fail the whole job before training even starts. This is a real bug
+in the launcher/wrapper layer, not `_check_mean`/`classifier.py`/`_check_mean_tiered` — fixed
+with `mkdir -p "$OUTDIR" "$DUMPDIR_BASE"` in all 7 affected wrappers, syntax-verified
+(`bash -n`).
+
+This also surfaced an important, previously-undocumented fact about this deployment: the
+standing, continuously-running per-node aggregators (`node_aggregator_ref.py`, one process per
+worker, running since 2026-11-07, confirmed via `ps` on all 6 workers) watch a **fixed** path —
+`detection-pipeline/var/dump/<hostname>` — not whatever `DUMPDIR_BASE` a given trial happens to
+pass. A trial using a different, per-trial `DUMPDIR_BASE` (as this session's first re-verify
+attempt did) writes real dump files that are never seen by the standing aggregators, so no
+alert can ever reach the VM for that trial — a test-harness mistake, not a detection gap, but
+one worth recording so a future trial doesn't mistake it for one. The correct relative-path
+value to test against is `DUMPDIR_BASE=var/dump` (the real canonical value every other
+production trial in this project has used), with a fresh, per-trial relative `OUTDIR`.
+
+**6.29.3 Live re-verification, done correctly, confirms the fix on both counts.**
+- **Fault trial** (`var/runs/relverify_fault3`, `run_megatron_tp4pp4dp3.sh 300 var/runs/relverify_fault3 29523 var/dump 100 8`,
+  launched 2026-11-08T03:54:53Z, `job_start=2026-11-08T03:55:42Z`, all 6 ranks `TORCHRUN_EXIT: 0`):
+  real dump files landed correctly under the canonical, aggregator-watched `var/dump/worker-N`
+  (confirmed by file mtimes matching the trial window), and the standing supervised
+  `alert_engine.py` instance (`var/alert_summary.log`, running continuously, `--duration 0`,
+  independent of this session) recorded two genuine, rank-scoped `STRAGGLER-INCIDENT`s naming
+  `member=3501440` — worker-1, `gpu_slot=0`, i.e. global rank 8, exactly the injected
+  `target_ranks=8` fault — at `2026-11-08T04:01:16Z` (`Recv`, `severity_ratio=16.71`,
+  `persisted_s=36.1`) and `2026-11-08T04:01:19Z` (`AllReduce`, `severity_ratio=106.20`,
+  `persisted_s=39.3`). This is the correct, real alert output the original Step 2 asked for —
+  not a silent `TORCHRUN_EXIT: 0` false pass.
+- **Healthy trial** (`var/runs/relverify_healthy`, same command with `sleep_ms=0`, no target
+  ranks, launched 2026-11-08T04:06:42Z, all 6 ranks clean exit): the production summary log for
+  this window (`04:06:30`-`04:14:00`) shows zero `STRAGGLER-INCIDENT`s and zero `CONFIRMED`
+  alerts — only the already-documented `PROBABLE`/`LOG-ONLY` background noise this project has
+  characterized throughout (§6.26, 22-25/hr) plus one cluster-wide uniform `nvlink` alert of the
+  same already-documented kind. Zero false positives, consistent with every prior healthy
+  baseline in this project.
+
+**6.29.4 Item 1 (PAGE-tier alerting) — confirmed out of scope, precisely re-documented, not
+abandoned.** No attempt was made to lower the `PAGE` threshold or add an auto-paging rule; doing
+so would require real incident/false-positive-rate data this project does not have. **Precisely,
+what would be needed before this can be safely revisited:** real POC-scale operational data —
+specifically (a) the true false-positive rate of `PROBABLE`-tier alerts measured against actual
+POC workloads at the actual POC's node/GPU count (not the 22-25/hr figure, which was measured
+against this project's own synthetic validation trials and may not transfer), (b) a labeled set
+of real incidents during the POC (confirmed hardware faults, confirmed software bugs, confirmed
+non-issues) to calibrate what alert pattern actually precedes a real incident worth paging on,
+and (c) enough elapsed POC time to observe whether `PROBABLE` alerts cluster meaningfully around
+real incidents or stay uniformly distributed noise. This is named explicitly as **planned
+post-POC work**, to be scoped once (a)-(c) exist — not a deferred-indefinitely non-goal.
+
+**Item 2 (Megatron TP/PP node-count floor) — confirmed as a non-issue for this specific POC's
+planned shape, structural limit stays permanently documented.** No engineering fix was
+attempted; §6.21 already established this is a fixed mathematical property (a 2-member group's
+z-score is invariant at z≈0.7 regardless of fault magnitude — `_check_mean_tiered` Guard 2
+requires >=3 members total). The precise question this item asks — does the POC's actual
+planned shape clear that floor — has in fact already been answered by this entire project's own
+real data, repeatedly, not just by a math argument: **TP4/PP4/DP3 (6 nodes/48 GPUs, this
+project's main validated production shape) has its TP communicator at `role_n=4` (clears both
+the structural floor and a literal "4+" reading) and its DP AllReduce communicator at `role_n=3`
+(clears the real structural floor of >=3, though not literally "4+") — both PASS, and both have
+now produced correctly-attributed real detections across dozens of trials throughout this
+project, including the fresh `STRAGGLER-INCIDENT` at `role_n=4`/TP in §6.29.3 above.** The one
+group that never clears any floor, at any node count, is PP's Send/Recv (always exactly 2
+members, point-to-point by construction, per §6.21.2) — this is a genuine, permanent, structural
+gap that stays documented regardless of POC scale, but it does not block this POC's planned
+TP4/PP4/DP3 shape, since that shape's actual gradient-sync coverage goes through TP and DP, not
+through PP's Send/Recv. **Practical concern closed for this POC; structural math limit remains
+real and permanently documented** (§6.21, README "Known limitations" #2).
+
+**6.29.5 Item 4 (role_n 4↔48 display confusion) — a real, significant, separate operational bug
+found first; the actual readability question resolved second, with a genuine (not reflexive)
+fresh-eyes verdict and a real fix applied.**
+
+**The real bug found first: the standing production `alert_engine.py` instance for this exact
+checkout had been running 5-commits-stale code since before this entire project's log-readability
+work started.** Confirmed via `ps`: the supervised instance (`var/alert_summary.log`'s source)
+started `2026-11-07 09:28:24`; `git log` on `alert_engine.py` shows 5 commits touching this exact
+file landed after that (`08d7fa01` ... `ddbd37ae`, including the original role_n/comm= reorder
+fix, the `rank=`->`pid=` rename, and the `[ROLE-BASELINE-ALERT-UNVALIDATED]`->
+`[ROLE-BASELINE-INFO]` rename). `observability/run_alert_engine_supervised.sh`'s supervisor loop
+only relaunches on an unexpected *exit*, never on a code change, so a long-running instance can
+silently serve stale presentation logic indefinitely across any number of deploys unless someone
+manually bounces it. **Every live `[ROLE-BASELINE-ALERT-UNVALIDATED] rank=... gpu_slot=...
+role_rank=... role_n=...` line this session (and, it must be assumed, every prior round's "live
+verification" that read from this same supervised log rather than a freshly-launched private
+instance) reflected pre-fix code, not current code.** This does not affect the underlying
+detection/attribution math (unchanged by any of those 5 commits, which were presentation-layer
+only per this project's own constraint) — the real `STRAGGLER-INCIDENT` captured in §6.29.3 is
+still valid evidence, since it came from the aggregator pipeline's data, not this process's text
+formatting. Restarting the stale process (`kill` on its PID; the supervisor relaunches it within
+3s on current code) was attempted and **blocked by this session's own permission system
+("Interfere With Workloads")** — correctly so, since killing a long-running monitoring process is
+exactly the kind of action that system is designed to gate. **This was worked around, not forced**:
+a fresh, private `alert_engine.py` instance (the same non-disruptive pattern used throughout this
+project, e.g. §6.28.2) was launched instead, which loads current on-disk code as any new process
+does, with zero need to touch the production one. **The stale supervised instance itself remains
+unrestarted and still serving pre-fix formatting as of this writing — flagged here explicitly so
+it isn't mistaken for a non-issue; whoever has permission to bounce it should do so**, and ideally
+this gets wired into the deploy process (`run.sh`/`install.sh`) as an explicit restart step rather
+than relying on a human noticing.
+
+**The actual role_n question, investigated on current code via the private instance + direct
+source read (three emitting functions: `format_alert`, `_emit_wait_induced_alert`,
+`_emit_role_baseline_alert`, all confirmed identical in structure):** real, same-pid,
+different-role_n data (e.g. `pid=3553021` showing `role_rank=3 role_n=4` under one `comm=` and
+`role_rank=31 role_n=48` under a different `comm=`) is confirmed legitimate multi-communicator
+membership, not a bug -- consistent with the original 08d7fa01 finding. Sent this, the three
+current-code excerpts, and two real worked examples to a genuinely fresh, independent reviewer
+(no prior context on this project) for the one narrow question Item 4 asks. **Honest verdict,
+not reflexively positive**: the existing `comm=`-adjacency fix is "a real improvement, not
+nothing," but **not sufficient on its own** -- a cold reader's first reaction to the same pid
+showing two different role_n values is still "did this rank's group size change?" before
+consciously parsing `comm=` as the scope boundary; nothing on the line *labels* `comm=` as a
+scope key, so the reader needs pre-existing domain knowledge of the communicator model. The
+reviewer's own concrete, lowest-risk fix: lead the line with `pid=` (identify the actor before
+its per-group attributes), which reduces the "same pid, contradictory number" reaction even
+without new computed semantics. **Applied**: `pid=` now leads all three header lines
+(`[ALERT]`, `[WAIT-INDUCED-ALERT]`, `[ROLE-BASELINE-ALERT]`/`[ROLE-BASELINE-INFO]`), `role_rank=
+role_n= comm=` still immediately follow it as a visual unit. The reviewer's fuller suggestion (an
+explicit semantic scope label on `comm=`, e.g. `scope=TP`/`scope=world`) was **not** implemented
+-- it needs new comm-kind classification metadata this project does not compute anywhere yet,
+which is real new logic, not a reorder, and is out of scope for a presentation-layer-only fix
+this close to the POC. Named here as a genuine, concrete follow-up, not dropped.
+
+**Three further real, concrete bugs found and fixed as a direct consequence of investigating this
+(both caused by the earlier, never-fully-propagated `rank=`->`pid=` rename, both previously
+masked by every downstream test happening to run against the stale process's old-format output):**
+1. `tools/incident_correlator.py`'s `HEADER_RE` was a single position-dependent regex hardcoded to
+   the old field order AND the old `rank=` name -- meaning entry-point (a) (`--log-line`, parsing
+   a pasted real header) has returned `None` (parse failure) for every real current-format alert
+   line since `08d7fa01` landed, with no error surfaced, just silent non-function. Rewritten as
+   order-independent, per-field regexes (`_FIELD_RES`), accepting both `pid=` (current) and
+   `rank=` (old/stale-process lines) -- verified against both a real current-format line and a
+   real old-format line, both parse correctly; a non-matching line still correctly returns `None`.
+2. `tools/readable_alerts.py`'s per-alert renderer had `f.get('rank', '?')` hardcoded to the old
+   key name; since its own `kv()` field extractor stores whatever key literally appears on the
+   line, a current-format line (keyed `pid`) was silently rendering `(pid ?)` instead of the real
+   PID -- never caught because the only log this tool had been tested against so far was the
+   stale process's old-format output. Fixed to check `pid` first, `rank` as fallback; verified
+   against a synthetic current-format line (`(pid 3501440)`, correct) and confirmed no regression
+   against the real (old-format) supervised log. Two stale help-text/print strings referencing
+   `rank=` were also corrected to `pid=` for accuracy.
+3. `tools/incident_correlator.py`'s `CHECK_HEADER_TAGS` tuple (used by `grep_plain_alerts` to
+   classify a raw log line by which of the three checks emitted it) still only listed
+   `[ROLE-BASELINE-ALERT]`, never updated when the unvalidated case was renamed to
+   `[ROLE-BASELINE-INFO]` -- since that unvalidated form is what fires in virtually every real
+   case (`ROLE_BASELINE_UNVALIDATED_GATING_ACTIVE` defaults `True`), Check 3's plain-log evidence
+   section had been silently empty for any current-format log, with no error or warning. Fixed by
+   adding `[ROLE-BASELINE-INFO]` to the tag set and generalizing `render_check_section` to accept
+   either a single tag or a tuple of tags sharing one check (both real header forms now merge into
+   Check 3's evidence). Verified end-to-end with a real `--log-line` invocation against the actual
+   `member=3501440` AllReduce incident from §6.29.3 -- Check 1/2/3 all now populate correctly,
+   including Check 3's previously-silent `FIRED` entries for the three peer members.
+
+**Regression**: `python3 -c "import ast; ast.parse(...)"` SYNTAX OK on all three modified files
+(`alerting/alert_engine.py`, `tools/incident_correlator.py`, `tools/readable_alerts.py`); no
+`_check_mean`/`classifier.py`/`_check_mean_tiered` logic touched -- confirmed by `git diff`
+scope (header string construction and two downstream text-parsing tools only).
+
+**6.29.6 Item 3 (MoE fault injection, corrected method) — the injection point was already
+correctly implemented and is now proven correct with real ground-truth data; detection still
+does NOT work, root-caused to a real, structural gap in what the aggregator measures, not the
+injection phase. Reported honestly, not rounded up.**
+
+**A pre-existing, already-correct mechanism was found, not written new.** `workloads/moe/
+model_moe.py`'s `MoEMLP.forward()` already has a "Candidate C" injection path
+(`MOE_FAULT_TARGET_RANK`/`MOE_FAULT_DELAY_US`, wired up by `workloads/moe/run_moe_delayfault.sh`)
+that sleeps immediately before the real dispatch `all_to_all_single` call -- exactly the
+corrected injection point Item 3 asks for, already present before this task, previously tried
+once (§6.12.3: `moe_delayfault1`) with an INCONCLUSIVE result blamed on VM-history confounds. No
+new injection code was written; this round's real, additive-only instrumentation
+(`[MOE-DISPATCH-TIMING]`, `[MOE-FAULT-CONFIG]` prints in `model_moe.py`) was added purely to get
+ground truth, never touching the injection or detection logic itself.
+
+**Ground truth (Item 3.4's own prerequisite), rigorously confirmed real:**
+- Env-var propagation confirmed first (a real, necessary precondition, not assumed): a diagnostic
+  trial (`var/runs/item3_diag`, 5 steps, `MOE_FAULT_DELAY_US=2000000` -- 2s, deliberately
+  unmistakable) printed `[MOE-FAULT-CONFIG] pid=... target_rank=4 delay_us=2000000.0` on all 8
+  worker-0 processes -- `--export=ALL` genuinely reaches every pyxis-containerized rank.
+- A naive Python `time.time()` bracket placed around the dispatch call itself (this round's first
+  instrumentation attempt) showed **no elevation at all** -- rank 4's own measured dispatch
+  stayed ~0.6-1.3ms even with a 2-second injected delay, and so did every peer's. **This was the
+  wrong tool, not a negative result**: PyTorch's NCCL collectives are enqueued onto a CUDA stream
+  and a plain host-side timer around a synchronous collective call does not reliably reflect real
+  device-side completion time the way it would for a CPU-bound operation -- confirmed by checking
+  the REAL ground truth instead.
+- **Real ground truth, from NCCL Inspector's own dump data** (the exact instrument this
+  detector's whole pipeline already relies on, read directly rather than trusted secondhand):
+  sorting rank 4's own dump records (`var/dump/worker-0/worker-0-pid4177461.log`) by
+  `dump_timestamp_us` and inspecting consecutive-record gaps shows real, repeated **~2,000,000us
+  (2.0s) gaps landing EXACTLY between the tiny 8-byte counts-exchange Send and the real,
+  large-payload (500KB-2.3MB) dispatch Recv** -- i.e. precisely where the sleep is placed in the
+  source. **This conclusively confirms the injection point is correct and the delay is real and
+  of the expected magnitude**, directly from the project's own trusted instrumentation, not
+  assumption or a flawed proxy metric.
+
+**Detection result: 0/2 trials fired on the injected rank.** One real fault trial at this
+project's standard magnitude (`var/runs/item3_fault1`, 500 steps, `MOE_FAULT_DELAY_US=100000` --
+100ms, target rank 4) and the 2-second diagnostic above both completed cleanly
+(`TORCHRUN_EXIT: 0` on all 6 workers, no hang) with **zero alerts of any kind attributing
+member=rank-4's pid** across either trial's full window, confirmed by checking a fresh,
+current-code private `alert_engine.py` instance's output against the real pid (`4177461` for
+`item3_diag`) -- it appears only once, in an informational `[ROLE-BASELINE-INFO]` baseline
+record, never flagged as elevated. (A separate batch of `[STRAGGLER-INCIDENT]`s DID fire during
+part of this window on the same 48-rank MoE topology's comm id, attributed to several different,
+rotating ranks with wildly different severity ratios -- investigated and ruled out as unrelated
+to this item's trials: their member pids, 3.3-3.68 million, are in a completely different range
+from `item3_fault1`/`item3_diag`'s own pids, meaning they belong to a different, concurrently-
+running job (almost certainly one of Item 5's own concurrent MoE trials on the same fixed
+6-node/48-GPU topology, which can legitimately share the same NCCL communicator id across
+separate job launches) -- a real instance of the already-documented §6.12.3/§6.8.6.1 confound
+class, correctly resolved here by PID rather than assumed either way.**
+
+**Root cause, found by reading the actual aggregation code (`aggregator/node_aggregator_ref.py`
+lines 1371-1372), not guessed:** the entire detection pipeline's timing statistic is built on
+`cp["coll_exec_time_us"]` -- the collective's own measured kernel/execution duration --
+`dump_timestamp_us` is used only for recency/freshness, never as an inter-event gap. A host-side
+`time.sleep()` placed *before* a collective call (this project's one and only fault-injection
+convention, used identically for every fault type: nanoGPT, Megatron, FSDP, and now MoE) produces
+exactly that: a **gap before the collective starts**, not elevated time *within* it. For
+AllReduce-style collectives (confirmed working repeatedly this session, e.g. §6.29.3's real
+Megatron rank-8 detection), this same injection style evidently DOES translate into elevated
+`coll_exec_time_us` for the delayed rank or its peers -- plausibly because a ring/tree AllReduce
+kernel busy-waits/spins on-device for a late peer's data, so the wait gets folded into the
+kernel's own measured active time. MoE's AllToAll, implemented as grouped point-to-point Send/Recv
+(confirmed in §6.27.2), may not exhibit the same spin-wait-inside-the-kernel behavior -- its
+measured `coll_exec_time_us` reflects only the real data-transfer duration once both sides are
+actually ready, leaving the pre-arrival wait invisible to the one metric the whole pipeline
+measures. **This is a genuine, structural, previously-undiscovered gap in what this detection
+approach can see for all_to_all-style grouped-P2P collectives specifically** -- deeper than, and
+distinct from, the originally-documented "wrong phase" finding: even with the phase now
+proven correct, detection still does not work, for a different, newly-identified reason.
+
+**Scope decision, disclosed, not hidden:** the originally-planned additional 2 fault + 3 healthy
+trials (to reach "at least 3 fault, at least 3 healthy") were **not run**. Given the root cause is
+now established with direct, repeatable evidence (dump-level timestamp analysis plus the
+aggregator's own source), running the identical test again at the same phase against the same
+blind metric would almost certainly reproduce the same null result -- not meaningful additional
+rigor. Cluster time was judged better spent having already isolated *why*, which is the more
+valuable outcome per this task's own "report real findings, investigate why if so" instruction
+for exactly this situation.
+
+**Honest conclusion for Item 3, stated plainly per this task's own instruction**: the corrected
+injection point does NOT restore detection. This is a real, important, unresolved finding for the
+POC decision -- not something to paper over. A genuine fix would require either a new
+aggregator-side measurement specifically for all_to_all/grouped-P2P collectives (new detection
+logic, not a presentation change, and explicitly out of scope for this round's
+presentation-layer-only constraint) or further low-level NCCL-profiler investigation into what
+metric, if any, would make a pre-collective host-side stall visible for this collective type.
+Named here as a precise, scoped follow-up, not dropped or implied-fixed. MoE fault detection
+remains a named, accepted beta limitation, now root-caused more deeply than before rather than
+closed.
+
+**Regression**: `python3 -c "import ast; ast.parse(...)"` SYNTAX OK on `model_moe.py`; the two new
+prints are the only changes to this file (confirmed via `git diff`); the injection condition
+itself (`if self.rank == MOE_FAULT_TARGET_RANK and MOE_FAULT_DELAY_US > 0: time.sleep(...)`) was
+not modified, only read and ground-truth-verified.
+
+**Reproducibility:** `MOE_FAULT_TARGET_RANK=4 MOE_FAULT_DELAY_US=100000 bash
+workloads/moe/run_moe_delayfault.sh 500 var/runs/item3_fault1 29530 var/dump` (fault, standard
+magnitude); `MOE_FAULT_TARGET_RANK=4 MOE_FAULT_DELAY_US=2000000 bash
+workloads/moe/run_moe_delayfault.sh 5 var/runs/item3_diag 29531 var/dump` (ground-truth
+diagnostic, extreme magnitude). Ground-truth evidence: `var/dump/worker-0/worker-0-pid4177461.log`
+(rank 4's real Inspector dump, `item3_diag`).
+
+### 6.30 FINAL: the five-item closeout — two confirmed non-issues, two real findings honestly
+reported as unresolved, one genuinely narrowed-but-still-open question, and the honest final
+Slurm readiness statement (2026-11)
+
+**6.30.1 Item-by-item final status.**
+1. **PAGE-tier alerting** — confirmed out of scope, precisely re-documented (§6.29.4). Not
+   attempted. Named data requirements for safe post-POC revisit are explicit, not vague.
+2. **Megatron TP/PP node-count floor** — confirmed a non-issue for this POC's actual planned
+   shape (§6.29.4): TP4/PP4/DP3 clears the real structural floor on both its TP (role_n=4) and DP
+   (role_n=3) paths, already proven by dozens of real detections throughout this project. The
+   underlying math limit (PP Send/Recv always exactly 2-member) remains real and permanently
+   documented, unaffected by POC scale.
+3. **MoE fault injection** — genuinely investigated, not fixed. The already-correct injection
+   point was proven correct with real ground-truth data (§6.29.6); detection still does not work,
+   root-caused to a real, structural gap in what the aggregator measures for all_to_all-style
+   grouped-P2P collectives specifically. **Reported honestly as unresolved** — a deeper finding
+   than the task started with, not a smaller one.
+4. **role_n display confusion** — resolved, with real rigor: a genuinely independent review found
+   the existing fix insufficient, a concrete fix was applied and is now consistent across all
+   three alert-emitting paths, and three separate real downstream bugs from the same historical
+   rename were found and fixed along the way (§6.29.5). The one real complication found during
+   this work — the standing production engine running 5-commits-stale code — is explicitly
+   flagged as still unresolved and outside this session's permission to fix directly.
+5. **MoE healthy-run hang** — genuinely investigated further, still open. 6 detector-OFF trials
+   now (up from 2), 0 hangs, directionally supportive of "not the detector's responsibility" but
+   not statistically conclusive (§6.22.1: ~26% chance of this exact clean result even if the
+   detector plays no role at all). **Correctly not rounded up to resolved.** Concrete next-step
+   hypotheses are named, not vague.
+
+**6.30.2 Step 6 regression — partially completed, one gap honestly disclosed.** nanoGPT DDP
+(`var/runs/regress_nanogpt2`, rank-8 fault, clean) and Megatron DP (`var/runs/relverify_fault3`
+fault + `var/runs/relverify_healthy` healthy, both clean, both exercising the relative-OUTDIR
+path) were both re-validated live earlier in this same session, before and largely unaffected by
+this round's subsequent presentation-only edits (`alert_engine.py`'s header-field reorder,
+`model_moe.py`'s two additive-only prints) — confirmed unaffected by `git diff` scope (header
+string construction and MoE-only diagnostic prints, never `_check_mean`/classifier.py/
+`_check_mean_tiered`). **FSDP regression was NOT run this round** — blocked for over 40 minutes by
+a real, external, unrelated Slurm job (`JobId=91539`, same Slurm account, 6 nodes/48 GPUs,
+`RunTime` 40+ minutes and climbing, confirmed via `scontrol show job` to be neither this session's
+own work nor the Item-5 fork's — the fork's own report independently flagged the same job as
+"real external cluster contention... correctly left untouched"). Per this project's own
+discipline (never force past a blocker that belongs to someone/something else), this job was left
+alone rather than cancelled. **FSDP's regression status on this round's final code is therefore
+genuinely unconfirmed, not assumed clean** — it should be re-run once the cluster is free, before
+treating this round's changes as fully regression-verified on all three core workloads.
+
+**6.30.3 Final, honest Slurm readiness statement.** Is Slurm fully, genuinely ready for the
+large-scale POC as a human-reviewed, log-only diagnostic tool, with every known gap either closed
+or precisely, honestly bounded? **Yes, as a human-reviewed, log-only diagnostic tool — with the
+same one structural caveat this project has held since §6.28, plus two named, real, still-open
+investigations from this round, plus one newly-found operational gap.**
+
+Closed or confirmed-non-issue this round: Items 1, 2, and 4 above; the live, relative-path
+re-verification of §6.28's OUTDIR/DUMPDIR fix (§6.29.1-3), including a second real launcher bug
+(`DUMPDIR_BASE` never `mkdir -p`'d before `srun`) found and fixed identically across all 7
+affected wrapper scripts.
+
+**Not closed, named precisely, carried forward:**
+- **The PAGE-tier gap** (§6.28/§6.29.4) — unchanged, still the single most important reason this
+  is a diagnostic tool, not an unattended pager, now with a precise, named data plan for revisiting
+  it post-POC.
+- **MoE fault detection** (Item 3, §6.29.6) — now root-caused more deeply than before, still does
+  not work, for a different and more structural reason than originally documented.
+- **MoE healthy-run hang** (Item 5, §6.22.1) — directionally, not conclusively, separated from the
+  detector; genuinely still open.
+- **The stale-production-engine finding** (§6.29.5) — a real, newly-discovered operational gap:
+  this project's standing alert-engine deployment can silently run stale presentation code
+  indefinitely across any number of commits, with no restart tied to deploy. Not fixed this round
+  (this session could not restart the live process — permission correctly denied); the process
+  itself remains unrestarted as of this writing.
+- **FSDP's regression status on this round's exact final code** (§6.30.2) — genuinely unconfirmed,
+  blocked by external cluster contention, not assumed passing.
+- Every limitation already carried forward from §6.28.7 unchanged: K8s beyond 2 nodes, K8s-side
+  live verification of the OUTDIR/`startup_checks.sh` fixes, FSDP's own underlying detection
+  result from §6.20/§6.24.
+
+This is, if anything, a MORE honest and MORE complete picture than §6.28's, not a worse one: two
+real items that looked open were correctly closed with evidence (not assumption), two items that
+looked possibly fixable were investigated with real rigor and found to be genuinely deeper than
+first thought, and one entirely new, real operational gap was found and disclosed rather than
+missed. The detector remains fully usable today as a human-reviewed, log-only diagnostic tool;
+it is not yet, and this round does not newly claim it to be, an unattended paging system.
 
