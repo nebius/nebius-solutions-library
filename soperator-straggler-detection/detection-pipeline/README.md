@@ -30,10 +30,12 @@ with one real `run.sh` health-check bug found and fixed in the process (see DESI
 >   tiered check correctly silent (small bucket below 512-byte floor). 3/3 healthy trials clean. ✓
 > - **Megatron TP/PP training (TP=2/PP=2)**: TRAINING WORKS (TORCHRUN_EXIT: 0, 6/6 trials). ✓
 >   HPC-X segfault resolved with `NCCL_NET_PLUGIN=/nonexistent` + PyTorch 2.6 `device_id` fix. See DESIGN_NOTES §6.9.1.
-> - **Megatron TP/PP straggler detection**: NOT DETECTABLE at 2-node scale (structural limit).
->   All gradient sync communicators are 2-member (role_n=2). z-score detection yields z≈0.7 invariantly
->   (mathematical property of 2-sample stdev); tiered check Guard 2 also fails. See DESIGN_NOTES §6.11.
->   Detection becomes possible at 4+ nodes where role_n ≥ 4. See §6.11.4 for the upgrade path.
+> - **Megatron TP/PP straggler detection**: SHAPE-DEPENDENT (corrected from "2-node structural limit").
+>   **TP=4/PP=1/DP=4 WORKS** on this 2-node/16-GPU cluster: 4/4 fault trials detected via
+>   `mean_tiered` on the TP AllReduce (role_n=4), mean_tiered 0 false positives on 3 healthy trials. ✓
+>   Shapes with any 2-member gradient-sync group (e.g. TP=2/PP=2/DP=4) remain undetectable (z≈0.707
+>   invariant for 2-member groups). The constraint is shape-dependent, not node-count-dependent.
+>   See DESIGN_NOTES §6.25 for the full analysis and working shape specification.
 > - **Alert engine stability**: 33 MB RSS stable over 3000-step soak run. No memory leaks confirmed.
 > - **Node counts > 2**: NOT TESTED. Tier structure at 4+ nodes is an unknown.
 
@@ -128,8 +130,9 @@ kubectl scale nodeset worker -n soperator --replicas=0   # confirm no active Slu
    # Training works on pytorch:25.01-py3 (HPC-X segfault + PyTorch 2.6 device_id fixed):
    MEGA_TP=2 MEGA_PP=2 MEGA_LAYERS=8 MEGA_HIDDEN=512 MEGA_HEADS=8 MEGA_SEQ=512 MEGA_MBS=1 MEGA_GBS=4 \
      k8s/run_megatron_k8s.sh 500 29500 dump 0 ""
-   # NOTE: straggler detection does NOT fire on 2-node clusters (structural limit: role_n=2 comms).
-   # Requires 4+ nodes for detection to work. See DESIGN_NOTES §6.11 for the full analysis.
+   # NOTE: TP=2/PP=2/DP=4 gives only 2-member groups (z≈0.707 invariant) — not detectable.
+   # For detection on 2-node/16-GPU clusters, use TP=4/PP=1/DP=4 instead (all groups role_n=4).
+   # See DESIGN_NOTES §6.25 for the validated working shape and §6.11 for the shape-dependency analysis.
    ```
 
 **K8s-specific notes** (confirmed on-cluster, 2026-11):
@@ -360,9 +363,10 @@ detail; these are structural, currently-accepted gaps, not bugs waiting to be fi
   With RDMA and NCCL 2.32.3: detected at rank=1,5,9 (mm=27-979×, rank-position-agnostic). See DESIGN_NOTES §6.14.
 - **K8s — Megatron TP/PP training**: resolved. `NCCL_NET_PLUGIN=/nonexistent` + PyTorch 2.6 `device_id` fix.
   TORCHRUN_EXIT: 0 on 6 trials. See DESIGN_NOTES §6.9.1.
-- **K8s — Megatron TP/PP straggler detection**: not detectable at 2-node scale. All gradient sync communicators
-  are 2-member (role_n=2); z-score detection yields z≈0.7 invariantly (mathematical property of 2-sample stdev).
-  Detection requires 4+ nodes. Zero false positives on 3/3 healthy trials. See DESIGN_NOTES §6.11.
+- **K8s — Megatron TP/PP straggler detection**: SHAPE-DEPENDENT, not a 2-node structural limit.
+  **TP=4/PP=1/DP=4 works** (4/4 fault trials detected, 0 mean_tiered false positives) — all gradient-sync
+  groups have role_n=4. Shapes where any gradient-sync group is 2-member (e.g. TP=2/PP=2/DP=4) remain
+  undetectable (z≈0.707 invariant for 2-member groups). See DESIGN_NOTES §6.25.
 - **K8s — tiered check on Megatron DP**: sleep-before-backward injection does not create a detectable fast-
   straggler signal on large Megatron gradient AllReduces (DDP async overlap). The signal appears on small
   post-backward collectives (< 512 B, below the floor); `_check_mean` detects it. See DESIGN_NOTES §6.9.2.

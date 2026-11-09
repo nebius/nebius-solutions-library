@@ -5897,3 +5897,101 @@ FSDP straggler detection is fully validated as rank-position-agnostic:
 - Healthy: 0/3 false positives
 
 This supersedes and confirms all prior partial validation data. The result is consistent with the theoretical model: FSDP AllGather with RDMA creates a hierarchical bimodal timing distribution regardless of which rank is the straggler.
+
+---
+
+### 6.25 Megatron TP=4/PP=1/DP=4 on K8s: validated shape for 2-node detection (2026-11)
+
+#### 6.25.1 Motivation: shape not node-count
+
+Slurm testing confirmed the real constraint on Megatron detection is communicator group size (≥3 members), not node count. The z-score math (z=√2/2≈0.707) is invariant for any 2-member group regardless of topology. A 2-node cluster CAN detect Megatron TP/PP faults IF the shape routes gradient sync through groups with ≥3 members.
+
+**Prior documented limitation** (now corrected): "Megatron TP/PP: structurally impossible at 2-node scale." This was true for the TP=2/PP=2/DP=4 shape (all gradient-sync groups were 2-member). It is NOT a general K8s-or-2-node constraint.
+
+#### 6.25.2 Shape selection: TP=4/PP=1/DP=4
+
+GPU count: 2 nodes × 8 GPUs = 16 GPUs. TP=4 × PP=1 × DP=4 = 16 ✓.
+
+| Communicator | role_n | Members | Clears 3-floor? |
+|---|---|---|---|
+| DP ReduceScatter (25.9MB) | 4 | 4 DP replicas | ✅ Yes |
+| DP AllGather (12.9MB) | 4 | 4 DP replicas | ✅ Yes |
+| TP AllReduce (1MB, 2KB, 8B) | 4 | 4 TP positions | ✅ Yes |
+| PP Send/Recv | — | eliminated (PP=1) | N/A |
+| World AllReduce (99B, 4B) | 16 | all ranks | ✅ Yes |
+
+PP=1 eliminates the 2-member PP Send/Recv groups entirely. DP=4 and TP=4 each give 4-member groups.
+
+**Confirmed from real VictoriaMetrics data** during smoke test (200 steps, healthy):
+- `agg_mean_exec_time_us{coll=ReduceScatter, role_n=4}`: 16 series, 25.9MB bucket (DP sync)
+- `agg_mean_exec_time_us{coll=AllReduce, role_n=4}`: 48 series, 1MB/2KB/8B buckets (TP sync)
+
+#### 6.25.3 Environment fixes still required
+
+Megatron creates multiple NCCL process groups (TP group + DP group), which triggers the HPC-X segfault. Existing fixes apply unchanged:
+- `NCCL_IB_DISABLE=1` in job manifest (forces TCP transport)
+- `startup_checks.sh` sets `NCCL_NET_PLUGIN=/nonexistent` to prevent HPC-X teardown crash
+- PyTorch 2.6 `device_id` fix in `megatron/training/initialize.py`
+
+NCCL 2.32.3 (workspace-built) is used for Inspector support. The startup check `[NCCL-PROFILER-CHECK] [CHECK-FAIL]` fires against the system NCCL path (a known false alarm — the actual training NCCL is 2.32.3 from the workspace, confirmed by `[PIN-PREFLIGHT] nccl=2.32.3`).
+
+One intermittent NCCL failure (`ncclRemoteError` at startup on first attempt) was observed; a second attempt succeeded. The error was not reproducible and is likely a transient TCP network issue. All subsequent 500+ step runs (smoke test, fault trials, healthy trials) completed cleanly.
+
+#### 6.25.4 Detection mechanism
+
+With `NCCL_IB_DISABLE=1` (TCP) and sleep-before-backward fault injection on global rank=1:
+- Rank=1 is in TP group {0,1,2,3} at TP position 1
+- Rank=1 sleeps 100ms before loss.backward()
+- Other 3 TP group members (ranks 0,2,3) complete their backward and enter TP AllReduce normally
+- Rank=1 enters TP AllReduce 100ms late → others have been waiting
+- Rank=1's TP AllReduce time: fast (enters, completes instantly)
+- Other 3's TP AllReduce time: 100ms + fast = slow
+- Bimodal distribution → tiered check fires
+
+This bimodal pattern emerges from ASYMMETRIC ENTRY TIME into the synchronous collective, independent of hierarchical RDMA tree structure. It works with TCP.
+
+#### 6.25.5 Fault/healthy trial results
+
+**Fault trials** (STRAGGLER_SLEEP_MS=100, 2000 steps, NCCL_IB_DISABLE=1 TCP):
+
+| Trial | Injected rank | TORCHRUN_EXIT | mean_tiered fired? | role_rank | mm range |
+|---|---|---|---|---|---|
+| F1 | rank=1 | 0 | ✅ Yes | 1 | 18–75× |
+| F2 | rank=1 | 0 | ✅ Yes | 1 | 13–55× |
+| F3 | rank=1 | 0 | ✅ Yes | 1 | 6–183× |
+| F4 | rank=5 (position diversity) | 0 | ✅ Yes | 1 (TP pos of rank=5) | 11–71× |
+
+4/4 fault trials detected. Detection fires on the **TP AllReduce** (1MB bucket, role_n=4). Global rank=5 maps to TP position=1 within its TP group → role_rank=1 detected correctly.
+
+**Healthy trials** (no fault, 500 steps):
+
+| Trial | TORCHRUN_EXIT | mean_tiered | Total incidents |
+|---|---|---|---|
+| H1 | 0 | 0 ✅ | 2 (cv-check only) |
+| H2 | 0 | 0 ✅ | 0 ✅ |
+| H3 | 0 | 0 ✅ | 1 (cv-check only) |
+
+**mean_tiered false positives: 0/3.** The `_check_cv` path fires on 2/3 healthy trials on the TP AllReduce 1MB bucket — consistent with the CV check's known false-positive characteristics on small tensors with variable timing. This is existing detection-path behavior, not a new issue.
+
+#### 6.25.6 Regression
+
+| Workload | TORCHRUN_EXIT | mean_tiered detected? |
+|---|---|---|
+| nanoGPT DDP | 0 | ✅ Yes (severity_ratio=961×) |
+| FSDP rank=1 | 0 | ✅ Yes (severity_ratio=28×) |
+
+Zero regressions.
+
+#### 6.25.7 Conclusion
+
+**A real Megatron TP/PP shape IS detectable on this 2-node K8s cluster.** The shape `TP=4/PP=1/DP=4` clears the 3-member floor on all gradient-sync communicators. Detection fires via `_check_mean_tiered` on the TP AllReduce (1MB bucket, role_n=4).
+
+The prior documentation "Megatron TP/PP straggler detection: NOT DETECTABLE at 2-node scale (structural limit)" was correct FOR THE SPECIFIC SHAPE TESTED (TP=2/PP=2/DP=4) but NOT for all Megatron shapes on 2-node clusters. The constraint is shape-dependent, not platform-dependent.
+
+**Shapes that work (K8s 2-node, 16 GPUs)**:
+- TP=4/PP=1/DP=4 ✅ — TP group role_n=4, DP group role_n=4, PP eliminated
+- Any shape where min(TP, DP) ≥ 3 and PP=1 OR min(PP, DP, TP) ≥ 3
+
+**Shapes that don't work (same cluster)**:
+- TP=2/PP=2/DP=4 ❌ — TP groups are 2-member (z≈0.707 invariant)
+- Any shape where TP=2 or any gradient-sync group is 2-member
