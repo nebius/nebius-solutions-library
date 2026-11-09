@@ -244,28 +244,35 @@ detail; these are structural, currently-accepted gaps, not bugs waiting to be fi
    (z≈0.7) regardless of whether a real straggler is present — this is a structural property of the
    statistic, not a detector-quality gap. Validated working correctly starting at 4 nodes. See
    DESIGN_NOTES.md §6.11/§6.21.
-3. **MoE AllToAll straggler detection/localization does not work on Slurm — now root-caused
-   precisely, across four independent attempts, not just restated.** Job-wide MoE slowdown
-   detection does work (a real, confirmed fault produces a real, job-wide signal); the gap is
+3. **MoE AllToAll straggler detection/localization: RESOLVED at 20ms and 100ms fault magnitudes
+   (this project's standard), via a modified Inspector build — a maintained fork, not upstream
+   NVIDIA source — after five prior independent attempts failed.** Job-wide MoE slowdown detection
+   has always worked (a real, confirmed fault produces a real, job-wide signal); the gap was
    specifically *localizing* it to one rank. (1) NCCL/Inspector-level kernel-timing aggregation
    (`_check_alltoall_tiered`, "Option C") is structurally impossible for AllToAll: it's a
    synchronous collective, so a late rank elevates every rank's measured kernel time together, not
    a fast-outlier/slow-waiter split. (2) Application-level Python-call timing ("Option D") finds a
-   real signal, but only above a measured floor strictly between 100ms and 1000ms of injected
-   delay — below that (including this project's own standard 100ms fault magnitude), it's
-   statistically indistinguishable from healthy noise — and, independent of the floor, it requires
-   editing the training script itself, which this project's zero-customer-code-change design
-   philosophy does not permit. (3) The one existing tool built for exactly this purpose
-   (`moe-two-stage-detector/arrival_order.py`, a "last-to-arrive" metric from Inspector's verbose
-   timestamps) was tested for the first time this round — it had never actually been run against
-   this problem before — and found to fail for a real, root-caused implementation bug (its
-   round-boundary detection desynchronizes across ranks within a few rounds), independently
-   corroborated by AMD TraceLens's own documentation of the same AllToAll-v sync-pattern nuance.
-   (4) A researched, ranked set of alternatives was produced, with a precise design spec for the
-   top candidate — a CUDA-event-based LD_PRELOAD shim on `ncclSend`/`ncclRecv`, confirmed
-   technically viable in this project's own training container (NCCL is dynamically linked, not
-   statically baked in) — not yet built or validated. See DESIGN_NOTES.md §6.27.2, §6.29.6, §6.33,
-   §6.35, and §6.36 for the full history, evidence, and design.
+   real signal, but only above a floor strictly between 100ms and 1000ms, and requires editing the
+   training script, violating this project's zero-customer-code-change design philosophy. (3) The
+   existing `moe-two-stage-detector/arrival_order.py` ("last-to-arrive" from Inspector's verbose
+   timestamps) fails for a real, root-caused round-boundary desync bug. (4) A CUDA-event
+   LD_PRELOAD shim on `ncclSend`/`ncclRecv` was built and tested at 1ms/20ms/100ms; it also fails
+   to localize at any magnitude — root cause: the CUDA event is recorded at enqueue time, not at
+   the point NCCL's real cross-rank synchronization blocks for a slow peer (an
+   instrumentation-placement problem). (5) **What finally worked**: modifying Inspector's own
+   source (`inspector-plugin/`) to request NCCL profiler v5's `ncclProfileProxyOp`/
+   `ncclProfileProxyStep` event types and track the real proxy-thread send/recv peer-wait
+   intervals — a signal class none of the first four attempts touched. The straggler rank shows up
+   as the **lowest** recv-wait relative to its structural peer group (not highest — everyone else
+   waits *on* it; it, arriving late, barely waits at all), confirmed with z-scores of −8 to −13
+   (vs. a healthy noise band of ±1.1) across 3 trials each at 20ms and 100ms, with an independent
+   secondary confirmation via its direct expert-parallel peers' elevated wait specifically when
+   sending to it. **Has its own honest floor**: at 1ms, the same signal is real but weak
+   (z≈−1.6 to −2.3), not reliably separable from healthy noise — not shipped as a default check
+   below 20ms. Building this required one real crash (a cross-process NCCL proxy-context hazard
+   plus a stale-handle-on-reuse hazard, both found and fixed) — see DESIGN_NOTES.md §6.27.2,
+   §6.29.6, §6.33, §6.35, §6.36, §6.40 (the five failures) and §6.41 (the fix, the crash, and the
+   confirmed result) for the full history and evidence.
 
 - **Shape/strategy coverage (2026-11, DESIGN_NOTES.md 6.12-6.19):** MoE has a real, intermittent (1-in-3 observed)
   collective-participation hang on healthy runs, independent of the detector, not root-caused (6.12.1). Deep

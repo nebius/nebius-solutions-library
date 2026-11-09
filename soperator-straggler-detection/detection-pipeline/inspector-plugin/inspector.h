@@ -44,6 +44,43 @@
 // validated depth.
 #define RETIRE_QUEUE_CAPACITY 1000
 
+// Proxy-thread peer-wait tracking (2026-11, DESIGN_NOTES.md S6.40): fixed
+// capacity, matching ringBuf/retireQueue's own convention in
+// inspectorCommInfo below (never sized/allocated by nranks). 256 covers
+// every job shape this project runs (48 ranks) with ample headroom.
+// Bounds-checked at the single write site (inspectorRecordProxyPeerWait),
+// never indexed unchecked.
+#define INSPECTOR_MAX_PROXY_PEERS 256
+
+// NCCL bounds in-flight proxy steps per sub to this value (device.h's own
+// NCCL_STEPS, confirmed 8 in this project's NCCL 2.32.3 build) and
+// indexes its own internal pHandles[] the same way: step % NCCL_STEPS
+// (confirmed directly against plugin/profiler.cc's
+// ncclProfilerStart{Send,Recv}ProxyStepEvent call sites). Reusing that
+// same bound for inspectorProxyOpInfo::stepPool removes per-step
+// malloc/free from the hot path entirely -- a provably safe pool size,
+// not a guessed one. Not pulling in NCCL's own device.h for the
+// NCCL_STEPS symbol itself, matching this file's existing practice of
+// never transitively depending on NCCL's internal headers (see
+// g_cudaDeviceOrdinal's own comment in inspector.cc for the same
+// reasoning applied to cuda_runtime.h).
+#define INSPECTOR_PROXY_STEP_POOL_SIZE 8
+
+// Secondary defensive guard (2026-11, DESIGN_NOTES.md S6.41): NCCL's own
+// proxy.cc reuses a freed ncclProxySubArgs slot's handle-bearing fields
+// (opEventHandle/stepEventHandle/etc.) without zeroing them on reuse --
+// confirmed directly by reading proxy.cc's sub-arg append/reuse path,
+// where the full-struct memset that would do this is explicitly
+// commented out and the hand-written replacement field list omits them.
+// A reused slot can therefore hand this plugin a stale, already-freed
+// inspectorProxyOpInfo/inspectorProxyStepInfo pointer even after the PID
+// check (inspector_plugin.cc) has ruled out the cross-process case. This
+// magic value, set at allocation and cleared before free, is checked
+// before every dereference in inspectorPluginRecordEventState so a stale
+// pointer is a safe no-op, never a crash.
+#define INSPECTOR_PROXYOP_MAGIC   0x494e53504fULL  // "INSPO"
+#define INSPECTOR_PROXYSTEP_MAGIC 0x494e535053ULL  // "INSPS"
+
 #define INS_CHK_GOTO(call, res, label)                                  \
   do {                                                                  \
     res = call;                                                         \
@@ -139,6 +176,12 @@ enum {
 
 struct inspectorCollInfo; // forward decl -- inspectorCollInfo (below) is only ever referenced here via pointer, for the per-comm retirement queue
 
+struct inspectorProxyPeerWaitStats {
+  uint64_t count;
+  uint64_t sumUsec;
+  uint64_t maxUsec;
+};
+
 struct inspectorCommInfo {
   struct inspectorCommInfo* next;
 
@@ -203,6 +246,21 @@ struct inspectorCommInfo {
   int retireHead;
   int retireCount;
   pthread_mutex_t retireLock;
+
+  // Proxy-thread peer-wait tracking (2026-11, DESIGN_NOTES.md S6.40):
+  // per-peer accumulated stats for the real NCCL-profiler-API
+  // GPUWait->PeerWait (send) / Wait->GPUWait (recv) interval -- see
+  // inspectorRecordProxyPeerWait's own docstring for exactly what this
+  // measures and why. Producer is this communicator's own single proxy
+  // progress thread (same invariant ringBuf already relies on, see its
+  // own comment above); consumer is the dump thread. Unlike ringBuf this
+  // is NOT lock-free: updates are cheap integer ops (not a hot path
+  // concern) and the dump thread needs an atomic snapshot-and-reset of
+  // the whole array, which a single short critical section gives for
+  // free without a second bespoke lock-free design.
+  struct inspectorProxyPeerWaitStats sendPeerWait[INSPECTOR_MAX_PROXY_PEERS];
+  struct inspectorProxyPeerWaitStats recvPeerWait[INSPECTOR_MAX_PROXY_PEERS];
+  pthread_mutex_t proxyWaitLock;
 };
 
 struct inspectorKernelChInfo {
@@ -214,6 +272,30 @@ struct inspectorKernelChInfo {
   uint64_t tsCompletedUsec;
   uint64_t startGpuClk;
   uint64_t stopGpuClk;
+};
+
+struct inspectorProxyOpInfo; // forward decl -- stepPool below needs the complete type, defined after it
+
+struct inspectorProxyStepInfo {
+  uint64_t type; // must stay first field: every inspectorPlugin*Event
+                 // function reinterprets an eHandle as a leading
+                 // uint64_t type tag before casting further, matching
+                 // inspectorCollInfo/inspectorKernelChInfo's own layout.
+  uint64_t magic; // INSPECTOR_PROXYSTEP_MAGIC while live; see its own comment
+  struct inspectorProxyOpInfo* parentOp;
+  uint64_t tsGpuWaitUsec; // 0 = not yet captured this step
+};
+
+struct inspectorProxyOpInfo {
+  uint64_t type; // see inspectorProxyStepInfo::type above
+  uint64_t magic; // INSPECTOR_PROXYOP_MAGIC while live; see its own comment
+  struct inspectorCommInfo* commInfo;
+  int peer;
+  int isSend;
+  // Fixed pool, not malloc'd per step -- see INSPECTOR_PROXY_STEP_POOL_SIZE's
+  // own comment for why step % INSPECTOR_PROXY_STEP_POOL_SIZE is a
+  // provably correct (not guessed) index.
+  struct inspectorProxyStepInfo stepPool[INSPECTOR_PROXY_STEP_POOL_SIZE];
 };
 
 struct inspectorCollInfo {
@@ -285,6 +367,9 @@ inspectorResult_t inspectorDelComm(struct inspectorCommInfo *commInfo);
 void inspectorUpdateCollPerf(struct inspectorCompletedCollInfo *completedColl,
                              struct inspectorCollInfo *collInfo);
 ncclDataType_t inspectorStringToDatatype(const char* str);
+
+void inspectorRecordProxyPeerWait(struct inspectorCommInfo *commInfo,
+                                  int peer, int isSend, uint64_t durUsec);
 
 void inspectorComputeCollBw(struct inspectorCommInfo *commInfo,
                             struct inspectorCompletedCollInfo *completedColl,

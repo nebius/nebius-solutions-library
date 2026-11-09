@@ -131,7 +131,20 @@ __hidden ncclResult_t inspectorPluginInit(void** context, uint64_t commHash,
   // (4000 real all_to_all_single/all_to_all calls) that without this
   // flag, zero records are produced for such traffic -- not mislabeled,
   // literally absent.
-  *eActivationMask = ncclProfileColl | ncclProfileP2p | ncclProfileKernelCh;
+  // S6.40 -- also request ncclProfileProxyOp/ncclProfileProxyStep so the
+  // real proxy-thread GPUWait->PeerWait(send)/Wait->GPUWait(recv)
+  // interval becomes visible (see inspectorRecordProxyPeerWait's own
+  // docstring for exactly what this measures and why it's a genuinely
+  // new, peer-attributable signal, not a repeat of S6.27.2/S6.35/S6.39).
+  // Confirmed via direct reading of plugin/profiler.cc's own call sites
+  // that requesting ncclProfileProxyStep alone is sufficient to also
+  // trigger ncclProfilerStartProxyOpEvent (its own activation check is
+  // an OR across all three proxy-related bits) -- both are requested
+  // explicitly anyway since inspectorPluginStartEvent below must handle
+  // ncclProfileProxyOp itself (it supplies the peer/isSend this plugin
+  // needs, via eDescr->parentObj on the child ProxyStep event).
+  *eActivationMask = ncclProfileColl | ncclProfileP2p | ncclProfileKernelCh
+                   | ncclProfileProxyOp | ncclProfileProxyStep;
   INFO(NCCL_INIT, "PROFILER/Plugin: init commName: %s commHash: %lu nranks: %d rank: %d",
        commName ? commName : "", commHash, nranks, rank);
 success:
@@ -511,6 +524,79 @@ __hidden ncclResult_t inspectorPluginStartEvent(void* context,
     struct inspectorKernelChInfo *kernelChEvent = nullptr;
     inspectorPluginKernelChInfoInit(&kernelChEvent, eDescr);
     *eHandle = kernelChEvent;
+  } else if (eDescr->type == ncclProfileProxyOp) {
+    // S6.41 -- NCCL's proxy subsystem is explicitly shared/cross-process
+    // (comm->sharedRes->proxyState, serviced over a UDS socket by
+    // ncclProxyServiceUDS -- confirmed directly in NCCL's own proxy.cc),
+    // so this callback can fire in a process other than the one that
+    // posted the op, carrying a context pointer that belongs to that
+    // OTHER process's address space. Confirmed against CoMMA's own
+    // profiler.rs, which validates exactly this before trusting a
+    // ProxyOp's comm pointer. Checked here, before any dereference of
+    // context: on mismatch this op's events are simply not tracked.
+    pid_t descrPid = (pid_t)eDescr->proxyOp.pid;
+    pid_t selfPid = getpid();
+    if (descrPid != selfPid) {
+      static uint64_t crossProcessSkipCount = 0;
+      uint64_t skips = __atomic_add_fetch(&crossProcessSkipCount, 1, __ATOMIC_RELAXED);
+      // Never silent, never log-spamming: fires on exact powers of two,
+      // matching this file's existing ring-buffer-drop convention.
+      if ((skips & (skips - 1)) == 0) {
+        INFO(NCCL_INSPECTOR,
+             "NCCL Inspector: ProxyOp cross-process context skipped (descr pid=%d, this pid=%d), count=%lu",
+             (int)descrPid, (int)selfPid, skips);
+      }
+      *eHandle = nullptr;
+      return ncclSuccess;
+    }
+    // S6.40 -- one real alloc per proxy op (once per collective per
+    // channel per direction), the same frequency class as
+    // inspectorPluginP2pInfoInit's own calloc above, NOT per proxy step
+    // (which is far higher frequency -- see inspectorProxyOpInfo's own
+    // fixed stepPool for why that path allocates nothing).
+    struct inspectorProxyOpInfo *opInfo =
+      (struct inspectorProxyOpInfo*)calloc(1, sizeof(struct inspectorProxyOpInfo));
+    if (opInfo == nullptr) {
+      WARN("Inspector: Failed to allocate memory for proxy op info structure");
+      return ncclSuccess;
+    }
+    opInfo->type = ncclProfileProxyOp;
+    opInfo->magic = INSPECTOR_PROXYOP_MAGIC;
+    opInfo->commInfo = (struct inspectorCommInfo*)context;
+    opInfo->peer = eDescr->proxyOp.peer;
+    opInfo->isSend = eDescr->proxyOp.isSend;
+    *eHandle = opInfo;
+  } else if (eDescr->type == ncclProfileProxyStep) {
+    // parentObj is the ProxyOp's own eHandle (confirmed directly against
+    // plugin/profiler.cc's ncclProfilerStart{Send,Recv}ProxyStepEvent:
+    // eDescr.parentObj = sub->opEventHandle) -- never null under normal
+    // operation since ProxyOp's startEvent always runs first for the
+    // same sub, but defensively checked anyway since a null/mistyped
+    // parent here would otherwise misattribute a peer-wait sample to
+    // garbage memory. A null parentObj is also the expected shape when
+    // the parent ProxyOp was itself skipped above (cross-process case):
+    // *eHandle was set to nullptr there, so NCCL passes nullptr as
+    // parentObj here too.
+    if (eDescr->parentObj == nullptr) return ncclSuccess;
+    struct inspectorProxyOpInfo *parentOp = (struct inspectorProxyOpInfo*)eDescr->parentObj;
+    if (parentOp->type != ncclProfileProxyOp) return ncclSuccess;
+    // S6.41 -- secondary guard: NCCL's proxy.cc reuses a freed
+    // ncclProxySubArgs slot's handle fields without zeroing them on
+    // reuse (confirmed directly -- the memset that would do this is
+    // explicitly commented out in the sub-arg append/reuse path, and the
+    // hand-written replacement field list omits opEventHandle/
+    // stepEventHandle). parentObj can therefore be a stale pointer to an
+    // already-freed inspectorProxyOpInfo even when non-null and
+    // correctly typed by coincidence of leftover memory. The magic check
+    // is the only reliable guard against this; treated as a safe no-op.
+    if (parentOp->magic != INSPECTOR_PROXYOP_MAGIC) return ncclSuccess;
+    struct inspectorProxyStepInfo *stepInfo =
+      &parentOp->stepPool[eDescr->proxyStep.step % INSPECTOR_PROXY_STEP_POOL_SIZE];
+    stepInfo->type = ncclProfileProxyStep;
+    stepInfo->magic = INSPECTOR_PROXYSTEP_MAGIC;
+    stepInfo->parentOp = parentOp;
+    stepInfo->tsGpuWaitUsec = 0;
+    *eHandle = stepInfo;
   } else {
     return ncclSuccess;
   }
@@ -576,6 +662,28 @@ __hidden ncclResult_t inspectorPluginStopEvent(void *eHandle) {
     // 2.28.9 source tree before cutting this, not assumed from the
     // profiler.h header alone. No other code path reaches this branch,
     // so leaving it as a no-op here is correct, not just an optimization.
+    return ncclSuccess;
+  } else if (type == ncclProfileProxyOp) {
+    // S6.40 -- the one real alloc per proxy op (see
+    // inspectorPluginStartEvent's ncclProfileProxyOp case), freed here,
+    // matching Coll/P2p's own free-on-stop lifetime exactly. S6.41:
+    // clear magic before free so a stale pointer surviving elsewhere
+    // (see the stale-handle comment on the magic check above) can never
+    // read a live-looking magic value out of already-freed memory.
+    struct inspectorProxyOpInfo *opInfo = (struct inspectorProxyOpInfo *)eHandle;
+    opInfo->magic = 0;
+    free(eHandle);
+    return ncclSuccess;
+  } else if (type == ncclProfileProxyStep) {
+    // Pool-embedded in the parent ProxyOp struct, not malloc'd -- see
+    // INSPECTOR_PROXY_STEP_POOL_SIZE's own comment. Nothing to free;
+    // clear tsGpuWaitUsec defensively so a stale timestamp can never
+    // leak into the next op to reuse this same pool slot. S6.41: also
+    // clear magic so a reused slot never briefly reads as live before
+    // the next startEvent re-sets it.
+    struct inspectorProxyStepInfo *stepInfo = (struct inspectorProxyStepInfo *)eHandle;
+    stepInfo->tsGpuWaitUsec = 0;
+    stepInfo->magic = 0;
     return ncclSuccess;
   }
   return ncclSuccess;
@@ -724,6 +832,35 @@ __hidden ncclResult_t inspectorPluginRecordEventState(void* eHandle,
       }
       inspectorUnlockRWLock(&collInfo->guard);
       // --- end former inspectorPluginStopEvent(ncclProfileKernelCh) body ---
+    }
+  } else if (type == ncclProfileProxyStep) {
+    // S6.40 -- see inspectorRecordProxyPeerWait's own docstring for
+    // exactly what these two intervals measure and why each is
+    // attributable to a specific real peer. No lock needed here: this
+    // whole branch runs on this communicator's own single proxy
+    // progress thread (the same producer invariant commInfo->ringBuf
+    // already relies on), so stepInfo->tsGpuWaitUsec is never touched
+    // concurrently; the only cross-thread access is inside
+    // inspectorRecordProxyPeerWait itself, which takes commInfo's own
+    // proxyWaitLock.
+    struct inspectorProxyStepInfo *stepInfo = (struct inspectorProxyStepInfo *)eHandle;
+    // S6.41 -- same stale-handle hazard as the startEvent-side magic
+    // check (see its comment): by the time recordEventState runs, the
+    // slot this eHandle points to may already have been torn down and
+    // reused. Checked here independently (not just at startEvent time)
+    // because the handle is held across the GPUWait->PeerWait interval,
+    // during which a stop/reuse could happen.
+    if (stepInfo->magic != INSPECTOR_PROXYSTEP_MAGIC) return ncclSuccess;
+    struct inspectorProxyOpInfo *opInfo = stepInfo->parentOp;
+    if (opInfo == nullptr) return ncclSuccess;
+    if (opInfo->magic != INSPECTOR_PROXYOP_MAGIC) return ncclSuccess;
+    if (eState == ncclProfilerProxyStepSendGPUWait || eState == ncclProfilerProxyStepRecvWait) {
+      stepInfo->tsGpuWaitUsec = inspectorGetTime();
+    } else if (eState == ncclProfilerProxyStepSendPeerWait_v4 || eState == ncclProfilerProxyStepRecvFlushWait) {
+      if (stepInfo->tsGpuWaitUsec != 0) {
+        uint64_t durUsec = inspectorGetTime() - stepInfo->tsGpuWaitUsec;
+        inspectorRecordProxyPeerWait(opInfo->commInfo, opInfo->peer, opInfo->isSend, durUsec);
+      }
     }
   }
   return ncclSuccess;

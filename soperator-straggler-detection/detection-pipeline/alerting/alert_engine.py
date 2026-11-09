@@ -2205,12 +2205,17 @@ class AlertEngine:
                 if (comm, coll) not in seen_cc and coll in ("Send", "Recv"):
                     seen_cc.add((comm, coll))
                     self._run_check("alltoall_tiered", self._check_alltoall_tiered, comm, coll)
-        # Option D (MoE AllToAll app-level timing): runs once per poll cycle
-        # per call type, independent of any (comm, bucket, coll) discovery
-        # loop above -- agg_app_alltoall_ms has no comm/bucket/coll dimension
+        # Option D (MoE AllToAll app-level timing, model_moe.py's own Python-
+        # level dispatch_ms/combine_ms) and Option E (nccl_wait_shim.c's
+        # CUDA-event-based ncclSend/ncclRecv timing, DESIGN_NOTES §6.36.4)
+        # both push into the SAME agg_app_alltoall_ms metric family, keyed
+        # apart only by the call= label -- reused here as-is, exactly as
+        # §6.36.4's own design anticipated. Runs once per poll cycle per
+        # call type, independent of any (comm, bucket, coll) discovery loop
+        # above -- agg_app_alltoall_ms has no comm/bucket/coll dimension
         # (see _check_alltoall_app_timing's own docstring for why). Additive:
         # _check_mean/_check_mean_tiered/_check_alltoall_tiered are unchanged.
-        for _call in ("dispatch", "combine"):
+        for _call in ("dispatch", "combine", "send", "recv"):
             self._run_check("alltoall_app_timing", self._check_alltoall_app_timing, _call)
 
     def _find_dependent_small_comms(self, hostname, comm):
