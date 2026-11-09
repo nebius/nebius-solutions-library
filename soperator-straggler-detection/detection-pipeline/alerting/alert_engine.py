@@ -1879,6 +1879,16 @@ class AlertEngine:
         # Uses same PERSIST_WINDOW/PERSIST_REQUIRED as tiered check for consistency.
         self._alltoall_tracker = CVPersistenceTracker(0.5, T.PERSIST_WINDOW, T.PERSIST_REQUIRED)
         self._alltoall_active_keys = set()
+        # Option D (MoE AllToAll app-level timing, 2026-11): separate
+        # persistence tracker for the new agg_app_alltoall_ms-based check,
+        # keyed by (call, member) -- no comm/bucket/coll dimension exists
+        # for this metric (see _check_alltoall_app_timing's own docstring).
+        # Same PERSIST_WINDOW/PERSIST_REQUIRED as every other check here,
+        # for consistency -- the THRESHOLD values this check gates on
+        # (APPTIMING_Z_THRESH/APPTIMING_MM_THRESH) are its own, separately
+        # calibrated, not reused from MEAN_Z_THRESH/MEAN_MM_THRESH.
+        self._apptiming_tracker = CVPersistenceTracker(0.5, T.PERSIST_WINDOW, T.PERSIST_REQUIRED)
+        self._apptiming_active_keys = set()
         # P27-hotfix2 -- nv-hostengine liveness, same dead-man's-switch
         # discipline as pipeline_down/n_pipeline_down_cycles above: found
         # this session that nv-hostengine (the persistent DCGM daemon every
@@ -2195,6 +2205,13 @@ class AlertEngine:
                 if (comm, coll) not in seen_cc and coll in ("Send", "Recv"):
                     seen_cc.add((comm, coll))
                     self._run_check("alltoall_tiered", self._check_alltoall_tiered, comm, coll)
+        # Option D (MoE AllToAll app-level timing): runs once per poll cycle
+        # per call type, independent of any (comm, bucket, coll) discovery
+        # loop above -- agg_app_alltoall_ms has no comm/bucket/coll dimension
+        # (see _check_alltoall_app_timing's own docstring for why). Additive:
+        # _check_mean/_check_mean_tiered/_check_alltoall_tiered are unchanged.
+        for _call in ("dispatch", "combine"):
+            self._run_check("alltoall_app_timing", self._check_alltoall_app_timing, _call)
 
     def _find_dependent_small_comms(self, hostname, comm):
         """P21.6 -- generic dependent-communicator discovery. A communicator
@@ -6263,6 +6280,114 @@ class AlertEngine:
         for stale_key in mine - new_active_keys:
             self._alltoall_tracker.observe(stale_key, 0.0, now_ts)
         self._alltoall_active_keys = (self._alltoall_active_keys - mine) | new_active_keys
+
+    def _check_alltoall_app_timing(self, call):
+        """Option D (MoE AllToAll app-level timing, 2026-11): the real fix
+        for the AllToAll straggler blindness Option C (_check_alltoall_tiered
+        above) root-caused but could not close -- NCCL/Inspector-level
+        Send/Recv kernel timing is driven uniformly elevated for every rank
+        once one rank is late to AllToAll's shared synchronous barrier, so
+        there is no fast/slow tier split at THAT measurement layer to key a
+        check off (see _check_alltoall_tiered's own docstring, confirmed
+        empirically, unchanged by this addition). This check uses a
+        DIFFERENT, additive metric instead: agg_app_alltoall_ms, the real
+        wall-clock duration of the training process's OWN Python-level
+        all_to_all_single() call (model_moe.py's dispatch_ms/combine_ms,
+        pushed by aggregator/node_aggregator_ref.py's new
+        poll_apptiming_files()/_flush_apptiming_window()) -- a late-arriving
+        rank shows up there as a real, single-rank-elevated outlier among
+        its peers (confirmed directly against this project's own real fault
+        data, see thresholds.py's own APPTIMING_Z_THRESH/APPTIMING_MM_THRESH
+        comment for the exact numbers), not a uniform shift.
+
+        Runs ONCE per poll cycle per call type ("dispatch"/"combine"), not
+        per-host and not per-(comm,bucket,coll): agg_app_alltoall_ms has no
+        comm/bucket/coll dimension at all. member= is the real pid (same
+        "member is always a real pid" convention _check_mean/_check_cv
+        already use -- confirmed by reading format_alert()'s own "pid="
+        header field before writing this; a bare 0-47 rank number there
+        would misread exactly the way DESIGN_NOTES Sec. 6.31.4/6.34's own
+        fresh-eyes reviews have repeatedly caught and fixed). The real,
+        stable, GLOBAL torch.distributed rank (model_moe.py's own self.rank
+        -- no comm-local translation needed or available, unlike Inspector's
+        phys_id) rides along as role_rank/role_n, same convention every
+        other check already uses to show it. Simple global peer comparison,
+        same z/mm shape as score_mean_window's own "worst vs. peers" math,
+        deliberately NOT reusing _check_mean's own
+        MEAN_Z_THRESH/MEAN_MM_THRESH (see thresholds.py) and NOT requiring
+        _check_wait_induced's cross-JOB role-baseline warm-up -- this is a
+        within-the-same-poll, single-job comparison, so (unlike the FSDP
+        wait-induced path, DESIGN_NOTES Sec. 6.31.2) there is no cold-start
+        gap for a brand-new communicator shape's first few runs.
+
+        Additive only: _check_mean, _check_mean_tiered, _check_alltoall_tiered,
+        and classifier.py are entirely unchanged by this function's existence.
+        """
+        now_ts = time.time()
+        query = f'agg_app_alltoall_ms{{call="{call}"}}'
+        members = {}
+        for row in _query_instant(self.vm_url, query):
+            m = row.get("metric", {})
+            try:
+                val = float(row["value"][1])
+            except (KeyError, ValueError, TypeError):
+                continue
+            pid = m.get("member", "")
+            hostname = m.get("hostname", "")
+            slurm_job_id = m.get("slurm_job_id", "")
+            role_rank = m.get("role_rank", "na")
+            role_n = m.get("role_n", "na")
+            if not pid or val <= 0:
+                continue
+            members[pid] = (val, hostname, slurm_job_id, role_rank, role_n)
+
+        # Same floor as every other peer-relative check here (_check_mean,
+        # _check_alltoall_tiered): fewer than 3 real members makes "worst
+        # vs. peers" statistically meaningless (stdev of 1 peer is zero/
+        # undefined), not a detection gap specific to this check.
+        if len(members) < 3:
+            self._reset_apptiming_keys(set(), now_ts, call)
+            return
+
+        worst = max(members, key=lambda p: members[p][0])
+        worst_val, worst_host, worst_job, worst_role_rank, worst_role_n = members[worst]
+        peer_vals = [v for p, (v, _, _, _, _) in members.items() if p != worst]
+        peer_mean = statistics.mean(peer_vals)
+        peer_median = statistics.median(peer_vals)
+        peer_sd = statistics.stdev(peer_vals) if len(peer_vals) > 1 else 0
+        z = abs(worst_val - peer_mean) / peer_sd if peer_sd > 0 else (float("inf") if worst_val != peer_mean else 0.0)
+        lo, hi = min(worst_val, peer_median), max(worst_val, peer_median)
+        mm = hi / lo if lo > 0 else float("inf")
+
+        qualifies = z > T.APPTIMING_Z_THRESH and mm > T.APPTIMING_MM_THRESH
+        key = ("alltoall_app_timing", call, worst)
+        new_active_keys = {key} if qualifies else set()
+        persisted, duration_s = self._apptiming_tracker.observe(key, 1.0 if qualifies else 0.0, now_ts)
+        if persisted:
+            self._emit(
+                "app_alltoall",
+                worst_host, f"moe_app_alltoall_{call}", worst,
+                call,  # synthetic "bucket" label: which all_to_all_single() call this is
+                "AllToAll",
+                z, mm,
+                worst_val, peer_mean,
+                worst_job or None,
+                anomaly_ts=now_ts,
+                role_rank=worst_role_rank, role_n=worst_role_n,
+                persist_duration_s=duration_s,
+                is_likely_root_cause=True,
+            )
+        self._reset_apptiming_keys(new_active_keys, now_ts, call)
+
+    def _reset_apptiming_keys(self, new_active_keys, now_ts, call):
+        """Parallel to _reset_alltoall_keys but scoped to (call,) -- see
+        that function's own docstring for why this per-group reset pattern
+        is needed (a global reset would clear every OTHER call type's
+        persistence streak on each invocation)."""
+        mine = {k for k in self._apptiming_active_keys if k[1] == call}
+        for stale_key in mine - new_active_keys:
+            self._apptiming_tracker.observe(stale_key, 0.0, now_ts)
+        self._apptiming_active_keys = (self._apptiming_active_keys - mine) | new_active_keys
 
     def _reset_tiered_keys(self, new_active_keys, now_ts, comm, bucket, coll):
         """Record 0.0 (not qualifying) for any straggler keys seen in a previous

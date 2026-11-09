@@ -189,6 +189,21 @@ CALIB_MIN_FREQ_FRAC = 0.02
 # ceiling) -- reused directly, not a new invented ratio.
 BUCKET_MATURITY_GRACE_S = 120.0
 
+# Option D (MoE AllToAll app-level timing, 2026-11) -- independently chosen
+# and validated for this NEW metric channel (model_moe.py's own
+# dispatch_ms/combine_ms, see its own "Option D" comment), NOT borrowed
+# from STAT_WINDOW_SIZE (that dict belongs to the separate offline
+# classifier/detection.py module) or from this file's own per-bucket
+# window-closing logic (time/occurrence-based, built for a very different
+# calibration problem). Chosen directly from real data: this project's own
+# existing var/runs/item3_verbose_diag raw logs (MOE_FAULT_TARGET_RANK=4,
+# re-analyzed before any of this round's code was written) show EVERY
+# 30-sample window across 50 consecutive windows cleanly separating the
+# true fault rank from its 47 peers (z 5.37-25.19, min/max ratio
+# 1.62-2.23) -- 30 is a real, evidenced window size for this specific
+# signal, not a default copied from elsewhere.
+APPTIMING_WINDOW_SIZE = 30
+
 # P22.1 (FSDP calibration-window fix) -- caps the TOTAL used in the
 # frac-of-total term below (CALIB_MIN_FREQ_FRAC * effective_total), not a
 # cap on counting or on how long a bucket can still qualify. Without
@@ -692,6 +707,13 @@ class NodeAggregator:
         self.n_push_failures = 0
         self.consecutive_push_failures = 0
         self._last_heartbeat_wall = 0.0
+        # Option D (2026-11) -- (rank, call) -> list of duration_ms samples
+        # not yet flushed into a pushed mean. Separate from self.state
+        # (keyed by (comm_id, phys_id, bucket), an Inspector-record concept
+        # this new channel has no equivalent of -- model_moe.py's own
+        # dispatch_ms/combine_ms records carry a real global rank directly,
+        # no comm_id/phys_id translation needed or available).
+        self.apptiming_buf = defaultdict(list)
 
     def base_labels(self):
         return f'hostname="{self.hostname}",cluster="{self.cluster}",slurm_job_id="{self.slurm_job_id}"'
@@ -1294,6 +1316,91 @@ class NodeAggregator:
             # DURING a long first-time replay loses only the interval's
             # own small window, not the whole in-progress replay.
             self.maybe_checkpoint_offsets()
+
+    def poll_apptiming_files(self, deadline=None):
+        """Option D (2026-11) -- additive, parallel to poll_files() above,
+        for the new MoE AllToAll app-level timing channel (model_moe.py's
+        apptiming-*.jsonl files). Deliberately a SEPARATE method, glob
+        pattern, and record schema from poll_files()/handle_record():
+        handle_record() hard-requires header/coll_perf/metadata keys (an
+        Inspector-record assumption) and would raise KeyError on this
+        channel's much simpler {ts_us, hostname, pid, rank, call, round,
+        duration_ms} schema -- confirmed by reading handle_record() before
+        writing this, not assumed. Reuses self.file_offsets/self.file_inodes
+        (safe: both are keyed by full file path, and apptiming-*.jsonl never
+        matches poll_files()'s own f"{dump_dir}/*.log" glob, so there is no
+        collision). Zero changes to poll_files()/handle_record() themselves.
+        """
+        call_deadline = time.time() + self.POLL_FILES_MAX_SECONDS
+        effective_deadline = min(deadline, call_deadline) if deadline is not None else call_deadline
+        for fp in sorted(glob.glob(f"{self.dump_dir}/apptiming-*.jsonl")):
+            if time.time() >= effective_deadline:
+                break
+            offset = self.file_offsets.get(fp, 0)
+            try:
+                st = os.stat(fp)
+            except FileNotFoundError:
+                continue
+            prev_inode = self.file_inodes.get(fp)
+            if st.st_size < offset or (prev_inode is not None and prev_inode != st.st_ino):
+                offset = 0
+            self.file_inodes[fp] = st.st_ino
+            try:
+                with open(fp, "rb") as f:
+                    f.seek(offset)
+                    new_data = f.read()
+            except FileNotFoundError:
+                continue
+            consumed = 0
+            for raw_line in new_data.splitlines(keepends=True):
+                consumed += len(raw_line)
+                line = raw_line.strip()
+                if not line:
+                    continue
+                try:
+                    d = json.loads(line)
+                    pid = d["pid"]
+                    rank = d["rank"]
+                    world_size = d.get("world_size", "na")
+                    call = d["call"]
+                    duration_ms = float(d["duration_ms"])
+                    ts_us = int(d["ts_us"])
+                except Exception:
+                    continue
+                key = (pid, call)
+                self.apptiming_buf[key].append((duration_ms, ts_us, rank, world_size))
+                if len(self.apptiming_buf[key]) >= APPTIMING_WINDOW_SIZE:
+                    self._flush_apptiming_window(pid, call)
+            self.file_offsets[fp] = offset + consumed
+            self.maybe_checkpoint_offsets()
+
+    def _flush_apptiming_window(self, pid, call):
+        """Push one closed window's mean duration_ms for (pid, call) as
+        agg_app_alltoall_ms, additive alongside (never replacing)
+        agg_mean_exec_time_us -- same discipline as every other new metric
+        family in this file. member=str(pid) here (NOT rank) deliberately
+        matches this file's own existing "member is always a real pid"
+        convention (phys_gpu_slot/agg_member_gpu_slot_index are keyed the
+        same way) -- this is literally the same OS process Inspector's own
+        plugin already reports gpu_slot_index for, so alert_engine.py's
+        existing _query_gpu_slot() resolves a real slot for this pid with
+        zero new plumbing. rank/world_size (a real, stable GLOBAL identity
+        model_moe.py already knows directly, no comm-local translation
+        needed) ride along as role_rank/role_n labels, the same convention
+        every other check in this pipeline already uses to show a human-
+        meaningful rank alongside the real pid."""
+        samples = self.apptiming_buf.pop((pid, call), [])
+        if not samples:
+            return
+        vals = [v for v, _, _, _ in samples]
+        ts_us = samples[-1][1]
+        role_rank = samples[-1][2]
+        role_n = samples[-1][3]
+        mv = st.mean(vals)
+        self.push_buf.append((f'agg_app_alltoall_ms{{member="{pid}",call="{call}",'
+                               f'role_rank="{role_rank}",role_n="{role_n}",'
+                               f'gpu_slot="{self.gpu_slot_label(pid)}",{self.base_labels()}}}',
+                               mv, ts_us // 1000))
 
     def handle_record(self, d):
         h = d["header"]
@@ -2014,6 +2121,7 @@ class NodeAggregator:
         t_end = time.time() + duration_s
         while time.time() < t_end:
             self.poll_files(deadline=t_end)
+            self.poll_apptiming_files(deadline=t_end)
             self.maybe_heartbeat()
             self.maybe_checkpoint_offsets()
             self.flush()
@@ -2021,6 +2129,7 @@ class NodeAggregator:
                 break
             time.sleep(poll_interval)
         self.poll_files(deadline=t_end)
+        self.poll_apptiming_files(deadline=t_end)
         self.maybe_heartbeat()
         # Restart-backlog-replay fix -- force=True on the final,
         # shutdown-path checkpoint (bypassing the normal 10s interval

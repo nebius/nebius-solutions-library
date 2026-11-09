@@ -7,8 +7,10 @@ https://github.com/openai/gpt-2/blob/master/src/model.py
 https://github.com/huggingface/transformers/blob/main/src/transformers/models/gpt2/modeling_gpt2.py
 """
 
+import json
 import math
 import os
+import socket
 import time
 import inspect
 from dataclasses import dataclass
@@ -51,6 +53,105 @@ MOE_FAULT_DELAY_US = float(os.environ.get("MOE_FAULT_DELAY_US", "0"))
 # condition below permanently false with no visible error anywhere.
 print(f"[MOE-FAULT-CONFIG] pid={os.getpid()} target_rank={MOE_FAULT_TARGET_RANK} "
       f"delay_us={MOE_FAULT_DELAY_US}", flush=True)
+
+# Option D (AllToAll app-level timing, 2026-11) -- root cause for MoE's
+# AllToAll straggler blindness (DESIGN_NOTES Sec. 6.33, "Option C") is that
+# NCCL/Inspector-level Send/Recv kernel timing is driven uniformly elevated
+# for EVERY rank once one rank is late to the shared synchronous barrier --
+# there is no fast-outlier/slow-waiter split at that measurement layer to
+# key a tiered check off of. The signal this file ALREADY computed for a
+# different purpose (Item-3 ground-truth diagnostic: _t_dispatch0/
+# dispatch_ms below, present before this change) turns out to be exactly
+# the missing discriminator: bracketing the whole Python-level
+# all_to_all_single() call (host-side entry to host-side return, NOT the
+# NCCL kernel's own execution time) on the straggler rank reads light
+# elevated relative to its 47 peers, not uniform -- confirmed directly
+# against this project's own existing var/runs/item3_verbose_diag raw logs
+# (MOE_FAULT_TARGET_RANK=4): rank 4 mean dispatch_ms=1.09 vs every other
+# rank's 0.50-0.59 (peer stdev 0.018), a clean, real, single-rank-elevated
+# z~31 overall / min-per-30-round-window z=5.37 signature -- BEFORE any
+# new code was written for this round. The one real gap was that this
+# timing was only ever printed to this process's own stdout, never fed
+# into the aggregation/alerting pipeline; this change closes that gap
+# additively (new dump-file channel, new aggregator ingestion, new
+# alert_engine.py check -- zero change to _check_mean/_check_mean_tiered/
+# classifier.py, zero change to the existing stdout print below).
+#
+# Deliberately a SEPARATE dump-file channel from Inspector's own
+# var/dump/<hostname>/worker-N-pidNNNN.log files (JSON-schema-compatible
+# with node_aggregator_ref.py's handle_record(), which hard-requires
+# header/coll_perf/metadata keys and would raise on anything else) --
+# writing a differently-shaped record into one of ITS files would either
+# crash the aggregator or require editing handle_record(), neither
+# acceptable for an additive-only change. Named with a distinct
+# "apptiming-" prefix and ".jsonl" extension specifically so it never
+# matches node_aggregator_ref.py's existing f"{dump_dir}/*.log" glob.
+#
+# Platform-agnostic by construction, not just by assumption (Step 1.2):
+# this measures the training process's OWN call timing via Python's own
+# time.time(), gated only on NCCL_INSPECTOR_DUMP_DIR -- an env var ALREADY
+# exported identically by both train_node_moe.sh (Slurm) and
+# train_node_moe_k8s.sh (K8s) for Inspector's own use (grep-confirmed in
+# both launchers before writing this). No Slurm- or K8s-specific API is
+# touched; the one thing this assumption does NOT cover, and which Step 3
+# of this task exists specifically to confirm rather than assume, is
+# whether container/pod scheduling jitter changes the signal's real
+# magnitude on K8s -- that is a live-validation question, not a design one.
+MOE_APPTIMING_ENABLED = os.environ.get("MOE_APPTIMING_ENABLED", "1") not in ("0", "", "false", "False")
+_APPTIMING_DUMP_DIR = os.environ.get("NCCL_INSPECTOR_DUMP_DIR", "")
+_APPTIMING_HOSTNAME = socket.gethostname()
+_APPTIMING_PATH = (
+    os.path.join(_APPTIMING_DUMP_DIR, f"apptiming-{_APPTIMING_HOSTNAME}-pid{os.getpid()}.jsonl")
+    if MOE_APPTIMING_ENABLED and _APPTIMING_DUMP_DIR else None
+)
+_apptiming_fh = None
+if _APPTIMING_PATH:
+    try:
+        os.makedirs(os.path.dirname(_APPTIMING_PATH), exist_ok=True)
+        _apptiming_fh = open(_APPTIMING_PATH, "a", buffering=1)
+    except OSError as e:
+        # Never fatal -- a dump-write failure (e.g. disk full, permissions)
+        # must not take down training. Falls back to stdout-only (the
+        # pre-existing [MOE-DISPATCH-TIMING] print below still runs),
+        # same no-fatal-dependency discipline as the rest of this file's
+        # fault-injection/diagnostic instrumentation.
+        print(f"[MOE-APPTIMING-WARN] pid={os.getpid()} could not open {_APPTIMING_PATH}: {e}", flush=True)
+        _apptiming_fh = None
+
+
+def _emit_apptiming(rank, call, round_idx, duration_ms):
+    """Append one JSON-line record for the new app-level AllToAll timing
+    channel. Best-effort, additive-only: any failure here is caught and
+    printed, never raised -- this must never be able to break training.
+
+    "pid" (this process's real OS pid, the exact same one Inspector's own
+    plugin reports gpu_slot_index for via this SAME process) is the field
+    node_aggregator_ref.py pushes as member= -- NOT rank. This deliberately
+    matches the "member is always a real pid" convention the rest of this
+    pipeline's _emit()/format_alert() already assume throughout (confirmed
+    by reading both before writing this): a bare 0-47 rank number under a
+    field literally named pid= would be exactly the kind of backwards-
+    reading confusion this project's own log-readability rounds (DESIGN_
+    NOTES Sec. 6.31.4/6.34) have repeatedly hunted down and fixed, and
+    using the real pid here means _query_gpu_slot() resolves a REAL,
+    already-known gpu_slot for free, no new plumbing needed. "rank" is
+    carried through as role_rank instead (same role_rank=/role_n=
+    convention every other check already uses for this exact purpose)."""
+    if _apptiming_fh is None:
+        return
+    try:
+        _apptiming_fh.write(json.dumps({
+            "ts_us": int(time.time() * 1e6),
+            "hostname": _APPTIMING_HOSTNAME,
+            "pid": os.getpid(),
+            "rank": rank,
+            "world_size": MOE_WORLD_SIZE,
+            "call": call,
+            "round": round_idx,
+            "duration_ms": duration_ms,
+        }) + "\n")
+    except OSError as e:
+        print(f"[MOE-APPTIMING-WARN] pid={os.getpid()} write failed: {e}", flush=True)
 
 class LayerNorm(nn.Module):
     """ LayerNorm but with an optional bias. PyTorch doesn't support simply bias=False """
@@ -222,8 +323,10 @@ class MoEMLP(nn.Module):
         recv = dist_nn_func.all_to_all_single(
             torch.empty(sum(output_splits), C, device=x.device, dtype=x.dtype),
             x_sorted, output_splits, input_splits)
+        _dispatch_ms = (time.time() - _t_dispatch0) * 1000
         print(f"[MOE-DISPATCH-TIMING] rank={self.rank} block={id(self)} round={self._fwd_idx} "
-              f"dispatch_ms={(time.time() - _t_dispatch0) * 1000:.1f}", flush=True)
+              f"dispatch_ms={_dispatch_ms:.1f}", flush=True)
+        _emit_apptiming(self.rank, "dispatch", self._fwd_idx, _dispatch_ms)
 
         processed = self.expert(recv) if self.rank < self.num_experts else recv
 
@@ -256,10 +359,17 @@ class MoEMLP(nn.Module):
         #   self.expert() ran.
         processed = processed.to(recv.dtype)
 
-        # step 3: combine -- send processed tokens back to their origin rank
+        # step 3: combine -- send processed tokens back to their origin rank.
+        # Symmetric timing bracket (Option D, 2026-11) -- same pattern as the
+        # dispatch call above; the fault is injected before dispatch only, so
+        # this call's own timing is primarily a cross-check (no elevation
+        # expected here for the target rank) and an extension point for any
+        # future fault injected at this later synchronization point instead.
+        _t_combine0 = time.time()
         combined = dist_nn_func.all_to_all_single(
             torch.empty(x_sorted.shape[0], C, device=x.device, dtype=recv.dtype),
             processed, input_splits, output_splits)
+        _emit_apptiming(self.rank, "combine", self._fwd_idx, (time.time() - _t_combine0) * 1000)
 
         out = torch.empty_like(combined)
         out[order] = combined

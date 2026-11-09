@@ -215,21 +215,28 @@ detail; these are structural, currently-accepted gaps, not bugs waiting to be fi
    (z≈0.7) regardless of whether a real straggler is present — this is a structural property of the
    statistic, not a detector-quality gap. Validated working correctly starting at 4 nodes. See
    DESIGN_NOTES.md §6.11/§6.21.
-3. **MoE fault detection does not work, for a deeper reason than injection timing alone.** The
-   originally-suspected cause (the injector delaying the backward pass, after the forward-pass
-   AllToAll routing collective already completed) is real but not the whole story: the
-   already-implemented, correctly-placed fix (inject immediately before the dispatch AllToAll
-   itself — `workloads/moe/run_moe_delayfault.sh`) was tried and still produces **zero detections**
-   (0/2 real trials, including a diagnostic with an unmistakable 2-second delay), even though the
-   delay is confirmed real and correctly timed via NCCL Inspector's own raw dump data. Root cause:
-   the aggregator's entire timing statistic is built on each collective's own measured execution
-   duration, not the gap before it starts — a host-side pre-collective sleep (this project's only
-   fault-injection mechanism, for every workload) produces exactly that kind of gap, which this
-   metric cannot see for MoE's AllToAll (implemented as grouped point-to-point Send/Recv), unlike
-   AllReduce-style collectives (where the same injection style is confirmed working repeatedly
-   elsewhere in this project). A genuine fix needs new aggregator-side measurement logic for this
-   collective type — out of scope for a presentation-layer-only change, and not attempted here.
-   See DESIGN_NOTES.md §6.27.2 and §6.29.6.
+3. **MoE AllToAll straggler detection/localization does not work on Slurm — now root-caused
+   precisely, across four independent attempts, not just restated.** Job-wide MoE slowdown
+   detection does work (a real, confirmed fault produces a real, job-wide signal); the gap is
+   specifically *localizing* it to one rank. (1) NCCL/Inspector-level kernel-timing aggregation
+   (`_check_alltoall_tiered`, "Option C") is structurally impossible for AllToAll: it's a
+   synchronous collective, so a late rank elevates every rank's measured kernel time together, not
+   a fast-outlier/slow-waiter split. (2) Application-level Python-call timing ("Option D") finds a
+   real signal, but only above a measured floor strictly between 100ms and 1000ms of injected
+   delay — below that (including this project's own standard 100ms fault magnitude), it's
+   statistically indistinguishable from healthy noise — and, independent of the floor, it requires
+   editing the training script itself, which this project's zero-customer-code-change design
+   philosophy does not permit. (3) The one existing tool built for exactly this purpose
+   (`moe-two-stage-detector/arrival_order.py`, a "last-to-arrive" metric from Inspector's verbose
+   timestamps) was tested for the first time this round — it had never actually been run against
+   this problem before — and found to fail for a real, root-caused implementation bug (its
+   round-boundary detection desynchronizes across ranks within a few rounds), independently
+   corroborated by AMD TraceLens's own documentation of the same AllToAll-v sync-pattern nuance.
+   (4) A researched, ranked set of alternatives was produced, with a precise design spec for the
+   top candidate — a CUDA-event-based LD_PRELOAD shim on `ncclSend`/`ncclRecv`, confirmed
+   technically viable in this project's own training container (NCCL is dynamically linked, not
+   statically baked in) — not yet built or validated. See DESIGN_NOTES.md §6.27.2, §6.29.6, §6.33,
+   §6.35, and §6.36 for the full history, evidence, and design.
 
 - **Shape/strategy coverage (2026-11, DESIGN_NOTES.md 6.12-6.19):** MoE has a real, intermittent (1-in-3 observed)
   collective-participation hang on healthy runs, independent of the detector, not root-caused (6.12.1). Deep
