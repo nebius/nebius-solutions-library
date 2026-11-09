@@ -107,6 +107,9 @@ nfs_in_k8s = {
 #                                                                                                                      #
 #----------------------------------------------------------------------------------------------------------------------#
 
+# Version of soperator.
+# ---
+slurm_operator_version = "4.1.18"
 # Worker nodes are Slurm compute nodes defined via one or more "NodeSets".
 #
 # A NodeSet is a group of worker nodes with the same:

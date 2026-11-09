@@ -969,12 +969,9 @@ resources:
           kruise:
             enabled: true
             interval: 5m
-            version: 1.9.1-custom
+            timeout: 5m
             overrideValues:
               manager:
-                image:
-                  repository: cr.nebius.cloud/soperator/kruise-manager
-                  tag: v1.9.1
                 # Scales with the sizing tier; the kruise manager OOM-ed on big
                 # clusters with the chart-default 1 cpu / 2Gi.
                 resources:
@@ -984,10 +981,6 @@ resources:
                   limits:
                     cpu: ${resources.kruise_manager.cpu}
                     memory: ${resources.kruise_manager.memory}
-              helmHooks:
-                image:
-                  repository: cr.nebius.cloud/soperator/kruise-helm-hook
-                  tag: v0.1.0
           soperatorChecks:
             enabled: true
             interval: 5m
