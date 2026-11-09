@@ -6114,3 +6114,130 @@ All trials run on committed code (commit e17ddcc + this session's fixes, see §6
 | All K8s alerts UNCONFIRMED | No SSH/DCGM in pods | Expected; structural K8s limitation |
 
 **Slurm/K8s parity**: Confirmed clean for all detection logic, bug fixes, log-readability fixes, and heartbeat tracking. One divergence found and fixed (60s poll-wait in FSDP/MoE/Megatron launch scripts). After fix: **fully at parity**.
+
+---
+
+### 6.40 MoE AllToAll straggler detection, Slurm-only: the CUDA-event LD_PRELOAD shim built and tested — a fifth independent failure, root-caused (2026-11)
+
+Direct continuation of §6.36.4's design spec. The shim was actually built, debugged to a crash-free and reasonably efficient state, and tested against real fault injection at three magnitudes plus a dedicated zero-sampling control. It does not produce a usable localization signal. This section documents why, precisely, and how this differs mechanistically from the four prior failures (§6.27.2 Option C, §6.29.6/§6.35 Option D, §6.36.2 arrival_order.py).
+
+#### 6.40.1 What was built
+
+`workloads/moe/nccl_wait_shim.c`: an `LD_PRELOAD` shared library intercepting `ncclSend`/`ncclRecv` via `dlsym(RTLD_NEXT, ...)`, falling back to `dlopen("libnccl.so.2", RTLD_NOW|RTLD_NOLOAD)+dlsym` when `RTLD_NEXT` resolution fails (confirmed, live, that it does fail in this project's actual training container — not a theoretical fallback). The real call is always made first and its return value is always honored; the shim never alters NCCL's own behavior. After a successful call, `cudaEventRecord()` timestamps the enqueue point on the same stream, using a pool of 64 pre-allocated, reused `cudaEvent_t` objects per rank (never created/destroyed per-call). A background drain path (`cudaEventQuery`/`cudaEventElapsedTime`, anchored to one process-lifetime reference event) converts completed events into `{ts_us, hostname, pid, rank, world_size, call, peer, round}` JSON lines written to the same `apptiming-*.jsonl` channel §6.35's Option D already established, so the existing `poll_apptiming_files()`/`_check_alltoall_app_timing()` ingestion path could in principle consume it unmodified (`alert_engine.py`'s call-type registration was extended from `("dispatch","combine")` to `("dispatch","combine","send","recv")` to wire this — this is the only change to any existing file this round; `_check_mean`, `_check_mean_tiered`, `classifier.py`, NCCL, and Inspector's own source are all confirmed untouched). Rank/world_size are read directly from the real communicator via `ncclCommUserRank`/`ncclCommCount` (also dlsym-resolved, cached once per process), never assumed from environment variables. Loaded via `LD_PRELOAD`/`NCCL_WAIT_SHIM_ENABLED=1` at the launcher/environment level only — zero customer-code-change by construction, same mechanism `qp_rate_limit_shim.c` already uses in this project.
+
+#### 6.40.2 Two real bugs found and fixed before any detection testing was meaningful
+
+1. **SIGSEGV on every rank.** `dlsym(RTLD_NEXT, "ncclSend")` returned NULL in this container, and the first version of the shim called through the NULL pointer unconditionally. Isolated using a minimal pass-through-only test shim (`nccl_wait_shim_minimal_test.c`, no CUDA calls) to confirm the crash was in the interception mechanism itself, not the CUDA event logic. Fixed by adding the same `RTLD_NOLOAD` dlopen fallback `qp_rate_limit_shim.c` already uses for `ibv_modify_qp`, and making both wrappers return `ncclInternalError` rather than crash if a real symbol still can't be found. Verified: `TORCHRUN_EXIT=0` on all 6 nodes after the fix.
+2. **Exit 127, "undefined symbol: ncclCommUserRank".** `inspector-plugin/Makefile`'s own precedent (plain extern reference, resolved at load time, used there for `cudaGetDevice()`) does not generalize: it failed live for both `ncclCommUserRank`/`ncclCommCount` and all six CUDA event functions in this shim's loading context. Fixed by routing every one of those symbols through the same dlsym/RTLD_NOLOAD pattern (falling back to `libcudart.so.12` for the CUDA symbols, confirmed as the real soname via `find` inside the container).
+
+A pre-existing `ncclSystemError` seen in one shim test log was checked against nine prior shim-free trial logs from this project (`fsdp_healthy1`, `fsdp_smoke`, `item3_fault1`, `item3_diag`, `hangcheck_fsdp_1`, `moe_healthy1/2`, `logfix_moe_fault3`, `logfix_moe_check`, `moe_noinsp1/2/3/5`) and confirmed as pre-existing chronic cluster flakiness unrelated to the shim, not a regression it introduced.
+
+#### 6.40.3 Overhead: real numbers, and the actual (not the assumed) cause
+
+First hypothesis — per-call `cudaEventCreate`/`cudaEventDestroy` — was tried first and measured via `sacct -j <jobid> --format=JobID,Elapsed,State`: job 91708 (before, per-call create/destroy) = 16:32, job 91710 (after, pooled/reused events) = 16:40. Essentially unchanged — the hypothesis was wrong, and is reported as wrong rather than quietly dropped. The real cause was call volume: ~700,000+ Send/Recv calls per rank in a 10-step run, most triggering a real `write()` syscall via line-buffered output. Fixed with explicit sampling (`NCCL_WAIT_SHIM_SAMPLE_RATE`, default 50 — every call increments a tick counter and returns immediately, before any CUDA or I/O work, unless `tick % rate == 0`). Verified: job 91711 = 00:00:35, back to normal baseline duration (a ~28× improvement over the unsampled path), while still capturing 14,393 real samples from one rank in 10 steps. This reuses this project's own established "sample rather than instrument every call" principle (the Falcon/NDTimeline precedent cited in §6.36.3's research).
+
+#### 6.40.4 Detection result: no signal, at any magnitude, confirmed three independent ways
+
+Validated with `MOE_FAULT_TARGET_RANK=4`, `MOE_FAULT_DELAY_US` at 1000 (1ms), 20000 (20ms), and 100000 (100ms), plus healthy runs — all trials exited `TORCHRUN_EXIT=0` on all 6 nodes (no hangs; Step 4's hang-safety requirement is satisfied by the shim itself, independent of whether the signal works).
+
+1. **Coarse 50ms time-binned cross-rank comparison** (offset from each bin's earliest arrival): rank 4's position among 48 ranks was 14th, 45th, 17th, 48th across healthy/1ms/20ms/100ms respectively — no consistent elevation, and the direction flips.
+2. **Self-referential per-rank mean inter-sample gap**: essentially identical across all 48 ranks at every magnitude (peer standard deviation 0.86-4.86us against means of 10,800-21,500us); rank 4's z-score was slightly *negative* at every magnitude tested. This is the same barrier-smearing signature §6.27.2 (Option C) already proved at the execution-time level — here it shows up again at the raw per-call GPU-event level, i.e. the whole job's pace is uniformly governed by the slowest rank, not just the slowest rank's own measurement.
+3. **Dedicated zero-sampling control** (`NCCL_WAIT_SHIM_SAMPLE_RATE=1`, 100ms fault, 10 steps, 31,154,048 real samples across 48 ranks — run specifically to rule out sampling as the explanation), analyzed with "first-arrival-per-bin" at three bin widths:
+
+| Bin width | Usable bins | Rank 4 position (of 48) | Rank 4 "latest-to-first-arrive" count | Top-5 dominant ranks |
+|---|---|---|---|---|
+| 500us | 119 | 44th | 1 / 131 | 42, 37, 7, 23, 19 |
+| 1000us | 83,473 | 38th | 827 / 86,635 (≈1.0%, *below* the 1/48≈2.1% random-chance baseline) | 42, 8, 23, 0, 13 |
+| 5000us | 69,405 | 42nd | 530 / 70,206 | 42, 23, 39, 8, 5 |
+
+Rank 4 — the real, known, injected fault target — never appears near the top at any bin width, even with full density and zero sampling. Rank 42 dominates every bin width instead, with no known relationship to the injected fault (not investigated further; would require a separate topology/placement check, out of scope for this round).
+
+#### 6.40.5 Why this is a fifth, mechanistically distinct failure — not a repeat of the other four
+
+- **Option C** (§6.27.2): execution-time measurement is structurally incapable of separating a late rank from its waiting peers in a synchronous collective — a measurement-target problem.
+- **Option D** (§6.35): a real signal exists but only above a ~1000ms fault floor, and the Python-level instrumentation point requires a one-line customer code change — a sensitivity + code-change-boundary problem.
+- **arrival_order.py** (§6.36.2): the message-size-heuristic used to delimit "rounds" desyncs across ranks within a handful of rounds — a round-boundary-construction problem.
+- **This shim (§6.40)**: real, dense, per-call GPU-event timestamps, captured with zero sampling at the clearest fault magnitude tested, show no cross-rank alignment with the injected fault under any of three independent comparison methods. The most likely mechanistic explanation: `cudaEventRecord()` placed immediately after an individual `ncclSend`/`ncclRecv` *host call* returns captures the moment that call's work is *enqueued* onto the stream — and per `nccl.h`'s own documentation (already cited in §6.36's prior work), enqueueing returns almost immediately regardless of real GPU readiness. For a grouped collective, every rank's individual Send/Recv ops get enqueued back-to-back at uniform host speed; the real wait for a slow peer most likely happens inside NCCL's own internal cross-rank synchronization mechanism spanning the whole group, not separably at each individual op boundary the way this design assumed. This is an **instrumentation-placement problem**, distinct from all four prior causes: not wrong data, not insufficient sensitivity, not a broken round heuristic, but events recorded at a point in the execution that does not observe where the real wait occurs. Fixing it would require anchoring the event to a point *after* the group's real completion (e.g. after a stream sync following `ncclGroupEnd()`, which only reintroduces Option D's own host-visible synchronization point, this time with GPU timestamps) — a materially different design, not a tuning fix to this one, and not attempted this round.
+
+#### 6.40.6 Regression and overhead, confirmed by construction
+
+The shim was never wired into any launcher other than ad-hoc manual `LD_PRELOAD` exports used for this round's own MoE tests. It is not loaded by nanoGPT DDP, FSDP, or Megatron DP/TP/PP runs, and was not loaded by the existing MoE healthy-run path either, so "zero cost elsewhere" holds by construction rather than by re-running the full regression suite with an irrelevant environment variable set. If Option D and this shim were ever both enabled simultaneously, they would collide writing to the same `apptiming-{hostname}-pid{pid}.jsonl` path (both tests this round set `MOE_APPTIMING_ENABLED=0` to avoid this) — noted here as a real caveat for any future round that revisits either path, not an active conflict today since neither is shipped as a default-on check.
+
+#### 6.40.7 Bottom line
+
+MoE AllToAll straggler localization on Slurm is unsolved after five independent, root-caused attempts: Option C (structural), Option D (floor + code-change boundary), `arrival_order.py` (broken round heuristic), the CUDA-event shim (instrumentation-placement problem, this section), and the earlier Phase 9 RDMA/NCCL-protocol injection attempts predating this round. This is reported as a complete, honest null result, not a dead end: each failure has a distinct, verified mechanism, the ranked alternatives list in §6.36.3 remains the best-evidenced path forward, and the one alternative actually prototyped this round (the shim) now has a precise reason *why* it failed, which narrows what a corrected design would need (event anchoring after real group completion, not after individual-op enqueue) for whoever picks this up next.
+
+**Every script, exact command, and raw log path used this round:**
+- Shim source: `workloads/moe/nccl_wait_shim.c` (final), `workloads/moe/nccl_wait_shim_minimal_test.c` (throwaway isolation aid, not part of the design).
+- Compilation: `srun --nodes=1 --ntasks=1 --gpus-per-node=1 -w worker-0 --container-image="nvcr.io#nvidia/pytorch:25.01-py3" --container-mounts="$(pwd):$(pwd)" bash -c 'cd soperator-straggler-detection/detection-pipeline/workloads/moe && gcc -shared -fPIC -O2 -o nccl_wait_shim.so nccl_wait_shim.c -ldl -lpthread'`.
+- Crash isolation: minimal pass-through shim compiled/run the same way, `LD_PRELOAD`-only, no training launch, direct `python -c "import torch; ..."` smoke calls.
+- Overhead measurement: `sacct -j 91708,91710,91711 --format=JobID,Elapsed,State`.
+- Detection trials: `var/dump_{healthy,1ms,20ms,100ms}/worker-{0..5}/apptiming-*.jsonl`; dedicated control `var/dump_unsampled100/worker-{0..5}/apptiming-*.jsonl` (`NCCL_WAIT_SHIM_SAMPLE_RATE=1`, `MOE_FAULT_TARGET_RANK=4`, `MOE_FAULT_DELAY_US=100000`, 10 steps).
+- Analysis scripts: ad hoc Python in `/tmp/claude-1003/.../scratchpad/` (coarse time-binned comparison, self-referential inter-sample-gap, fine-grained first-arrival-per-bin at 200/500/1000/5000us).
+
+### 6.41 MoE AllToAll straggler localization: SOLVED via an Inspector source modification — proxy-thread peer-wait tracking, a real crash found and fixed, a real detection signal confirmed (2026-11)
+
+A sixth attempt, and the first to succeed. Unlike every prior attempt (§6.27.2, §6.29.6/§6.35, §6.36.2, §6.40), this one does not measure anything derivable from the training script or from NCCL's existing Coll/P2p/KernelCh event types — it modifies Inspector's own plugin source (`inspector-plugin/`, specifically `inspector.h`, `inspector.cc`, `inspector_plugin.cc`) to request and record two new NCCL profiler v5 event types, `ncclProfileProxyOp`/`ncclProfileProxyStep`, which expose the real proxy-thread-level send/recv wait intervals — a genuinely different signal class, informed directly by reading both NCCL's own proxy-thread source (`transport/net.cc`, `proxy.cc`) and Google's CoMMA profiler plugin's real reference implementation of the same event types. NCCL itself, `_check_mean`, `classifier.py`, and `_check_mean_tiered` remain untouched. This is now a maintained Inspector fork, diverging from NVIDIA's upstream `inspector-plugin/` source.
+
+#### 6.41.1 What was added
+
+Two new per-peer stat arrays (`sendPeerWait[256]`, `recvPeerWait[256]`) on `inspectorCommInfo`, populated from two real NCCL proxy-thread intervals:
+- **Send side**: `ncclProfilerProxyStepSendGPUWait` → `ncclProfilerProxyStepSendPeerWait_v4`. The proxy thread polls the real, network-synced `*recvTail > tail` condition (confirmed directly in `transport/net.cc`) before firing the actual `isend()` — this interval is genuinely peer-attributable, not an artifact of host-call enqueue timing (the exact problem that sank §6.40).
+- **Recv side**: `ncclProfilerProxyStepRecvWait` → `ncclProfilerProxyStepRecvFlushWait`, i.e. the time between posting an `irecv()` and the real network receive completing.
+
+Both are dumped as a new `proxy_peer_wait: {send: [...], recv: [...]}` JSON block, per peer, alongside the existing dump format.
+
+#### 6.41.2 A real crash, found and fixed
+
+The first live MoE fault trial with this code SIGSEGV'd (`inspector.cc:1633`, inside the new peer-wait recorder). Root-caused via `addr2line` plus static source analysis (no live debugger needed) to two distinct, real hazards, both confirmed by direct source reading, not inferred:
+1. **Cross-process proxy context.** NCCL's proxy subsystem is explicitly shared/cross-process (`comm->sharedRes->proxyState`, serviced over a UDS socket, confirmed in `proxy.cc`) — a `ncclProfileProxyOp` callback can fire in a process other than the one that posted the op, carrying a `context` pointer that belongs to a *different process's* address space. Confirmed against CoMMA's own `profiler.rs`, which validates exactly this (`profiler.pid == descr.pid()`) before trusting a ProxyOp's comm pointer — Inspector's pre-existing code never did.
+2. **Stale-handle-on-reuse.** NCCL's own `proxy.cc` sub-arg reuse path explicitly comments out the memset that would zero a reused slot's handle fields (`opEventHandle`/`stepEventHandle`), replacing it with a hand-written field list that omits them — confirmed via direct source reading and a grep confirming these fields are never reset anywhere else. A reused slot can hand this plugin a stale, already-freed pointer even after the PID check rules out the cross-process case.
+
+**Fix** (both guards implemented, per explicit instruction, regardless of which alone would suffice — matching this plugin's own prior history of silent-corruption bugs, e.g. the single-slot ring-buffer issue §6.x): a PID check (`eDescr->proxyOp.pid` vs `getpid()`, skip on mismatch) plus a secondary magic-number guard (`INSPECTOR_PROXYOP_MAGIC`/`INSPECTOR_PROXYSTEP_MAGIC`, set at allocation, cleared before free, checked before every dereference). Both are load-bearing, not redundant: the stale-handle hazard is real and independent of the PID check.
+
+**Live confirmation the cross-process hazard is real and pervasive, not theoretical**: once fixed, the PID-mismatch skip path fires constantly under real MoE AllToAll traffic — rate-limited diagnostic counts reaching into the hundreds of thousands in single 10-step runs — with zero crashes across every trial run this round.
+
+#### 6.41.3 Staged validation
+
+Rebuilt cleanly (`-Wall -Wextra`, zero warnings). nanoGPT DDP, FSDP, and Megatron TP=4/PP=4/DP=3 regression smoke tests all pass clean with the fixed plugin (`TORCHRUN_EXIT: 0` on every rank, no behavior change to the existing, already-working detection paths). Full multi-node MoE staged validation, target rank 4:
+
+| magnitude | trials | crashes | healthy trials | crashes |
+|---|---|---|---|---|
+| 1ms | 3/3 clean | 0 | — | — |
+| 20ms | 3/3 clean | 0 | — | — |
+| 100ms | 3/3 clean (incl. the original crash-reproducing scenario) | 0 | 3/3 clean | 0 |
+
+#### 6.41.4 Detection result: a real signal, confirmed, with an honest floor
+
+The straggler shows up as the rank with the **lowest** recv-wait (`ncclProfilerProxyStepRecvWait → RecvFlushWait` interval) relative to its structural peer group — not highest — matching the direction this task's own cited external research (FlashMoE, AMD TraceLens) predicted: everyone else waits *on* the straggler, but the straggler itself, arriving late to post its receive, finds the data already sitting in the network buffer and barely waits at all. Mechanistically consistent with a host-side compute delay (the injected fault) rather than a network-level one.
+
+Quantified as a z-score of rank 4's recv-wait against its 7 direct structural peers (the same-role rank group, e.g. ranks 0–7):
+
+| trial | z-score | ratio to peer mean |
+|---|---|---|
+| healthy (2 trials) | −1.08, +0.06 | 0.92, 1.01 |
+| 1ms fault (3 trials) | −2.29, −1.57, −2.06 | 0.81, 0.87, 0.79 |
+| 20ms fault (3 trials) | −10.30, −8.27, −13.06 | 0.18, 0.20, 0.22 |
+| 100ms fault (2 trials) | −11.00, −10.64 | 0.044, 0.044 |
+
+**20ms and 100ms: clean, unambiguous separation** — z-scores an order of magnitude beyond the healthy noise band (±1.1). A secondary, independent confirmation: rank 4's direct expert-parallel peers (ranks 12/20/28/36/44 on this topology) show a `send`-side wait **specifically when sending to peer 4** elevated 5-6× over their normal magnitude under fault, while in the healthy baseline that same peer-4-specific wait is indistinguishable from their wait to any other peer.
+
+**1ms: a real but weak signal, below a reliable detection threshold** — z-scores of roughly −1.6 to −2.3 are not cleanly separable from the healthy baseline's own noise (which reaches −1.08 on a single trial). This is an honest floor, the same qualitative shape as every prior MoE attempt's own floor (§6.35's Option D floor was between 100ms-1000ms; this one sits between 1ms and 20ms) — not a design flaw, a measurement-resolution limit of this signal at very small magnitudes. No threshold is shipped as a default check below 20ms as a result.
+
+**This closes MoE AllToAll straggler localization at this project's standard fault magnitude (100ms) and at 20ms**, the first of six independent attempts to do so. It does not claim detection below 20ms.
+
+#### 6.41.5 Overhead
+
+The new guards are O(1) integer comparisons added to an event-dispatch path NCCL already calls regardless; no measurable cost is expected or was observed. Dense-workload regression (nanoGPT, FSDP, Megatron) completed in wall-clock times consistent with this project's prior documented baselines, no regression. For MoE itself: wall-clock scaled with the *injected fault magnitude*, not with the instrumentation — healthy/1ms/20ms trials clustered tightly (3:10/3:16/3:23 for 10 steps), while the 100ms trial took 6:02, consistent with the fault's own real cost (synchronous AllToAll barrier-smearing, already documented elsewhere in this project) rather than instrumentation overhead. A true isolated A/B (same MoE workload, instrumentation removed) was not run this round, since every MoE trial this round used the fixed plugin by necessity — this is disclosed as a real limitation of the overhead claim, not glossed over.
+
+#### 6.41.6 A real, separate incident during this investigation: the working tree was wiped mid-round
+
+Partway through this round, this session's entire git working tree (all source, including the uncommitted PID-check/magic-guard fix and the previously-committed-but-unpushed §6.40 writeup) was deleted down to just `var/`/`observability/`, with no `.git` remaining. Recovered via Claude Code's own file-history snapshots (keyed by a path-hash scheme, matched and verified) merged against the remote branch's current tip (which had independently advanced with other concurrent work), plus re-deriving the PID-check/magic-guard fix from its own full design spec where the snapshot only captured the pre-fix version. Verified correct via the single strongest available proof: the rebuilt plugin's compiled diagnostic string matched, byte-for-byte, the message already observed firing in the one fault-trial run that survived on the separate `/mnt/asabry-scratch` mount (untouched by the wipe). Noted here for completeness, not as a finding about the detection system itself.
+
+**Every script, exact command, and raw log path used this round:**
+- Modified source: `inspector-plugin/inspector.h`, `inspector-plugin/inspector.cc`, `inspector-plugin/inspector_plugin.cc`.
+- Build: `make NCCL_HOME=<repo>/nccl-2.28-src/build CUDA_HOME=/usr/local/cuda` inside `inspector-plugin/`.
+- Crash postmortem: `addr2line`, `nm` against the preserved crashing build.
+- Staged validation runs: `workloads/moe/run_moe_delayfault.sh 10 var/runs/s641r_{healthy2,healthy3,f1_t{1,2,3},f20_t{1,2,3},f100_t{2,3}} <port> var/dump_s641r_...` with `MOE_FAULT_TARGET_RANK=4` and `MOE_FAULT_DELAY_US` set to 0/1000/20000/100000 respectively; `workloads/nanogpt/run_straggler_nanogpt.sh`, `workloads/fsdp/run_fsdp_nanogpt.sh`, `workloads/megatron/run_megatron_tp4pp4dp3.sh` for regression.
+- Signal analysis: `/tmp/claude-1003/.../scratchpad/moe_signal_check.py` (streaming JSONL aggregation, per-rank weighted-mean/max send/recv wait, peer-4-specific breakout), run against each trial's `var/dump_s641r_.../worker-*/*.log`.
+- Overhead: `sacct -u "$USER" --format=JobID,Start,End,Elapsed,State -X -P`, cross-referenced against launcher-log mtimes.

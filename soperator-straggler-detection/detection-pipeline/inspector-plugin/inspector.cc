@@ -573,6 +573,89 @@ static inline inspectorResult_t inspectorCompletedColl(jsonFileOutput* jfo,
  *   inspectorResult_t - success or error code.
  *
  */
+/*
+ * Description:
+ *
+ *   Dumps this communicator's accumulated proxy-thread peer-wait stats
+ *   (see inspectorRecordProxyPeerWait's own docstring) to JSON, then
+ *   resets them -- one summary object per non-empty dump cycle, not one
+ *   record per proxy step (that would be the same per-call overhead
+ *   mistake DESIGN_NOTES.md S6.39 already found and fixed once this
+ *   round, applied here from the start instead of discovered again).
+ *
+ * Thread Safety:
+ *   Not thread-safe (should be called with proper locking, same as
+ *   inspectorCommInfoDump below).
+ *
+ * Output:
+ *   One JSON object is written if any peer has a nonzero sample count
+ *   since the last dump; *wrote is set accordingly. Stats are always
+ *   reset under the lock regardless of whether anything was nonzero.
+ *
+ * Return:
+ *   inspectorResult_t - success or error code.
+ */
+static inspectorResult_t inspectorDumpProxyPeerWait(jsonFileOutput* jfo,
+                                                     inspectorCommInfo* commInfo,
+                                                     bool* wrote) {
+  *wrote = false;
+  struct inspectorProxyPeerWaitStats sendSnap[INSPECTOR_MAX_PROXY_PEERS];
+  struct inspectorProxyPeerWaitStats recvSnap[INSPECTOR_MAX_PROXY_PEERS];
+  pthread_mutex_lock(&commInfo->proxyWaitLock);
+  memcpy(sendSnap, commInfo->sendPeerWait, sizeof(sendSnap));
+  memcpy(recvSnap, commInfo->recvPeerWait, sizeof(recvSnap));
+  memset(commInfo->sendPeerWait, 0, sizeof(commInfo->sendPeerWait));
+  memset(commInfo->recvPeerWait, 0, sizeof(commInfo->recvPeerWait));
+  pthread_mutex_unlock(&commInfo->proxyWaitLock);
+
+  bool any = false;
+  for (int i = 0; i < INSPECTOR_MAX_PROXY_PEERS; i++) {
+    if (sendSnap[i].count > 0 || recvSnap[i].count > 0) { any = true; break; }
+  }
+  if (!any) return inspectorSuccess;
+
+  inspectorResult_t res = inspectorSuccess;
+  JSON_CHK(jsonLockOutput(jfo));
+  JSON_CHK_GOTO(jsonStartObject(jfo), res, pwunlock);
+  {
+    JSON_CHK_GOTO(jsonKey(jfo, "header"), res, pwunlock);
+    inspectorCommInfoHeader(jfo, commInfo);
+    JSON_CHK_GOTO(jsonKey(jfo, "metadata"), res, pwunlock);
+    inspectorCommInfoMetaHeader(jfo);
+
+    JSON_CHK_GOTO(jsonKey(jfo, "proxy_peer_wait"), res, pwunlock);
+    JSON_CHK_GOTO(jsonStartObject(jfo), res, pwunlock);
+    {
+      for (int dir = 0; dir < 2; dir++) {
+        struct inspectorProxyPeerWaitStats* snap = dir == 0 ? sendSnap : recvSnap;
+        JSON_CHK_GOTO(jsonKey(jfo, dir == 0 ? "send" : "recv"), res, pwunlock);
+        JSON_CHK_GOTO(jsonStartList(jfo), res, pwunlock);
+        for (int i = 0; i < INSPECTOR_MAX_PROXY_PEERS; i++) {
+          if (snap[i].count == 0) continue;
+          JSON_CHK_GOTO(jsonStartObject(jfo), res, pwunlock);
+          JSON_CHK_GOTO(jsonKey(jfo, "peer"), res, pwunlock);
+          JSON_CHK_GOTO(jsonInt(jfo, i), res, pwunlock);
+          JSON_CHK_GOTO(jsonKey(jfo, "count"), res, pwunlock);
+          JSON_CHK_GOTO(jsonUint64(jfo, snap[i].count), res, pwunlock);
+          JSON_CHK_GOTO(jsonKey(jfo, "mean_us"), res, pwunlock);
+          JSON_CHK_GOTO(jsonDouble(jfo, (double)snap[i].sumUsec / (double)snap[i].count), res, pwunlock);
+          JSON_CHK_GOTO(jsonKey(jfo, "max_us"), res, pwunlock);
+          JSON_CHK_GOTO(jsonUint64(jfo, snap[i].maxUsec), res, pwunlock);
+          JSON_CHK_GOTO(jsonFinishObject(jfo), res, pwunlock);
+        }
+        JSON_CHK_GOTO(jsonFinishList(jfo), res, pwunlock);
+      }
+    }
+    JSON_CHK_GOTO(jsonFinishObject(jfo), res, pwunlock);
+  }
+  JSON_CHK_GOTO(jsonFinishObject(jfo), res, pwunlock);
+  JSON_CHK_GOTO(jsonNewline(jfo), res, pwunlock);
+  *wrote = true;
+pwunlock:
+  JSON_CHK(jsonUnlockOutput(jfo));
+  return res;
+}
+
 static inspectorResult_t inspectorCommInfoDump(jsonFileOutput* jfo,
                                                inspectorCommInfo* commInfo,
                                                bool* needs_writing) {
@@ -580,6 +663,14 @@ static inspectorResult_t inspectorCommInfoDump(jsonFileOutput* jfo,
 
   if (commInfo == nullptr)
     return inspectorSuccess;
+
+  // Proxy-thread peer-wait summary: evaluated independently of the
+  // coll-ring drain below, which can legitimately have nothing queued
+  // (head==tail) on a cycle where proxy-wait data IS available -- must
+  // not be gated behind that early return.
+  bool wroteProxyWait = false;
+  INS_CHK(inspectorDumpProxyPeerWait(jfo, commInfo, &wroteProxyWait));
+  if (wroteProxyWait) *needs_writing = true;
 
   // Ring-buffer port (see INSPECTOR_RING_CAPACITY's own comment in
   // inspector.h): drains EVERY record queued since this comm's last
@@ -723,6 +814,7 @@ static inspectorResult_t inspectorCommInfoListFinalize(struct inspectorCommInfoL
     }
     pthread_mutex_unlock(&commList->comms->retireLock);
     pthread_mutex_destroy(&commList->comms->retireLock);
+    pthread_mutex_destroy(&commList->comms->proxyWaitLock);
     free(commList->comms);
     commList->comms = nextComm;
     commList->ncomms--;
@@ -1278,6 +1370,13 @@ static inspectorResult_t inspectorFillCommInfo(struct inspectorCommInfo* commInf
   if (pthread_mutex_init(&commInfo->retireLock, nullptr) != 0) {
     INFO(NCCL_INSPECTOR, "NCCL Inspector: inspectorFillCommInfo couldn't init retireLock");
   }
+  // Proxy-thread peer-wait tracking: sendPeerWait/recvPeerWait are
+  // already zero from this struct's own calloc() in inspectorAddComm,
+  // same as ringBuf/retireQueue above -- only the embedded mutex needs
+  // explicit init, same reasoning as retireLock immediately above.
+  if (pthread_mutex_init(&commInfo->proxyWaitLock, nullptr) != 0) {
+    INFO(NCCL_INSPECTOR, "NCCL Inspector: inspectorFillCommInfo couldn't init proxyWaitLock");
+  }
   commInfo->next = nullptr;
   return inspectorSuccess;
 }
@@ -1468,6 +1567,75 @@ inspectorResult_t inspectorDelComm(struct inspectorCommInfo *commInfo) {
  * Return:
  *   N.A. (void function)
  */
+/*
+ * Description:
+ *
+ *   Records one real NCCL-profiler-API proxy-thread wait measurement,
+ *   attributed to a specific remote peer, for later dump.
+ *
+ *   For a send step: durUsec is the interval from
+ *   ncclProfilerProxyStepSendGPUWait (buffer posted to the GPU) to
+ *   ncclProfilerProxyStepSendPeerWait_v4 (the real moment NCCL's proxy
+ *   thread observes -- via *recvTail, synced from the peer over the
+ *   network -- that the remote receiver has posted its own receive
+ *   buffer and is ready, immediately before the real network isend()).
+ *   Confirmed directly against src/transport/net.cc's own call sites
+ *   (not assumed from header names/comments alone) before writing this.
+ *   This interval is elevated specifically when the named peer is slow
+ *   to post its receive -- a real, per-peer-attributable signal, unlike
+ *   every signal source explored before it (DESIGN_NOTES.md S6.27.2,
+ *   S6.35, S6.36.2, S6.39), none of which could separate "this specific
+ *   peer is slow" from "the whole group is waiting."
+ *
+ *   For a recv step: durUsec is the interval from
+ *   ncclProfilerProxyStepRecvWait (receive posted) to
+ *   ncclProfilerProxyStepRecvGPUWait (data received, now waiting on the
+ *   local GPU to consume it) -- the complementary, locally-caused half
+ *   of the same step.
+ *
+ * Thread Safety:
+ *
+ *   Thread-safe. Producer is this communicator's own single proxy
+ *   progress thread (same invariant commInfo->ringBuf already relies
+ *   on); consumer is the dump thread, which snapshots-and-resets the
+ *   whole array under the same lock (see inspectorDumpProxyPeerWait).
+ *
+ * Input:
+ *
+ *   commInfo - the communicator this proxy op belongs to.
+ *   peer - remote rank (bounds-checked against INSPECTOR_MAX_PROXY_PEERS;
+ *   silently dropped, counted once via a rate-limited WARN, if out of
+ *   range -- never an unchecked array write).
+ *   isSend - 1 for the send-side signal, 0 for the recv-side signal.
+ *   durUsec - the measured interval, already computed by the caller.
+ *
+ * Output:
+ *   commInfo->sendPeerWait[peer] or ->recvPeerWait[peer] is updated.
+ *
+ * Return:
+ *   N.A. (void function)
+ */
+void inspectorRecordProxyPeerWait(struct inspectorCommInfo *commInfo,
+                                  int peer, int isSend, uint64_t durUsec) {
+  if (commInfo == nullptr) return;
+  if (peer < 0 || peer >= INSPECTOR_MAX_PROXY_PEERS) {
+    static bool warned = false;
+    if (!warned) {
+      WARN("NCCL Inspector: proxy peer %d out of tracked range [0,%d), dropping proxy-wait sample",
+           peer, INSPECTOR_MAX_PROXY_PEERS);
+      warned = true;
+    }
+    return;
+  }
+  struct inspectorProxyPeerWaitStats *stats =
+    isSend ? &commInfo->sendPeerWait[peer] : &commInfo->recvPeerWait[peer];
+  pthread_mutex_lock(&commInfo->proxyWaitLock);
+  stats->count += 1;
+  stats->sumUsec += durUsec;
+  if (durUsec > stats->maxUsec) stats->maxUsec = durUsec;
+  pthread_mutex_unlock(&commInfo->proxyWaitLock);
+}
+
 void inspectorComputeCollBw(struct inspectorCommInfo *commInfo,
                             struct inspectorCompletedCollInfo *completedColl,
                             ncclFunc_t collType) {

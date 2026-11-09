@@ -30,10 +30,23 @@ cluster_topology_available_nodes
 _SCRIPT_DIR_FOR_MOUNT_FIX="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 _PKG_ROOT_FOR_MOUNT_FIX="$(cd "$_SCRIPT_DIR_FOR_MOUNT_FIX/../.." && pwd)"
 _NCCL_SRC_DIR_FOR_MOUNT_FIX="$(cd "$(dirname "$(dirname "$NCCL_LIB_PATH")")" && pwd)"
-for _p in "$_PKG_ROOT_FOR_MOUNT_FIX" "$_NCCL_SRC_DIR_FOR_MOUNT_FIX"; do
+# Storage-migration mount fix (already applied to run_straggler_nanogpt.sh
+# and every other launcher in this repo, confirmed live missing here,
+# 2026-11, this round): var/runs/var/dump are symlinks to a separate
+# (larger) shared filesystem outside PKG_ROOT -- without resolving their
+# real targets into the mount list, any write through OUTDIR/DUMPDIR_BASE
+# from inside the container silently fails with "No such file or
+# directory" even though the symlink itself is visible (confirmed live:
+# every worker's TORCHRUN_EXIT: 1, train_node_shape1.sh unable to create
+# train_worker-N.log, until this fix -- the exact same symptom
+# run_straggler_nanogpt.sh's own identical comment already documents).
+_OUTDIR_REAL_FOR_MOUNT_FIX="$(readlink -f "$OUTDIR" 2>/dev/null || echo "$OUTDIR")"
+_DUMPDIR_REAL_FOR_MOUNT_FIX="$(readlink -f "$DUMPDIR_BASE" 2>/dev/null || echo "$DUMPDIR_BASE")"
+for _p in "$_PKG_ROOT_FOR_MOUNT_FIX" "$_NCCL_SRC_DIR_FOR_MOUNT_FIX" "$_OUTDIR_REAL_FOR_MOUNT_FIX" "$_DUMPDIR_REAL_FOR_MOUNT_FIX"; do
   case "$_p" in
     /root|/root/*) ;;  # already covered by the existing /root:/root mount
-    *) MOUNTS="$MOUNTS,$_p:$_p" ;;
+    "$_PKG_ROOT_FOR_MOUNT_FIX"/*) ;;  # already covered by the PKG_ROOT mount above
+    *) case ",$MOUNTS," in *",$_p:$_p,"*) ;; *) MOUNTS="$MOUNTS,$_p:$_p" ;; esac ;;
   esac
 done
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
