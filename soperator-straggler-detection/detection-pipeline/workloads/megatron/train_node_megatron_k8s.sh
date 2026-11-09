@@ -30,6 +30,8 @@ mkdir -p "$DUMPDIR" "$OUTDIR"
 # Run environment self-checks before training.
 # Detects and adapts to: broken NCCL plugin, PID collisions, DCGM availability.
 _CHECKS_SCRIPT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/k8s/startup_checks.sh"
+_cw=0
+while [ $_cw -lt 60 ] && [ ! -f "$_CHECKS_SCRIPT" ]; do sleep 2; _cw=$((_cw + 2)); done
 if [ -f "$_CHECKS_SCRIPT" ]; then
   source "$_CHECKS_SCRIPT"
 else

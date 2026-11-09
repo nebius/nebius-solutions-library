@@ -4799,7 +4799,11 @@ class AlertEngine:
             # Log-readability fix: label member= as [OS-PID] on the STRAGGLER-INCIDENT
             # line too — reviewer confirmed this avoids "incident-only readers" conflating
             # the NCCL member ID with a training rank even if they never reach the ALERT block.
-            header = (f"[STRAGGLER-INCIDENT] incident_id={incident_id} stat={stat_name} host={hostname} comm={comm} member={member}[OS-PID] "
+            # Log-readability fix (fresh-eyes audit, 2026-11): add wall-clock timestamp.
+            # Reviewers flagged absence of a real firing time — persisted_s shows duration
+            # but not WHEN. Presentation-only: does not affect detection, attribution, or gating.
+            _fired_at = datetime.datetime.fromtimestamp(event_ts_ms / 1000.0, tz=datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            header = (f"[STRAGGLER-INCIDENT] incident_id={incident_id} fired_at={_fired_at} stat={stat_name} host={hostname} comm={comm} member={member}[OS-PID] "
                       f"gpu_slot={slot_disp} bucket={bucket}{_bucket_mb} coll={coll} severity_ratio={severity_ratio:.2f} [{_ratio_label}] "
                       f"persisted_s={dur_disp} role_rank={role_rank} role_n={role_n}{_window_ctx}{job_ctx_disp}")
             print(header, flush=True)

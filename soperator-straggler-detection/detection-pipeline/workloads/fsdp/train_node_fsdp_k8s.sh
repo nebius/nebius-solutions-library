@@ -31,6 +31,8 @@ case "$DUMPDIR" in /*) ;; *) DUMPDIR="$_PKG_ROOT/$DUMPDIR" ;; esac
 
 # Environment self-checks (NCCL plugin, rank uniqueness, DCGM availability)
 _CHECKS_SCRIPT="$_PKG_ROOT/k8s/startup_checks.sh"
+_cw=0
+while [ $_cw -lt 60 ] && [ ! -f "$_CHECKS_SCRIPT" ]; do sleep 2; _cw=$((_cw + 2)); done
 if [ -f "$_CHECKS_SCRIPT" ]; then
   source "$_CHECKS_SCRIPT"
 else
