@@ -144,17 +144,18 @@ def parse_dumps_v2(files, verbose=False):
 
                 for entry in send_data:
                     if isinstance(entry, dict):
-                        c, s = entry.get('count', 0), entry.get('sum_us', 0)
-                        if c > 0:
-                            rank_send_means[recorder_rank].append(s / c)
+                        # Actual format from inspector.cc: {peer, count, mean_us, max_us}
+                        m = entry.get('mean_us', entry.get('sum_us', 0) / max(1, entry.get('count', 1)))
+                        if m and m > 0:
+                            rank_send_means[recorder_rank].append(float(m))
                     elif isinstance(entry, (int, float)) and entry > 0:
                         rank_send_means[recorder_rank].append(float(entry))
 
                 for entry in recv_data:
                     if isinstance(entry, dict):
-                        c, s = entry.get('count', 0), entry.get('sum_us', 0)
-                        if c > 0:
-                            rank_recv_means[recorder_rank].append(s / c)
+                        m = entry.get('mean_us', entry.get('sum_us', 0) / max(1, entry.get('count', 1)))
+                        if m and m > 0:
+                            rank_recv_means[recorder_rank].append(float(m))
                     elif isinstance(entry, (int, float)) and entry > 0:
                         rank_recv_means[recorder_rank].append(float(entry))
 
