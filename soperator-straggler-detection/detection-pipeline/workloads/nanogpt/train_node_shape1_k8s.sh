@@ -61,22 +61,30 @@ _PKG_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 # (init build just completed) can show a stale cached listing without the .so, causing
 # NCCL to silently skip the plugin (confirmed on a fresh-clone README self-run).
 _PLUGIN_PATH="$_PKG_ROOT/inspector-plugin/libnccl-profiler-inspector.so"
-# NFS stale-cache fix: poll until the plugin file is visible (NFS ac-cache can lag
-# behind a fresh init build by up to 30s on newly mounted PVCs). Without this,
-# NCCL silently skips the plugin (dlopen ENOENT → no dumps → no detection).
-_pi=0
-while [ $_pi -lt 30 ] && [ ! -f "$_PLUGIN_PATH" ]; do sleep 1; _pi=$((_pi+1)); done
-if [ -f "$_PLUGIN_PATH" ]; then
-    export NCCL_PROFILER_PLUGIN="$_PLUGIN_PATH"
-    echo "[STARTUP] Inspector plugin found after ${_pi}s: $_PLUGIN_PATH" >&2
+if [ "${INSPECTOR:-on}" = "off" ]; then
+    # True baseline arm: Inspector completely disabled. No plugin, no dump threads.
+    # Used by pinning A/B harness (ab_driver_k8s.sh) for the off condition.
+    export NCCL_INSPECTOR_ENABLE=0
+    PIN_MODE="${PIN_MODE:-off}"
+    echo "[STARTUP] Inspector=off: plugin NOT loaded (A/B baseline arm)" >&2
 else
-    echo "[STARTUP] [WARN] Inspector plugin not visible after 30s (NFS stale cache?); running without plugin" >&2
+    # NFS stale-cache fix: poll until the plugin file is visible (NFS ac-cache can lag
+    # behind a fresh init build by up to 30s on newly mounted PVCs). Without this,
+    # NCCL silently skips the plugin (dlopen ENOENT → no dumps → no detection).
+    _pi=0
+    while [ $_pi -lt 30 ] && [ ! -f "$_PLUGIN_PATH" ]; do sleep 1; _pi=$((_pi+1)); done
+    if [ -f "$_PLUGIN_PATH" ]; then
+        export NCCL_PROFILER_PLUGIN="$_PLUGIN_PATH"
+        echo "[STARTUP] Inspector plugin found after ${_pi}s: $_PLUGIN_PATH" >&2
+    else
+        echo "[STARTUP] [WARN] Inspector plugin not visible after 30s (NFS stale cache?); running without plugin" >&2
+    fi
+    export NCCL_INSPECTOR_ENABLE=1
+    export NCCL_INSPECTOR_DUMP_VERBOSE="${NCCL_INSPECTOR_DUMP_VERBOSE:-0}"
+    export NCCL_INSPECTOR_DUMP_THREAD_INTERVAL_MICROSECONDS=500
+    export NCCL_INSPECTOR_DUMP_DIR="$DUMPDIR"
+    export NCCL_INSPECTOR_PROM_DUMP=0
 fi
-export NCCL_INSPECTOR_ENABLE=1
-export NCCL_INSPECTOR_DUMP_VERBOSE="${NCCL_INSPECTOR_DUMP_VERBOSE:-0}"
-export NCCL_INSPECTOR_DUMP_THREAD_INTERVAL_MICROSECONDS=500
-export NCCL_INSPECTOR_DUMP_DIR="$DUMPDIR"
-export NCCL_INSPECTOR_PROM_DUMP=0
 
 # CPU pinning -- same pin_env.sh/pin_prepare() pattern as train_node_megatron.sh.
 # rank_setup.py reads /sys/devices/system/cpu (accessible in K8s pods via sysfs

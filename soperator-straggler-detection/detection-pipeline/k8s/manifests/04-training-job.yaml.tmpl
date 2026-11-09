@@ -134,6 +134,10 @@ spec:
             # CPU pinning mode
             - name: PIN_MODE
               value: "${PIN_MODE}"
+            # Inspector control: "off" disables plugin loading entirely (A/B baseline arm).
+            # Default "on" enables Inspector (normal operation and on_nopin/on_full A/B arms).
+            - name: INSPECTOR
+              value: "${INSPECTOR}"
             # Fault injection (0 = healthy run, >0 = inject delay on TARGET_RANKS).
             # STRAGGLER_MODE=constant: SLEEP_MS applied directly every step (simple,
             # works for validation runs). file_trigger: fault only fires when

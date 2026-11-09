@@ -118,10 +118,14 @@ if [ "${SLEEP_MS:-0}" -gt 0 ] && [ -z "${STRAGGLER_MODE:-}" ]; then
     STRAGGLER_MODE="constant"
 fi
 export SLEEP_MS TARGET_RANKS STRAGGLER_MODE="${STRAGGLER_MODE:-constant}"
+# INSPECTOR: "off" disables Inspector plugin entirely (A/B true-baseline arm).
+# Default "on" for all normal runs.
+INSPECTOR="${INSPECTOR:-on}"
+export INSPECTOR
 
 # envsubst with explicit variable list to prevent substituting internal shell
 # variables in the YAML's bash command blocks (e.g. $PKG, $OUTDIR, $DUMPDIR).
-envsubst '${JOB_RUN_NAME} ${TRAIN_STEPS} ${TRAIN_PORT} ${TRAIN_NUM_NODES} ${TRAIN_GPUS} ${NCCL_LIB_PATH} ${PIN_MODE} ${VM_URL_SVC} ${SLEEP_MS} ${TARGET_RANKS} ${STRAGGLER_MODE} ${JOB_RUN_NAME}' \
+envsubst '${JOB_RUN_NAME} ${TRAIN_STEPS} ${TRAIN_PORT} ${TRAIN_NUM_NODES} ${TRAIN_GPUS} ${NCCL_LIB_PATH} ${PIN_MODE} ${VM_URL_SVC} ${SLEEP_MS} ${TARGET_RANKS} ${STRAGGLER_MODE} ${INSPECTOR} ${JOB_RUN_NAME}' \
     < "$MANIFESTS_DIR/04-training-job.yaml.tmpl" | kubectl apply -f -
 info "Job $JOB_RUN_NAME applied to namespace $NS."
 

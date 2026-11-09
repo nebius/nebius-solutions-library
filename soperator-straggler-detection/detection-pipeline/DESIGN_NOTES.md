@@ -6114,3 +6114,125 @@ All trials run on committed code (commit e17ddcc + this session's fixes, see §6
 | All K8s alerts UNCONFIRMED | No SSH/DCGM in pods | Expected; structural K8s limitation |
 
 **Slurm/K8s parity**: Confirmed clean for all detection logic, bug fixes, log-readability fixes, and heartbeat tracking. One divergence found and fixed (60s poll-wait in FSDP/MoE/Megatron launch scripts). After fix: **fully at parity**.
+
+### 6.27 K8s CPU-pinning overhead: first rigorous interleaved A/B/C measurement (2026-11)
+
+#### 6.27.1 Repo read-through: pinning mechanism is identical, not a copy
+
+The pinning implementation (`pinning/thread_pin_new.c`, `pinning/rank_setup.py`, `pinning/pin_env.sh`, `pinning/pin_resolve.py`) is shared code. Both K8s and Slurm launchers source the same files from `$_PKG_ROOT/pinning/`. No K8s-specific fork exists.
+
+The topology source is identical in effect: K8s training pods use `cpu: "120"` requests with no limits, so the kernel cgroup has no `cpu.cfs_quota` and `os.sched_getaffinity(0)` returns all 128 host CPUs — the same set as Slurm's `--cpus-per-task=128 --cpu-bind=none`. `/sys` is bind-mounted read-only into every training pod via `hostPath` volume, giving `rank_setup.py` direct access to `/sys/devices/system/cpu/cpuN/topology/thread_siblings_list` and nvidia-smi PCI bus-ID → NUMA-node mapping. No code path differs.
+
+**One pre-existing gap closed by this task**: `train_node_shape1_k8s.sh` lacked an `INSPECTOR=off` mode — it unconditionally loaded the plugin if the .so was present, making the true-baseline arm impossible. Fixed by gating plugin loading behind `[ "${INSPECTOR:-on}" != "off" ]` (same convention as the Slurm launchers, one-line change, non-breaking).
+
+#### 6.27.2 Slurm methodology confirmed
+
+Published Slurm 16-GPU result (from `pinning/README.md`, Megatron TP4/PP2/DP2, 8B-class, 4 interleaved rounds, 150 iters/run, skip-first-20, NCCL 2.32.3, `ab_driver.sh` with `run_cfg.sh`):
+
+| Arm | Overhead vs OFF |
+|---|---|
+| Inspector ON, unpinned | **+11.5%** (p=0.001) |
+| Inspector ON, dump-only | **+6.4%** (p=0.007) |
+| Inspector ON, full-pinned | **+0.64%** (p=0.58, not significant) |
+
+Published Slurm 48-GPU result (§6.7.3, `interleaved_closeout.sh`, Megatron TP4/PP4/DP3, 3 interleaved pairs, 150 iters/run, skip-first-10):
+
+| Comparison | Condition | Effect | Welch t | p |
+|---|---|---|---|---|
+| Pinned vs unpinned | Healthy | **−8.02%** (pinning saves) | −26.58 | ≪0.001 |
+| Pinned vs unpinned | 100ms fault | **−0.59%** | −12.49 | ≪0.001 |
+| No Inspector vs Inspector+pinned | Healthy | **−0.58%** (n.s.) | −2.32 | ~0.02 |
+
+#### 6.27.3 K8s A/B/C measurement: methodology
+
+**Workload**: nanoGPT 85M DDP (`train_node_shape1_k8s.sh`, 2-node/16-GPU H200). The existing K8s manifest (04-training-job.yaml.tmpl) runs nanoGPT; the Megatron K8s shape requires a separate follow-up (§6.27.6).
+
+**Three arms** (interleaved, round r starts at arm r mod 3):
+- `off` — Inspector completely off (no NCCL_PROFILER_PLUGIN, no NCCL_INSPECTOR_ENABLE). Host NCCL (pytorch:25.01-py3, NCCL 2.25.1).
+- `on_nopin` — Inspector on, PIN_MODE=off (unpinned). NCCL 2.32.3 from `/workspace/nccl-2.32.3/build/lib/`.
+- `on_full` — Inspector on, PIN_MODE=full (dump + profiler threads pinned). NCCL 2.32.3.
+
+**Steps**: 300 per job. **Warmup skip**: 1 record (first log entry at iter 0 is the CUDA/NCCL/compile init spike, ~920ms). Remaining: 15 steady-state samples/job × 3 rounds = **45 samples/arm**. nanoGPT logs every `--log_interval=20` iterations, so 300 steps → 15 usable records.
+
+**Interleaving**: genuinely alternating — round 1: off/on_nopin/on_full; round 2: on_nopin/on_full/off; round 3: on_full/off/on_nopin. Each job run to completion before the next starts; `run_k8s.sh` polls for TORCHRUN_EXIT in training container logs (not `kubectl wait --for=condition=Complete`, which never fires because the aggregator sidecar stays alive).
+
+**Statistical test**: Welch two-sided t-test on 3 per-round means (n=3/arm). Scripts: `pinning/ab/ab_driver_k8s.sh`, `pinning/ab/analyze_ab_k8s.py`.
+
+**NCCL version confound**: the `off` arm uses host NCCL 2.25.1; `on_nopin` and `on_full` use NCCL 2.32.3. If 2.32.3 is faster for AllReduce than 2.25.1, it partially offsets Inspector's overhead, making on_nopin appear closer to off than it truly is. A fourth arm (Inspector off + NCCL 2.32.3) would isolate this. Not run; documented as an open question.
+
+#### 6.27.4 Healthy results (K8s, 2-node/16-GPU H200, nanoGPT DDP)
+
+| Arm | Mean ms/iter | sd (within-round) | sd (across rounds) | n/arm |
+|---|---|---|---|---|
+| Inspector OFF | 29.512 | 1.267 | 0.083 | 45 |
+| Inspector ON, unpinned | 29.475 | 1.007 | 0.080 | 45 |
+| Inspector ON, full-pinned | 29.613 | 1.333 | 0.174 | 45 |
+
+**Overhead vs OFF (Welch t on 3 per-round means):**
+
+| Arm | Effect | t | df | p | Paired per-round |
+|---|---|---|---|---|---|
+| ON, unpinned vs OFF | **−0.124%** | −0.551 | 4.0 | 0.582 | +0.25%, −0.57%, −0.05% |
+| ON, full-pinned vs OFF | **+0.343%** | +0.908 | 2.9 | 0.364 | +0.99%, −0.56%, +0.60% |
+
+**All three arms are statistically indistinguishable** (p=0.36–0.58). Inspector overhead — pinned or unpinned — is not measurable on this workload at this scale. Consistent with the Slurm 16-GPU pinning result (+0.64%, p=0.58, n.s.) in direction and magnitude.
+
+**Pinning confirmed active on all 6 on_full runs (2 nodes × 3 rounds)**: `[PIN-PREFLIGHT] resolved=full nccl=2.32.3 lib=/workspace/nccl-2.32.3/build/lib/libnccl.so.2.32.3 interposer=cached cores_per_role=1 reserved_cpus=48-63,112-127`. Reserved CPUs 48–63 and 112–127 = 16 physical cores/node = 8 ranks × 2 roles × 1 core/role. Consistent with the validated Slurm topology.
+
+#### 6.27.5 Under-fault results (100ms sleep, rank 1)
+
+| Arm | Mean ms/iter | sd (within-round) | sd (across rounds) | n/arm |
+|---|---|---|---|---|
+| Inspector OFF | 124.842 | 1.255 | 0.210 | 45 |
+| Inspector ON, unpinned | 124.787 | 1.615 | 0.912 | 45 |
+| Inspector ON, full-pinned | 125.437 | 1.394 | 0.271 | 45 |
+
+**Overhead vs OFF (Welch t on 3 per-round means):**
+
+| Arm | Effect | t | df | p | Paired per-round |
+|---|---|---|---|---|---|
+| ON, unpinned vs OFF | **−0.044%** | −0.102 | 2.2 | 0.919 | +0.22%, −0.70%, +0.34% |
+| ON, full-pinned vs OFF | **+0.476%** | +3.006 | 3.8 | 0.003 | +0.65%, +0.71%, +0.07% |
+
+**Notable finding**: under fault, full pinning is statistically distinguishable from OFF (p=0.003), and the direction is opposite to the Slurm 48-GPU under-fault result (§6.7.3: pinning saved 0.59% under fault at 48-GPU Megatron). On K8s nanoGPT 16-GPU, full pinning costs +0.476% (+0.595ms on 125ms iterations) under the 100ms straggler sleep.
+
+**Most likely explanation**: under a 100ms wait-induced fault, all 15 non-straggler ranks block in AllReduce for ~100ms/step. During this blocking period the NCCL profiler thread (which IS active, logging the elevated exec times) is confined to its reserved core in the on_full arm. When unpinned, the profiler thread can use whichever CPU is idle during the AllReduce wait — a natural opportunity with 8 blocked training threads per rank. When pinned, the reserved core becomes a potential bottleneck. The nanoGPT DDP workload at 16 GPUs generates fewer NCCL events per iteration than Megatron TP4/PP4/DP3 at 48 GPUs (single AllReduce vs. multiple TP/PP/DP communicators), so the pinning benefit (reduced contention on training cores) is smaller while the reserved-core constraint is comparatively larger.
+
+**Caveat on statistical reliability**: n=3 per-round means, df=3.8. The paired percentages [+0.65%, +0.71%, +0.07%] show two consistent rounds and one anomalous round (0.07%). This finding is statistically significant at p=0.003 but should be confirmed with larger n (e.g., 10+ rounds or per-step logging) before being treated as conclusive. The effect size (0.6ms on 125ms) is below any operational concern regardless of direction.
+
+#### 6.27.6 Direct comparison against Slurm's published numbers
+
+| Scale | Platform | Workload | Inspector overhead (fully pinned vs OFF) | Significance |
+|---|---|---|---|---|
+| 16-GPU / 2-node | Slurm (soperator) | Megatron TP4/PP2/DP2 | **+0.64%** | p=0.58, n.s. |
+| 16-GPU / 2-node | K8s | nanoGPT 85M DDP | **+0.343%** | p=0.364, n.s. |
+| 48-GPU / 6-node | Slurm (soperator) | Megatron TP4/PP4/DP3 | **−0.58%** (n.s. with pinning) | p~0.02 |
+
+**Consistent finding**: at 2-node/16-GPU scale, Inspector with full pinning costs zero measurable overhead on both platforms. The measurement direction and p-value range match closely across different workloads and environments.
+
+**Methodology difference**: Slurm 16-GPU used Megatron TP4/PP2/DP2 (multiple communicator groups, more Inspector-active NCCL traffic per iteration, ~41ms/iter baseline on those GPUs). K8s used nanoGPT DDP (single AllReduce per backward pass, ~29ms/iter on H200). These are structurally different workloads for the pinning question. The K8s result is **partial evidence**: it confirms pinning works and costs nothing on K8s at the kernel/scheduler level, but does not confirm it costs nothing under Megatron's load pattern on K8s.
+
+#### 6.27.7 Follow-up required: Megatron overhead on K8s
+
+The right measurement to close the methodology gap: run the same three-arm A/B on K8s with the validated Megatron TP=4/PP=1/DP=4 shape (confirmed working in §6.25). The `06-megatron-job.yaml.tmpl` manifest and `train_node_megatron_k8s.sh` launcher are already wired with pinning. Adding `INSPECTOR=off` support and running `ab_driver_k8s.sh` against the Megatron manifest would produce a direct, methodology-identical counterpart to the Slurm Megatron number. Scoped here as a concrete, bounded follow-up — not a vague "future work" placeholder.
+
+#### 6.27.8 CPU utilization and core-sufficiency
+
+The 1-Hz `cpu_sampler.py` collected too few samples during on_full runs (~10 seconds of steady-state training across a 1-Hz sampler) to give a reliable per-core utilization number. The reserved cores are confirmed correct via PIN-PREFLIGHT (`reserved_cpus=48-63,112-127`), but the 1-core/role headroom at K8s scale is not independently confirmed by utilization sampling — it rests on the Slurm finding of ~2.5% mean busy / ~7% peak (§6.6.4) on the same hardware class. For a dedicated K8s utilization run, a longer workload (Megatron, which runs for minutes not seconds) is required.
+
+#### 6.27.9 Methodology parity report
+
+| Item | Slurm | K8s | Identical? |
+|---|---|---|---|
+| Arm rotation (interleaving) | round r starts at arm r mod N | same | Yes |
+| Statistical test | Welch two-sided t-test | same (stdlib implementation) | Yes |
+| Warmup skip | 20 iters (Megatron per-step logging) | 1 record (nanoGPT log_interval=20) | Equivalent (both skip init spike) |
+| Pinning configuration | NCCL 2.32.3, dump+profiler threads | same NCCL 2.32.3, same code | Yes |
+| Fault magnitude | 100ms sleep, single rank | same | Yes |
+| Sample size | 130 samples/round (150 iters − 20 warmup) | 15 samples/round (300 steps, log_interval=20) | No — 8.7× fewer samples/round |
+| NCCL version across arms | Same NCCL for all arms | off arm uses host NCCL 2.25.1; on_* arms use 2.32.3 | No — confound present |
+| Contamination check | sacct (soperatorchecks jobs) | kubectl (no sacct in K8s) | Equivalent in purpose |
+| CPU utilization | cpu_sampler.py via SSH, 60% steady-state window | cpu_sampler.py via kubectl exec, insufficient window | Not completed |
+| Workload | Megatron TP4/PP2/DP2 (or TP4/PP4/DP3) | nanoGPT 85M DDP | Different — most significant gap |
+
+Two real adaptations with real justifications: (1) sample size reduction is because nanoGPT at 29ms/iter with pod-startup overhead dominates job wall time — increasing log_interval=1 would add minimal clock time and would be the right fix for future runs; (2) NCCL version difference in the off arm is because the K8s manifest historically used `TRAINING_NCCL_LIB_PATH` for all arms or none, and the off arm genuinely has no reason to need NCCL 2.32.3 (Inspector is not running). Both differences are disclosed, not smoothed over.

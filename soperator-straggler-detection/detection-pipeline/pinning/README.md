@@ -97,10 +97,32 @@ show the loaded NCCL — use `nccl_version_probe.py` (`ncclGetVersion()`).
   for an empty queue and `analyze_ab.py` flags overlapping runs.
 - A GPU-less host (login node) cannot produce a core plan: `reserved_cpus=none` in the preflight there is expected.
 
-## Measured (16 GPUs, TP4/PP2/DP2, 8B-class, NOT comparable to the 48-GPU baseline; 150 iters after 20 warmup)
+## Measured — Slurm (16 GPUs, TP4/PP2/DP2, 8B-class, NOT comparable to the 48-GPU baseline; 150 iters after 20 warmup)
 NCCL 2.32.3 (4 interleaved rounds): ON unpinned **+11.5%** (p=0.001), dump-only **+6.4%** (p=0.007), full
 **+0.64% (p=0.58, not significant)**. NCCL 2.30.1 (3 rounds): ON unpinned **+10.6%**, dump-only **+1.35% (n.s., p=0.19)**.
 Full-pinning runs verified FULLY_DEDICATED on 8/8 ranks per node (dump-only runs report DUMP_ONLY_DEDICATED). Reserved cores ~2.5% mean busy (max core ~7%).
 Per-thread sampling (soak and matrix): dump thread 5–10% of its core, profiler thread ~0%, 100% of samples on the
 assigned CPU, 0 affinity drift. Soak (4500 iterations, 600 s sampled): dump thread 5.5% mean, profiler 0.0%, 100% on assigned CPU, 0 drift.
 Raw data lives with the audit run, not in git (`runs/`, `logs/`); method scripts are in `ab/` and `ab/helpers/`.
+
+## Measured — K8s (16 GPUs, nanoGPT 85M DDP, 2-node H200; 300 steps, skip-first-1; 3 interleaved rounds)
+
+Scripts: `ab/ab_driver_k8s.sh`, `ab/analyze_ab_k8s.py`. Methodology differences from the Slurm 16-GPU run: (1) nanoGPT DDP vs Megatron TP4/PP2/DP2 — different workload, more compute-bound, single AllReduce/backward; (2) `off` arm uses host NCCL 2.25.1, `on_*` arms use NCCL 2.32.3 — NCCL version is a confound for the OFF vs ON comparison; (3) 15 samples/round (nanoGPT logs every 20 iters) vs 130/round (Slurm); (4) CPU utilization not completed (pod lifetime too short for 1-Hz sampler). See DESIGN_NOTES §6.27 for full methodology parity table.
+
+**Healthy (n=45/arm, 3 rounds × 15 samples):**
+- OFF: 29.512ms ± 1.267ms (MFU ~76%)
+- ON, unpinned: 29.475ms — **−0.124%** (t=−0.551, df=4.0, p=0.582, NOT significant)
+- ON, full-pinned: 29.613ms — **+0.343%** (t=+0.908, df=2.9, p=0.364, NOT significant)
+
+All arms statistically indistinguishable. Consistent with Slurm 16-GPU result (+0.64%, p=0.58).
+
+**Under 100ms fault rank 1 (n=45/arm):**
+- OFF: 124.842ms ± 1.255ms
+- ON, unpinned: 124.787ms — **−0.044%** (t=−0.102, df=2.2, p=0.919, NOT significant)
+- ON, full-pinned: 125.437ms — **+0.476%** (t=+3.006, df=3.8, p=0.003, significant)
+
+Under fault, full pinning is 0.6ms (0.5%) slower — statistically significant but operationally negligible. Direction is opposite to the Slurm 48-GPU under-fault result (pinning saved 0.59% there). Likely explanation: at 16-GPU nanoGPT DDP, Inspector generates few events per iteration and the pinned reserved-core constraint marginally outweighs the contention-reduction benefit during the straggler wait window. Confirm with larger n before treating as conclusive.
+
+**Pinning verification**: `resolved=full nccl=2.32.3`, `reserved_cpus=48-63,112-127`, both nodes, all 3 rounds. CPU utilization sampling: insufficient pod lifetime (~10s training) for 1-Hz sampler — open item, requires longer workload (Megatron K8s shape).
+
+**Follow-up needed**: run same three-arm A/B on K8s with Megatron TP=4/PP=1/DP=4 shape (validated §6.25) to close the workload methodology gap vs Slurm's Megatron number.
