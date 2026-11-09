@@ -134,7 +134,8 @@ def parse_dumps_v2(files, verbose=False):
                     continue
                 proxy_records += 1
 
-                recorder_rank = rec.get('rank')
+                # rank is in header (confirmed from actual dump format)
+                recorder_rank = rec.get('header', {}).get('rank')
                 if recorder_rank is None:
                     continue
 
