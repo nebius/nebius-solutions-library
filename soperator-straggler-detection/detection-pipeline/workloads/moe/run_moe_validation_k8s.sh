@@ -56,19 +56,24 @@ wait_for_training() {
 copy_dumps() {
     local run_name="$1" trial_dir="$2"
     mkdir -p "$trial_dir/dumps"
+    # Use aggregator container for dump copy: training container may already be dead
+    # (aggregator sidecar stays alive longer and also has /inspector-dumps mounted).
     for pod in $(kubectl get pods -n "$NS" -l "straggler.nebius.ai/run=$run_name" \
         -o jsonpath='{.items[*].metadata.name}' 2>/dev/null); do
         local node
         node=$(kubectl get pod -n "$NS" "$pod" -o jsonpath='{.spec.nodeName}' 2>/dev/null | tr -d '\n')
-        kubectl exec -n "$NS" "$pod" -c training -- \
-            find /inspector-dumps -name "*.log" -newer /proc/1 2>/dev/null | \
-            while read -r dfile; do
-                kubectl cp -n "$NS" "${pod}:${dfile}" \
-                    "$trial_dir/dumps/${node}_$(basename "$dfile")" 2>/dev/null || true
-            done
-        # Also get cross-process skip counts from training stdout
-        kubectl logs -n "$NS" "$pod" -c training --tail=1000 2>/dev/null \
-            | grep "cross-process context skipped\|ProxyOp cross-process\|PIN-PREFLIGHT" \
+        # Try aggregator first (stays alive); fall back to training container
+        for container in aggregator training; do
+            kubectl exec -n "$NS" "$pod" -c "$container" -- \
+                find /inspector-dumps -name "*.log" 2>/dev/null | \
+                while read -r dfile; do
+                    kubectl cp -n "$NS" "${pod}:${dfile}" \
+                        "$trial_dir/dumps/${node}_$(basename "$dfile")" 2>/dev/null || true
+                done && break
+        done 2>/dev/null
+        # Cross-process skip counts and PIN-PREFLIGHT from training logs
+        kubectl logs -n "$NS" "$pod" -c training --tail=2000 2>/dev/null \
+            | grep "cross-process context skipped\|ProxyOp cross-process\|PIN-PREFLIGHT\|NCCL-PROFILER-CHECK" \
             >> "$trial_dir/inspector_${pod}.txt" 2>/dev/null || true
     done
     local n_dump
