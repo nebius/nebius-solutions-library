@@ -90,9 +90,11 @@ spec:
             - name: TRAINING_GPUS_PER_NODE
               value: "${TRAIN_GPUS}"
             - name: TRAINING_NCCL_LIB_PATH
-              value: ""
+              value: "${NCCL_LIB_PATH}"
             - name: PIN_MODE
               value: "${PIN_MODE}"
+            - name: INSPECTOR
+              value: "${INSPECTOR}"
             # NCCL_IB_DISABLE=1: required workaround for HPC-X SHARP RDMA plugin
             # segfault with multiple NCCL process groups (Megatron TP/PP) on
             # pytorch:25.01-py3. Forces TCP transport — loses RDMA performance but
