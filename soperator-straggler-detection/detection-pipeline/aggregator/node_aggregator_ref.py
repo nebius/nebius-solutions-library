@@ -1403,6 +1403,10 @@ class NodeAggregator:
                                mv, ts_us // 1000))
 
     def handle_record(self, d):
+        # proxy_peer_wait records (§6.41 Inspector fix) have no coll_perf/header/metadata.
+        # They are analyzed offline via moe_signal_check_k8s.py, not the live pipeline.
+        if "coll_perf" not in d:
+            return
         h = d["header"]
         cp = d["coll_perf"]
         m = d["metadata"]
