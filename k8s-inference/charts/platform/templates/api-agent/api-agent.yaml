@@ -1,0 +1,118 @@
+{{- if index .Values.components "api-agent" }}
+# Identity the fleet's API (the control cluster) uses in THIS cluster: to submit and read operation Jobs, to deploy
+# the models defined through it (services/api/models.py: endpoints in `models`), to keep the endpoints' certificate,
+# to verify run tokens and to read Prometheus and Loki through the API server proxy (the console's metrics and
+# logs per region). Cluster-wide it may only read namespaces, nodes and pods; everything else is granted per
+# tenant namespace by a RoleBinding to `serverless2-api-tenant` that onboarding creates.
+# Its credential is a long-lived ServiceAccount token the platform stage mints on this cluster and hands to the
+# control cluster through its state (stack/platform/secrets.tf); rotate it with `terraform apply -replace` of that
+# Secret (docs/OPERATIONS.md "Rotation"). Read access to the state bucket therefore equals this identity.
+apiVersion: v1
+kind: Namespace
+metadata: { name: api }
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata: { name: api-agent, namespace: api }
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: { name: serverless2-api-agent-read }
+rules:
+  - apiGroups: [""]
+    resources: [namespaces]
+    verbs: [get, list]
+  - apiGroups: [""]                 # the fleet page: ready nodes per pool and the GPUs their pods hold
+    resources: [nodes, pods]
+    verbs: [get, list]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: { name: serverless2-api-agent-read }
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: serverless2-api-agent-read }
+subjects: [{ kind: ServiceAccount, name: api-agent, namespace: api }]
+---
+# Models defined through the fleet's API are rendered on this cluster by it (services/api/models.py): endpoints in `models`.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: { name: serverless2-api-agent-models, namespace: models }
+rules:
+  - apiGroups: [gateway.networking.k8s.io]
+    resources: [httproutes]
+    verbs: [get, list]
+  - apiGroups: [gateway.envoyproxy.io]
+    resources: [securitypolicies]
+    verbs: [get, list, create, patch, delete]
+  - apiGroups: [serving.kserve.io]
+    resources: [inferenceservices, localmodelcaches]
+    verbs: [get, list, create, patch, delete]
+  - apiGroups: [leaderworkerset.x-k8s.io]      # multi-node endpoints (`nodes` > 1): the replica group, its leader
+    resources: [leaderworkersets]               # Service and the route to the gateway
+    verbs: [get, list, create, patch, delete]
+  - apiGroups: [""]
+    resources: [services]
+    verbs: [get, list, create, patch, delete]
+  - apiGroups: [gateway.networking.k8s.io]
+    resources: [httproutes]
+    verbs: [create, patch, delete]
+  - apiGroups: [""]
+    resources: [persistentvolumeclaims]
+    verbs: [get, list, create, patch, delete]
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get, list]           # ready replicas of an endpoint (services/api/kube.py endpoint_status)
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: { name: serverless2-api-agent-models, namespace: models }
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: Role, name: serverless2-api-agent-models }
+subjects: [{ kind: ServiceAccount, name: api-agent, namespace: api }]
+---
+# Metrics and logs of this cluster's endpoints and runs (services/api/monitoring.py): Prometheus and Loki through
+# the API server proxy, GET only, these two Services (the name carries the port in the proxy path).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: { name: serverless2-api-agent-monitoring, namespace: monitoring }
+rules:
+  - apiGroups: [""]
+    resources: [services/proxy]
+    verbs: [get]
+    resourceNames: [kube-prometheus-stack-prometheus, "kube-prometheus-stack-prometheus:9090", loki, "loki:3100"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: { name: serverless2-api-agent-monitoring, namespace: monitoring }
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: Role, name: serverless2-api-agent-monitoring }
+subjects: [{ kind: ServiceAccount, name: api-agent, namespace: api }]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: { name: serverless2-api-agent-models-certificate, namespace: envoy-gateway-system }
+rules:
+  - apiGroups: [cert-manager.io]
+    resources: [certificates]
+    verbs: [get, patch]
+    resourceNames: [models]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: { name: serverless2-api-agent-models-certificate, namespace: envoy-gateway-system }
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: Role, name: serverless2-api-agent-models-certificate }
+subjects: [{ kind: ServiceAccount, name: api-agent, namespace: api }]
+---
+# The control cluster's API verifies the projected tokens of run pods (attempt records, services/api/attempts.py)
+# with a TokenReview against the cluster that issued them: cluster-scoped, so a ClusterRoleBinding.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: { name: serverless2-api-agent-tokenreview }
+rules:
+  - apiGroups: [authentication.k8s.io]
+    resources: [tokenreviews]
+    verbs: [create]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: { name: serverless2-api-agent-tokenreview }
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: serverless2-api-agent-tokenreview }
+subjects: [{ kind: ServiceAccount, name: api-agent, namespace: api }]
+{{- end }}

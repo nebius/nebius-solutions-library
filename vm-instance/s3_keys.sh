@@ -1,5 +1,6 @@
 NEBIUS_TENANT_ID=''
 NEBIUS_PROJECT_ID=''
+NEBIUS_REGION="${NEBIUS_REGION:-eu-west2}"
 
 if [ -z "${NEBIUS_TENANT_ID}" ]; then
   echo "Error: NEBIUS_TENANT_ID is not set"
@@ -118,11 +119,11 @@ AWS_SECRET_ACCESS_KEY="$(nebius iam v2 access-key get \
 export AWS_SECRET_ACCESS_KEY
 
 # endregion AWS access key
-export AWS_ENDPOINT_URL="https://storage.eu-north1.nebius.cloud:443"
-aws configure set aws_access_key_id ${AWS_ACCESS_KEY_ID}
-aws configure set aws_secret_access_key  ${AWS_SECRET_ACCESS_KEY}
-aws configure set region eu-north1
-aws configure set endpoint_url https://storage.eu-north1.nebius.cloud:443
+export AWS_ENDPOINT_URL="https://storage.${NEBIUS_REGION}.nebius.cloud:443"
+aws configure set aws_access_key_id "${AWS_ACCESS_KEY_ID}"
+aws configure set aws_secret_access_key "${AWS_SECRET_ACCESS_KEY}"
+aws configure set region "${NEBIUS_REGION}"
+aws configure set endpoint_url "${AWS_ENDPOINT_URL}"
 
 
 echo "If you want to see AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY, check out $HOME/.aws/credential."

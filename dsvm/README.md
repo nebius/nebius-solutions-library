@@ -29,7 +29,7 @@ This Terraform solution deploys a Data Science Virtual Machine (DSVM) is a vi
 
 1. Install [Nebius CLI](https://docs.nebius.dev/en/cli/#installation):
    ```bash
-   curl -sSL https://storage.ai.nebius.cloud/nebius/install.sh | bash
+   curl -sSL https://artifacts.nebius.cloud/cli/install.sh | bash
    ```
 
 2. Reload your shell session:
@@ -53,15 +53,20 @@ This Terraform solution deploys a Data Science Virtual Machine (DSVM) is a vi
 
 To deploy the solution, follow these steps:
 
-1. Load environment variables:
+1. Copy the example variables file, then replace the placeholders with your values:
+   ```bash
+   cp terraform.tfvars.example terraform.tfvars
+   ```
+   Your local `terraform.tfvars` is ignored by Git. See [configuration variables](#configuration-variables) for details.
+
+2. Load environment variables:
    ```bash
    source ./environment.sh
    ```
-2. Initialize Terraform:
+3. Initialize Terraform:
    ```bash
    terraform init
    ```
-3. Replace the placeholder content in `terraform.tfvars` with the configuration values that you need. See the details [below](#configuration-variables).
 4. Preview the deployment plan:
    ```bash
    terraform plan
@@ -120,3 +125,11 @@ sudo systemctl restart jupyter-lab
 | datasets	                | 2.9.0      |
 | transformers	             | 4.27.1     |
 | torchvision	             | 0.15.2     |
+
+## Updating an existing checkout
+
+The tracked `terraform.tfvars` has been renamed to `terraform.tfvars.example`.
+Before updating an older checkout, back up your customized `terraform.tfvars` outside
+this repository. After updating, restore it as your local `terraform.tfvars` and
+compare it with the new example for added settings. Do not overwrite an existing
+local configuration with the copy command above.

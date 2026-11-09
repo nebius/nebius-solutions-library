@@ -26,7 +26,7 @@ spec:
               value: "1"
             - name: OMPI_ALLOW_RUN_AS_ROOT_CONFIRM
               value: "1"
-            image: cr.eu-north1.nebius.cloud/nebius-benchmarks/nccl-tests:2.19.4-ubu22.04-cu12.2
+            image: {{ .Values.image | quote }}
             name: nccl
             resources:
               requests:
@@ -49,7 +49,7 @@ spec:
         spec:
           automountServiceAccountToken: false
           containers:
-          - image: cr.eu-north1.nebius.cloud/nebius-benchmarks/nccl-tests:2.19.4-ubu22.04-cu12.2
+          - image: {{ .Values.image | quote }}
             name: nccl
             resources:
               limits:

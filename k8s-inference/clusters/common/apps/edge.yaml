@@ -1,0 +1,6 @@
+name: edge
+component: edge
+namespace: models
+wave: '3'
+placement: worker
+kind: manifests

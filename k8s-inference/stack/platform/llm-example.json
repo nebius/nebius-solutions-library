@@ -1,0 +1,17 @@
+{
+  "id": "llm-example",
+  "kind": "endpoint",
+  "display_name": "LLM example (vLLM, a small public chat model)",
+  "description": "The acceptance probe's example: a stock vLLM container serving a small open model. Delete it when you do not want it.",
+  "task": "text-generation",
+  "image": "vllm/vllm-openai:v0.11.0",
+  "args": ["--model", "HuggingFaceTB/SmolLM2-360M-Instruct", "--max-model-len", "4096", "--gpu-memory-utilization", "0.5"],
+  "port": 8000,
+  "protocol": "openai",
+  "health_path": "/health",
+  "served_model": "HuggingFaceTB/SmolLM2-360M-Instruct",
+  "resources": { "cpu": "4", "memory": "16Gi" },
+  "scaling": { "min": 0, "max": 1, "target": 4 },
+  "timeout_s": 600,
+  "shm_gib": 4
+}

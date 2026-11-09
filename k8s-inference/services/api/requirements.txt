@@ -1,0 +1,9 @@
+fastapi==0.142.2
+uvicorn==0.54.0
+httpx==0.28.1
+kubernetes==36.0.3
+boto3==1.43.108
+pyyaml==6.0.3
+pydantic==2.13.5
+psycopg[binary]==3.3.3
+psycopg-pool==3.3.0

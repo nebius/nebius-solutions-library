@@ -1,0 +1,56 @@
+{{- /*
+Control cluster only: the fleet-wide scheduling queues the API submits to (docs/FLEET.md "Tenants"). Flavors are
+logical (`<region id>-<pool>`, no node labels: the job runs on a worker, whose own flavors place it) and mirror each
+worker's quota; the queues are the same lender and tenant queues as on a worker (worker-queues.yaml explains them),
+each tenant queue carrying the MultiKueue admission check of its profile: a workload is only admitted here once a
+worker in the profile's order admitted it, and the worker's queue of the same name does the final placement.
+*/ -}}
+{{- if include "fleet.isControl" . }}
+{{- $f := .Values.fleet }}
+{{- $all := include "fleet.allPools" $f | fromYaml }}
+{{- $bare := dict }}{{ range $n, $p := $all }}{{ $_ := set $bare $n $p.pool }}{{ end }}
+{{- range $name, $p := $all }}
+---
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: ResourceFlavor
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "fleet.labels" $ | nindent 4 }}
+    serverless2.nebius/region: {{ $p.region | quote }}
+    serverless2.nebius/pool: {{ $p.pool | quote }}
+    serverless2.nebius/gpu-class: {{ $p.gpu_class | quote }}
+    serverless2.nebius/capacity: {{ (default (dict "type" "on_demand") $p.capacity).type | replace "_" "-" | quote }}
+    serverless2.nebius/interconnect: {{ default "none" $p.interconnect | quote }}
+    {{- with include "fleet.poolTenant" (dict "fleet" $f "pool" $p.pool) }}
+    serverless2.nebius/tenant: {{ . | quote }}
+    {{- end }}
+  annotations:
+    serverless2.nebius/platform: {{ $p.platform }}/{{ $p.preset }}
+    serverless2.nebius/price-usd-gpu-hour: {{ include "fleet.price" (dict "fleet" $f "pool" $p) | quote }}
+spec: {}
+{{- end }}
+{{- $systems := dict }}
+{{- range $rn, $r := $f.regions }}
+{{- $_ := set $systems (printf "%s-system" $r.id) (include "fleet.systemQuota" (dict "fleet" $f "system_pool" $r.system_pool) | fromYaml) }}
+---
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: ResourceFlavor
+metadata:
+  name: {{ $r.id }}-system
+  labels:
+    {{- include "fleet.labels" $ | nindent 4 }}
+    serverless2.nebius/region: {{ $r.id | quote }}
+    serverless2.nebius/pool: "system"
+    serverless2.nebius/gpu-class: "none"
+    serverless2.nebius/capacity: "system"
+spec: {}
+{{- end }}
+{{- include "fleet.lenderQueue" (dict "root" $ "fleet" $f "pools" $all "bare" $bare "systems" $systems) }}
+{{- range $tn, $tc := default dict $f.tenants }}
+{{- range $prefer := prepend (include "fleet.classes" $all | fromYamlArray) "" }}
+{{- $profile := "default" }}{{ if $prefer }}{{ $profile = printf "prefer-%s" $prefer }}{{ end }}
+{{- include "fleet.tenantQueue" (dict "root" $ "fleet" $f "tenant" $tn "tc" $tc "prefer" $prefer "pools" $all "bare" $bare "systems" $systems "admissionCheck" (printf "multikueue-%s" $profile)) }}
+{{- end }}
+{{- end }}
+{{- end }}

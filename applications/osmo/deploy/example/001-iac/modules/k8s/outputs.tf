@@ -16,7 +16,7 @@ output "cluster_endpoint" {
   description = "Kubernetes API endpoint"
   value = var.enable_public_endpoint ? (
     nebius_mk8s_v1_cluster.main.status.control_plane.endpoints.public_endpoint
-  ) : (
+    ) : (
     try(nebius_mk8s_v1_cluster.main.status.control_plane.endpoints.private_endpoint, "")
   )
 }

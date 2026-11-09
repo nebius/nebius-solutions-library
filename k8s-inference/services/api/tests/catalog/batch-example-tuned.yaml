@@ -1,0 +1,23 @@
+id: batch-example-tuned
+displayName: Batch example with one image per GPU class (test fixture)
+task: batch
+mode: run
+protocol: kubernetes-job
+gpu: { count: 1, classes: [rtx-pro-6000, h100] }   # preferred first
+price: { unit: gpu-hour, usd: 1.60 }
+job:
+  image: registry.serverless2.local/nebius/batch-example:1.0-cuda12.8-sm90-120   # the default (job.images.default wins when set)
+  images:                                                                        # docs/SCHEDULING.md "Per-GPU images for runs"
+    h100: registry.serverless2.local/nebius/batch-example:1.0-h100
+    rtx-pro-6000: registry.serverless2.local/nebius/batch-example:1.0-rtx-pro-6000
+  gpu: 1
+  cpu: "12"
+  memory: 32Gi
+  pvcSizeGi: 50
+  command: ["bash", "-c", "example-run --steps {{nsteps}}"]
+deployments:
+  hub: { price_per_gpu_hour: 2.15 }
+  eu-south1: { price_per_gpu_hour: 1.60 }
+parameters:
+  - { name: input_prefix, type: string, required: true }
+  - { name: nsteps, type: number, default: 1000 }

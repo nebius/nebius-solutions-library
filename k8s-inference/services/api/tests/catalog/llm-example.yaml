@@ -1,0 +1,37 @@
+# Test fixture: an OpenAI-protocol endpoint (a stock vLLM container serving a small open model).
+id: llm-example
+displayName: LLM example (vLLM)
+task: text-generation
+mode: sync
+protocol: openai                 # /v1/chat/completions, /v1/completions
+port: 8000
+endpoints: { chat: /openai/v1/chat/completions, ready: /health }
+gpu: { count: 1, memoryGiB: 16, classes: [h100, rtx-pro-6000] }
+concurrency: 4
+coldStartClass: slow             # weights downloaded at start unless cached on the shared filesystem
+price: { unit: 1k-tokens, usd: 0.0002 }
+scaleToZero: true
+servedModel: llm                 # the name the server registers (`--served-model-name`); injected into requests that omit `model`
+
+runtime:
+  image: registry.serverless2.local/docker/vllm/vllm-openai:v0.11.0
+  args: ["--model", "example-org/small-chat-model", "--served-model-name", "llm", "--max-model-len", "4096"]
+  port: 8000
+  protocol: openai
+  resources: { gpu: 1, cpu: "4", memory: 16Gi }
+  scaling: { minReplicas: 0, maxReplicas: 1, metric: concurrency, target: 4, scaleToZeroRetention: 2m }
+  timeout: 600
+  shm: { enabled: true, size: 4Gi }
+  # Hugging Face cache on the region's shared filesystem: weights download once, every cold start after
+  # that is warm (PVC weights-shared, subPath llm-example, mounted at /weights; HF_HOME points there).
+  weights:
+    sharedFilesystem: { enabled: true, path: llm-example, mountPath: /weights }
+    env: { HF_HOME: /weights, HF_HUB_CACHE: /weights/hub }
+
+deployments:
+  hub:
+    pool: h100-spot-1x
+    priorityClassName: serverless2-interactive
+  eu-south1:
+    pool: rtx6000-spot-1x
+    priorityClassName: serverless2-interactive

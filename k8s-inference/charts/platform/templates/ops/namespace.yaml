@@ -1,0 +1,7 @@
+{{- if index .Values.components "ops" }}
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ops
+  labels: { serverless2.nebius/component: ops }
+{{- end }}

@@ -1,0 +1,34 @@
+# https://github.com/DavidAnson/markdownlint/blob/main/doc/Rules.md
+
+fix: false
+
+# MD003/heading-style : Heading style : https://github.com/DavidAnson/markdownlint/blob/v0.41.1/doc/md003.md
+MD003: false
+
+# MD013/line-length : Line length : https://github.com/DavidAnson/markdownlint/blob/v0.41.1/doc/md013.md
+MD013:
+  # Number of characters
+  line_length: 120
+  # Number of characters for headings
+  heading_line_length: 120
+  # Number of characters for code blocks
+  code_block_line_length: 120
+  # Include code blocks
+  code_blocks: false
+  # Include tables
+  tables: true
+  # Include headings
+  headings: true
+  # Strict length checking
+  strict: false
+  # Stern length checking
+  stern: false
+
+# MD033/no-inline-html : Inline HTML : https://github.com/DavidAnson/markdownlint/blob/v0.41.1/doc/md033.md
+MD033: false
+
+# MD043/required-headings : Required heading structure : https://github.com/DavidAnson/markdownlint/blob/v0.41.1/doc/md043.md
+MD043: false
+
+# MD059/descriptive-link-text : Link text should be descriptive : https://github.com/DavidAnson/markdownlint/blob/v0.41.1/doc/md059.md
+MD059: false

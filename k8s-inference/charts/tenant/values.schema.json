@@ -1,0 +1,228 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/nebius/nebius-solutions-library/k8s-inference/charts/tenant/values.schema.json",
+  "title": "charts/tenant values",
+  "description": "Every top-level key the templates read is declared here, so unknown keys are refused (additionalProperties: false). `fleet` is the document the config stage derives from terraform.tfvars; the chart reads only the regions' GPU classes and weights filesystem from it, so that definition stays open.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "name",
+    "cluster",
+    "clusters"
+  ],
+  "properties": {
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$",
+      "description": "tenant name; namespace tenant-<name>"
+    },
+    "cluster": {
+      "type": "string",
+      "minLength": 1,
+      "description": "key of `clusters`"
+    },
+    "apiSubjects": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "kind",
+          "name",
+          "namespace"
+        ],
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "ServiceAccount",
+              "User",
+              "Group"
+            ]
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "namespace": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "runnerServiceAccount": {
+      "type": "string",
+      "minLength": 1
+    },
+    "allowedImages": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "image prefixes a container-run of this tenant may use (empty: any)"
+    },
+    "identities": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "audience"
+        ],
+        "properties": {
+          "audience": {
+            "type": "string",
+            "minLength": 1
+          },
+          "env": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
+    "executionProfiles": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "egress_fqdns": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "egress_cidrs": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "shared_filesystem": {
+            "type": "boolean"
+          }
+        }
+      }
+    },
+    "apiHosts": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "profiles": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "infiniband": {
+      "type": "boolean"
+    },
+    "infinibandClaimTemplate": {
+      "type": "string",
+      "minLength": 1
+    },
+    "infinibandClaimCounts": {
+      "type": "array",
+      "items": {
+        "type": "integer",
+        "minimum": 1
+      }
+    },
+    "infinibandDeviceClass": {
+      "type": "string",
+      "minLength": 1
+    },
+    "sharedScratch": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "claim": {
+          "type": "string",
+          "minLength": 1
+        },
+        "size": {
+          "type": "string",
+          "pattern": "^[0-9]+(\\.[0-9]+)?(Ki|Mi|Gi|Ti|Pi|k|M|G|T|P)?$"
+        }
+      }
+    },
+    "fleet": {
+      "type": "object",
+      "description": "the `fleet:` document; only regions.<name>.pools.<pool>.gpu_class and regions.<name>.weights_filesystem are read",
+      "properties": {
+        "regions": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "weights_filesystem": {
+                "type": "object",
+                "properties": {
+                  "enabled": {
+                    "type": "boolean"
+                  },
+                  "mount_path": {
+                    "type": "string"
+                  }
+                }
+              },
+              "pools": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "object",
+                  "properties": {
+                    "gpu_class": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "clusters": {
+      "type": "object",
+      "description": "keyed by cluster id; the platform stage passes this cluster's entry",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "region"
+        ],
+        "properties": {
+          "region": {
+            "type": "string"
+          },
+          "manager": {
+            "type": [
+              "boolean",
+              "string"
+            ],
+            "description": "true on the MultiKueue manager (Terraform's conditional object hands it over as a string on some versions)"
+          }
+        }
+      }
+    },
+    "sharedWeights": {
+      "type": "object",
+      "description": "the region's model weights, read-only for runs (job.weights, docs/JOBS.md)",
+      "properties": {
+        "claim": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

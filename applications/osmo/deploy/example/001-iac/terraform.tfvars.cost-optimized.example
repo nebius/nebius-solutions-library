@@ -1,8 +1,9 @@
 # =============================================================================
 # OSMO on Nebius - Cost-Optimized Configuration
 # =============================================================================
-# This configuration minimizes costs for development and testing.
-# Estimated cost: ~$15-25 per 6-hour session (with L40S + small CPU nodes)
+# This configuration minimizes resource counts for development and testing in
+# eu-west2. B300 is the only GPU platform available in this region and may cost
+# more than L40S configurations in other regions.
 # =============================================================================
 
 # -----------------------------------------------------------------------------
@@ -14,7 +15,7 @@
 # -----------------------------------------------------------------------------
 # Environment Settings
 # -----------------------------------------------------------------------------
-region       = "eu-north1"
+region       = "eu-west2"
 environment  = "dev"
 project_name = "osmo-dev"
 
@@ -41,21 +42,22 @@ cpu_nodes_assign_public_ip = false  # Private nodes only
 #   16vcpu-64gb - ~$0.44/hr (production)
 
 # -----------------------------------------------------------------------------
-# GPU Nodes (L40S - cheapest option ~$1.55/hr vs H100 ~$4-5/hr)
+# GPU Nodes (smallest B300 configuration available in eu-west2)
 # -----------------------------------------------------------------------------
 gpu_nodes_count_per_group  = 1
 gpu_node_groups            = 1
-gpu_nodes_platform         = "gpu-l40s-a"          # L40S Intel (cheapest)
-gpu_nodes_preset           = "1gpu-8vcpu-32gb"     # Single L40S GPU
+gpu_nodes_platform         = "gpu-b300-sxm"
+gpu_nodes_preset           = "1gpu-24vcpu-346gb"   # Smallest GPU preset available in eu-west2
 gpu_disk_size_gib          = 256
 gpu_nodes_assign_public_ip = false
-enable_gpu_cluster         = false  # No InfiniBand for L40S
+enable_gpu_cluster         = false  # No InfiniBand for this single-node configuration
 enable_gpu_taints          = true
 gpu_nodes_preemptible      = false  # Set true if your project allows preemptible GPUs
-gpu_nodes_driverfull_image = false  # Set true for Nebius pre-installed drivers (recommended for B200/B300)
+gpu_nodes_driverfull_image = true   # Nebius pre-installed drivers are recommended for B200/B300
 
 # GPU options by region (see locals.tf for full list):
 #   eu-north1:  gpu-l40s-a, gpu-l40s-d, gpu-h100-sxm, gpu-h200-sxm
+#   eu-west2:   gpu-b300-sxm
 #   eu-north2:  gpu-h200-sxm
 #   eu-west1:   gpu-h200-sxm
 #   me-west1:   gpu-b200-sxm-a (NVIDIA B200)

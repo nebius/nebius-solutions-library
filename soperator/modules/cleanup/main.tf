@@ -11,6 +11,6 @@ resource "terraform_data" "disk_cleanup" {
     environment = {
       "PARENT_ID" : self.triggers_replace.parent_id,
     }
-    command = "${path.module}/scripts/disk_cleanup.sh"
+    command = "python3 ${path.module}/scripts/disk_cleanup.py"
   }
 }

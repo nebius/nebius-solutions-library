@@ -16,7 +16,13 @@ This Terraform configuration script provisions cloud instances with specific har
 - Add environment variables for Terraform authentication in Nebuis Cloud.
 
 
-Run `source ./.envrc.sh` if you use bash, or `source ./.envrc.zsh` if you use zsh.
+First copy the example variables file and replace the placeholders with your values:
+
+```bash
+cp terraform.tfvars.example terraform.tfvars
+```
+
+Your local `terraform.tfvars` is ignored by Git. Then run `source ./.envrc.sh` if you use bash, or `source ./.envrc.zsh` if you use zsh.
 
 These scripts export the Terraform variables used by this module, create the Object Storage bucket used for Terraform state, and let you select the tenant and project where you want to deploy.
 
@@ -24,7 +30,7 @@ If you want to configure S3 credentials for bucket mounting outside of Terraform
 
 ## Usage
 
-Update the placeholder values in `terraform.tfvars`, then run:
+After configuring your local `terraform.tfvars` and loading the environment above, run:
 
 
 ```
@@ -44,7 +50,7 @@ terraform apply
 
 ```
 preset = "16vcpu-64gb"
-platform = "cpu-e2"
+platform = "cpu-d3"
 
 users = [
   {
@@ -65,7 +71,7 @@ instance_count = 1
 
 ```
 preset = "16vcpu-64gb"
-platform = "cpu-e2"
+platform = "cpu-d3"
 
 users = [
   {
@@ -95,7 +101,7 @@ If you prefer, you can also mount a bucket into your file system.
 
 ```
 preset = "16vcpu-64gb"
-platform = "cpu-e2"
+platform = "cpu-d3"
 
 users = [
   {
@@ -115,8 +121,9 @@ This will mount the bucket into the given directory, or into `/mnt/s3` if no dir
 
 
 ```
-preset = "8gpu-128vcpu-1600gb"
-platform = "gpu-h100-sxm"
+preset = "8gpu-192vcpu-2768gb"
+platform = "gpu-b300-sxm"
+boot_image_family = "ubuntu24.04-cuda13.0"
 
 users = [
   {
@@ -128,9 +135,17 @@ users = [
 public_ip = true
 instance_count = 2
 
-fabric = "fabric-6"
+fabric = "eu-west2-a" # B300 InfiniBand fabric in eu-west2.
 
 ```
 This will create a GPU cluster and add all vms inside there. This gives them the possibility to connect over Infiniband. 
 
 It is not possible to change that for already running instances
+
+## Updating an existing checkout
+
+The tracked `terraform.tfvars` has been renamed to `terraform.tfvars.example`.
+Before updating an older checkout, back up your customized `terraform.tfvars` outside
+this repository. After updating, restore it as your local `terraform.tfvars` and
+compare it with the new example for added settings. Do not overwrite an existing
+local configuration with the copy command above.

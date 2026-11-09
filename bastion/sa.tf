@@ -27,6 +27,12 @@ resource "nebius_iam_v1_auth_public_key" "bastion-sa-public-key" {
     }
   }
   data = tls_private_key.bastion_sa_key.public_key_pem
+
+  lifecycle {
+    ignore_changes = [
+      expires_at,
+    ]
+  }
 }
 
 locals {

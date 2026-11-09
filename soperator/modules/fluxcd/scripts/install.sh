@@ -32,15 +32,6 @@ if kubectl --context "${FLUX_K8S_CONTEXT}" get \
     job flux-api-migration
 fi
 
-# Older 4.1 bootstrap charts wait for the whole HelmRelease tree. Disable
-# that wait before the new helm-controller starts reconciling the parent.
-if kubectl --context "${FLUX_K8S_CONTEXT}" --namespace flux-system get \
-  helmrelease soperator-fluxcd >/dev/null 2>&1; then
-  kubectl --context "${FLUX_K8S_CONTEXT}" --namespace flux-system patch \
-    helmrelease soperator-fluxcd --type merge \
-    --patch '{"spec":{"install":{"disableWait":true},"upgrade":{"disableWait":true}}}'
-fi
-
 kubectl --context "${FLUX_K8S_CONTEXT}" apply -k "${work_dir}"
 
 # Remove controllers that may be left from an older full-manifest installation.

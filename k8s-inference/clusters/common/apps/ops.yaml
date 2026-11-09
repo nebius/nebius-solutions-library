@@ -1,0 +1,6 @@
+name: ops
+component: ops
+namespace: ops
+wave: '2'
+placement: all
+kind: manifests

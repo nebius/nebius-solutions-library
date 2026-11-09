@@ -14,6 +14,12 @@ variable "cluster_id" {
   type        = string
 }
 
+variable "cluster_name" {
+  description = "Optional cluster name used to namespace access keys. Null preserves legacy names for existing callers."
+  type        = string
+  default     = null
+}
+
 variable "namespace" {
   type    = string
   default = "o11y"

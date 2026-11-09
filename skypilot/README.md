@@ -44,8 +44,10 @@ Before getting started, ensure you have:
 
 ## Examples and Solutions
 
-For detailed examples and solutions using SkyPilot on Nebius, refer to 
-https://github.com/nebius/ml-cookbook/tree/main/skypilot
+For detailed examples and solutions using SkyPilot on Nebius, refer to:
+
+- [Multi-region Nebius Managed Kubernetes example](./multiregion/README.md)
+- https://github.com/nebius/ml-cookbook/tree/main/skypilot
 
 It includes examples on how to:
 - lanch individual VMs as well as clusters

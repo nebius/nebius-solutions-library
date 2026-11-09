@@ -1,0 +1,10 @@
+# Helm values for the kserve Application (both clusters unless hubOnly); version pinned in clusters/common/apps/kserve.yaml
+kserve:
+  controller:
+    deploymentMode: Knative
+    gateway:
+      ingressGateway:
+        enableGatewayApi: true
+        createGateway: false
+        kserveGateway: envoy-gateway-system/serverless2-external
+        className: eg

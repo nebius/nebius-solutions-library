@@ -8,6 +8,10 @@ locals {
       cpu_nodes_platform = "cpu-d3"
       cpu_nodes_preset   = "16vcpu-64gb"
     }
+    eu-west2 = {
+      cpu_nodes_platform = "cpu-d3"
+      cpu_nodes_preset   = "16vcpu-64gb"
+    }
   }
 
   current_region_defaults = local.regions_default[var.region]

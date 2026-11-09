@@ -1,0 +1,14 @@
+[tool.ruff]
+target-version = "py312"
+line-length = 120
+src = ["services/api", "services/api/tests", "services/dispatcher", "services/dispatcher/tests", "stack/scripts", "stack/platform/tests"]
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I"]
+
+[tool.ruff.lint.per-file-ignores]
+# Pytest imports fixtures from test_api; their names recur as test arguments.
+"services/api/tests/*.py" = ["F811"]
+# These test entry points set the import path/environment before importing services.
+"services/api/tests/test_api.py" = ["E402", "F811"]
+"services/dispatcher/tests/*.py" = ["E402"]

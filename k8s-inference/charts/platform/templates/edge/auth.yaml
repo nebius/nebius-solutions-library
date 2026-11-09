@@ -1,0 +1,47 @@
+{{- if index .Values.components "edge" }}
+# Endpoint SecurityPolicies (services/api/render_endpoint.py) authorize through the fleet's API; no separate
+# authentication deployment. On a GPU region the API is on the control cluster: an Envoy Gateway Backend names it
+# by its public hostname (port 443) and the BackendTLSPolicy validates that hostname against the system roots (ACME
+# certificate in public mode) or the fleet's trust bundle (internal mode: `edge.caConfigMap`, key ca.crt). On the
+# API's own cluster the policies reference the Service api/api instead; both targets are granted here.
+apiVersion: gateway.networking.k8s.io/v1beta1
+kind: ReferenceGrant
+metadata:
+  name: endpoint-authorization
+  namespace: api
+spec:
+  from:
+    - group: gateway.envoyproxy.io
+      kind: SecurityPolicy
+      namespace: models
+  to:
+    - group: ""
+      kind: Service
+      name: api
+    - group: gateway.envoyproxy.io
+      kind: Backend
+      name: api
+{{- if not .Values.role.control }}
+---
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: Backend
+metadata: { name: api, namespace: api }
+spec:
+  endpoints:
+    - fqdn: { hostname: {{ .Values.edge.controlApiHost | quote }}, port: 443 }
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: BackendTLSPolicy
+metadata: { name: api, namespace: api }
+spec:
+  targetRefs:
+    - { group: gateway.envoyproxy.io, kind: Backend, name: api }
+  validation:
+    hostname: {{ .Values.edge.controlApiHost | quote }}
+    {{- if .Values.edge.caConfigMap }}
+    caCertificateRefs: [{ group: "", kind: ConfigMap, name: {{ .Values.edge.caConfigMap | quote }} }]
+    {{- else }}
+    wellKnownCACertificates: System
+    {{- end }}
+{{- end }}
+{{- end }}

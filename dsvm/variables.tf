@@ -12,20 +12,26 @@ variable "subnet_id" {
 variable "region" {
   description = "Project region."
   type        = string
-  default     = "eu-north1" # https://docs.nebius.com/overview/regions
+  default     = "eu-west2" # https://docs.nebius.com/overview/regions
 }
 
 # Platform
 variable "platform" {
   description = "Platform for DSVM host."
   type        = string
-  default     = "gpu-h100-sxm" # https://docs.nebius.com/compute/virtual-machines/types#gpu-configurations
+  default     = null
 }
 
 variable "preset" {
   description = "Preset for DSVM host."
   type        = string
-  default     = "1gpu-16vcpu-200gb" # https://docs.nebius.com/compute/virtual-machines/types#gpu-configurations
+  default     = null
+}
+
+variable "boot_image_family" {
+  description = "Boot image family for the DSVM host."
+  type        = string
+  default     = null
 }
 
 # SSH access

@@ -3,13 +3,15 @@
 NIM Metadata Service - Provides information about running NIMs in the cluster.
 """
 
+import json
+import os
+from typing import Optional
+
+import requests
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
-from typing import Optional
-import os
-import requests
 from kubernetes import client, config
+from pydantic import BaseModel
 
 app = FastAPI(
     title="NIM Metadata Service",
@@ -27,21 +29,18 @@ PROMETHEUS_URL = os.getenv("PROMETHEUS_URL", "http://prometheus-server.o11y.svc.
 # Time window for peak memory calculation (default 7 days)
 PEAK_MEMORY_TIME_WINDOW = os.getenv("PEAK_MEMORY_TIME_WINDOW", "7d")
 
-# NIM port mapping (proxy ports)
-NIM_PORTS = {
-    "openfold3": 8000,
-    "boltz2": 8001,
-    "evo2-40b": 8002,
-    "msa-search": 8003,
-    "openfold2": 8004,
-    "genmol": 8005,
-    "molmim": 8006,
-    "diffdock": 8007,
-    "qwen3-next-80b-a3b-instruct": 8008,
-    "proteinmpnn": 8009,
-    "rfdiffusion": 8010,
-    "cosmos-reason1-7b": 8011,
-}
+
+def load_nim_ports() -> dict[str, int]:
+    """Load Terraform-derived proxy ports."""
+    raw_ports = os.getenv("NIM_PORTS_JSON", "{}")
+    try:
+        return {str(name): int(port) for name, port in json.loads(raw_ports).items()}
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {}
+
+
+NIM_PORTS = load_nim_ports()
+
 
 class ResourceInfo(BaseModel):
     cpu_request: Optional[str] = None
@@ -49,6 +48,7 @@ class ResourceInfo(BaseModel):
     memory_request: Optional[str] = None
     memory_limit: Optional[str] = None
     gpu_count: Optional[int] = None
+
 
 class PodInfo(BaseModel):
     name: str
