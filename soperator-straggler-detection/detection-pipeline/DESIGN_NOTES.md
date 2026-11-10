@@ -6552,16 +6552,110 @@ This is reported as an open, unresolved gap, not papered over: **the detection l
 
 **Regression**: zero changes to `node_aggregator_ref.py`, `_check_mean`, `_check_mean_tiered`, `classifier.py`, or any existing check (confirmed via diff — every change in this section is a new, additive function/constant). Code diff: 2 files (`alerting/alert_engine.py`, `alerting/thresholds.py`), 200 insertions, 0 deletions.
 
-### 6.44 MoE live-detection K8s closeout: long-duration validation, parity, two real bugs found and fixed (2026-11)
+### 6.45 DEFINITIVE 48-GPU CAPSTONE VALIDATION: both §6.44 gaps addressed, one fully closed, one only partially — reported honestly, including a new systemic finding this round surfaced (2026-11)
 
-#### 6.44.1 Workspace state mismatch found and fixed (Step 0)
+A fresh clone (`capstone_final_20261110`) was taken through the README's Slurm quickstart exactly as written (environment.sh/vm-setup.sh/install.sh/NCCL 2.28 build, `self_test.sh`) — all exit 0, no README fixes needed. This round's explicit charter: close §6.44's two named gaps (the 82MB/65MB unwindowed `proxy_peer_wait` push, and dump-file disk growth from dead jobs), then re-validate at full 48-GPU/6-node scale and report the honest result, including if the gaps don't fully resolve.
+
+#### 6.45.1 Gap A (unwindowed `proxy_peer_wait` push): windowing implemented, unit-exact, and confirmed to fix the specific cost it targeted
+
+`node_aggregator_ref.py`'s `_handle_proxy_peer_wait_record` now accumulates raw per-dump-interval records per `(comm_id, phys_id, peer, direction)` key into `self.proxy_wait_unconsumed`, flushing one count-weighted-mean VM sample every `PROXY_WAIT_WINDOW=MEAN_WINDOW` (=100) raw records — mirroring `score_mean_window`'s own established pattern exactly. Proven loss-free for any count-weighted-mean consumer (both `_check_proxy_wait` and `moe_signal_check.py` do exactly this weighting) both mathematically and numerically (<1e-9). Diff: 52 insertions/17 deletions, isolated entirely to this one function plus the new constant — confirmed via diff, zero lines touched in `score_mean_window`/`score_cv_window`/anything else.
+
+Live-measured against a real, running 100ms-fault MoE job on the dedicated capstone `alert_engine.py` instance (PID 3128447, `--duration 0`, pointed at this cluster's real VM):
+- `/api/v1/export` payload for a 90s lookback window: **82MB → 928KB** (`...mean_us`), **65MB → 835KB** (`...count`) — ~88-90x smaller.
+- Isolated `_check_proxy_wait()` call cost: **4.8s/4.4s (wall/CPU) → 0.063s/0.036s** — 76-122x faster.
+- Most importantly: the real, continuously-running deployed engine (not an isolated test call) correctly fired a `[STRAGGLER-INCIDENT]` naming the true injected rank (`role_rank=4`, `severity_ratio=12.41`) within **1.2 minutes** of job start — the first time in this project's history the fully-automated live path has fired end-to-end in a real deployment rather than only via offline analysis or an isolated unit call.
+
+**This specific, named cost is fixed**, cleanly and additively.
+
+#### 6.45.2 Gap A's broader context — `poll_once()`'s overall cycle time — is NOT fixed, and a concrete new root cause was found
+
+§6.44.5 flagged `poll_once()` not completing within a 300s timeout as a separate, broader concern "unrelated to and not caused by this task's new code." This round measured it directly rather than assuming it would improve: a fresh `AlertEngine` instance against the real production VM, `eng.poll_once()`, real wall-clock timing.
+
+**Result: 3686.63s (61.4 minutes) for one poll cycle.** The windowing fix in §6.45.1 removed `_check_proxy_wait`'s own disproportionate contribution, but did nothing for the loop's overall cost, because the real bottleneck is structural, not localized to one check.
+
+Root cause, confirmed live rather than assumed: every one of the 6 worker nodes is concurrently running **4-5 separate `node_aggregator_ref.py` processes**, launched from **4 different old checkouts** still present on disk (`beta_pipeline_audit_20261103`, `slurm_env_robustness_20261107`, `capstone_validation_20261109`, this round's own `capstone_final_20261110`), every one of them still alive, still polling its node's real dump directory, and still pushing to the **same shared VM** (`login-0:8428`) under the **same hostname labels** (confirmed via `pgrep -af node_aggregator_ref.py` on all 6 nodes — identical pattern on every node). `run_aggregator_supervised.sh`'s own auto-restart-on-exit design (by its own top-of-file comment, intentional — "relaunches it if it ever does exit... indistinguishable from genuinely persistent for any real deployment") means none of these processes from stale checkouts ever naturally terminates; they simply accumulate, one generation per prior validation round, forever. This means every live query this project's alerting layer makes — not just `_check_proxy_wait`'s — is scored against a VM time series that has been written to concurrently, under identical labels, by multiple overlapping aggregator generations for weeks, which is a highly plausible (though not exhaustively isolated) explanation for both this 61-minute poll cost and the already-documented "accumulated 77-comm/103-bucket discovery state" from §6.44.5.
+
+This is the exact same structural problem already documented for `alert_engine.py` in the README ("`run.sh`/`self_test.sh` can silently validate against a stale `alert_engine.py`"), except confirmed here to also apply to `node_aggregator_ref.py`, on the write side, on every node, and with no equivalent documented detection/remedy anywhere in this project today. **Fixing it is out of this round's stated scope** (the two named gaps were the unwindowed push and dump-file disk growth, not aggregator-instance governance) — reported here as a new, real, POC-blocking finding, not attempted.
+
+**Honest verdict on Gap A**: the specific, previously-measured 82MB/65MB/4.8s cost is fixed. The broader "is a poll cycle fast enough to be a live monitoring system" question is **not** fixed — a 61-minute cycle cannot be called live for any real deployment, and the dominant cause now has a name (stale multi-checkout aggregator contamination) rather than being a vague "accumulated state" concern.
+
+#### 6.45.3 The long-duration MoE re-trigger question — closed, and the answer is no
+
+§6.44.4 found the raw signal fades from z≈10 to z≈1.7 over ~10 minutes and did not know whether this was an artifact of the unwindowed, noisy per-interval data the live check was querying at the time. This round re-ran the trace against the now-windowed data, sampling the live, deployed `_check_proxy_wait`'s own underlying z/mm every ~2.5 minutes across a 100ms-fault job that ran for over an hour (`var/moe_longfault_windowed`, `job_start=2026-11-10T09:38:21Z`, `role_rank=4`):
+
+| job elapsed | z (role_rank=4) | mm |
+|---|---|---|
+| 1.2 min | — | fired real `[STRAGGLER-INCIDENT]`, severity_ratio=12.41 |
+| 4.35 min | 11.68 | — |
+| 6.8 min | 8.74 | — |
+| 9.3 min | 6.71 | — |
+| 11.8 min | 1.80 | — (drops below `PROXY_WAIT_Z_THRESH=5.0` here) |
+| 14.3 min | 1.58 | |
+| 16.8 min | 1.37 | |
+| 19.3 min | 1.26 | |
+| 21.8 min | 1.40 | |
+| 24.3 min | 1.40 | |
+| 26.8 min | 1.41 | |
+| 29.3 min | 1.43 | |
+
+Across the entire alert summary log for this job's full real duration (60+ minutes, confirmed still `RUNNING` in `squeue` throughout the monitored window, later completed on its own), there is exactly **one** `STRAGGLER-INCIDENT` for this fault — the one at 1.2 minutes. It never fires again; z settles onto a flat, sub-threshold plateau (~1.3-1.4) rather than continuing to decay or ever recovering.
+
+**This answers the task's explicitly-called-out most-important open question: windowing fixed the overhead problem, but did NOT fix the reliability problem.** The live detector still only reliably sees this fault in roughly its first ~10 minutes; a 20-30+ minute job at this fault magnitude produces exactly one alert near the start and silence for the rest of its run, not a signal that "reliably re-triggers across the full job." The drift mechanism itself remains un-root-caused (same open question as §6.44.4) — the plateau value differs slightly from the raw per-interval signal's own asymptote, consistent with the windowing averaging in a widening pool of now-larger measured wait times, but this was not isolated further this round.
+
+#### 6.45.4 Gap B (orphan dump-file cleanup): fully closed, including a real, live, in-situ deletion event
+
+An always-on sweep (independent of `logrotate`'s availability) added to `run_aggregator_supervised.sh`: every 60s, for every `*-pidNNNN.log`/`*-pidNNNN.jsonl` in a node's dump directory, if the owning PID is confirmed dead (`kill -0` fails) AND the file's mtime is at least `ORPHAN_GRACE_S=600` seconds old, delete it. The grace period exists so a job that just exited still gets drained to EOF by `poll_files()` and leaves a window for manual postmortem before removal; by the time a file is ever eligible, VM already holds its data durably.
+
+Validated three ways:
+1. **Unit/synthetic edge cases**: dead-recently (not yet past grace), dead-and-past-grace, alive, PID-reuse-on-a-dead-file-name — all classified correctly.
+2. **Dry run against real accumulated state**: a real worker-0 dump directory holding ~600 files (35GB) from past, long-dead jobs — 100% correct dead/alive classification against real `/proc`.
+3. **Live, in-situ, this round** (not merely dry-run): worker-4's own supervisor log shows real deletions firing during this round's own trials, e.g.:
+   ```
+   [supervisor:worker-4] [ORPHAN-DUMP-CLEANUP] removed .../worker-4-pid1823526.log (dead pid=1823526, age=611s, size=21948055882B)
+   [supervisor:worker-4] [ORPHAN-DUMP-CLEANUP] removed .../apptiming-worker-4-pid1823522.jsonl (dead pid=1823522, age=617s, size=31558430B)
+   ```
+   Eight dump files (sizes 18.9-22.0 GB each) plus their matching `apptiming-*.jsonl` siblings were removed automatically, at the correct grace-period age, from a single dead job on a single node — real, not simulated, evidence of bounded disk usage.
+
+As a related, incidental confirmation: during this same long soak window, worker-4's **aggregator process itself crashed** (the PID being RSS-monitored, 1539513, went dead) and `run_aggregator_supervised.sh`'s own auto-restart loop correctly relaunched it under a new PID (1925218) with no manual intervention — the supervisor's "indistinguishable from genuinely persistent" design claim held under a real crash, not just in theory. The original crash's cause was not root-caused (out of this round's scope), but the auto-recovery behavior it exercised is itself a real, positive, now-confirmed-live finding.
+
+**Honest verdict on Gap B**: fully closed, now with real live-deletion evidence, not just a dry run.
+
+#### 6.45.5 Full-scale (48-GPU) matrix progress this round, and new findings along the way
+
+Within this round's realistic time/cluster budget (one job at a time, per every launcher's own queue-check; several trials individually ran 30-90+ real minutes), the following was validated or newly found at genuine 48-GPU scale (beyond what §6.6-6.44 already covered and is not re-litigated here):
+
+- **nanoGPT DDP**: 1 fault trial (via `self_test.sh`, exact rank match, cross-validated against both the stale ambient checkout's engine and this round's own dedicated instance), a full **20,000-step healthy soak** (zero crashes, `TORCHRUN_EXIT: 0` on all 6 nodes), and a new **compute-bound fault trial** (2000 iters, rank 8) — correctly attributed (`stat=mean_tiered`, exact rank match).
+- **New fault-injection mechanism — `STRAGGLER_FAULT_KIND=compute`**: a GPU-busy matmul loop (`torch.randn(2048,2048)` repeatedly squared, `torch.cuda.synchronize()`-timed), added at the same call sites as the existing `time.sleep()` injection in both `workloads/nanogpt/train.py` and `workloads/megatron/Megatron-LM/pretrain_gpt_straggler.py`, same `STRAGGLER_SLEEP_MS`/`STRAGGLER_TARGET_RANKS` knobs, default `sleep` preserves all existing behavior (33/4 and 28/1 insertions/deletions respectively, syntax-checked clean). Live timing-accuracy confirmed (0.1/0.5/1.0s requested → 0.100/0.500/1.000s actual). Validated detecting correctly on nanoGPT this round; built and syntax-checked, but not yet trial-run, on Megatron.
+- **New, real, confirmed detection gap — Megatron DP (TP=1/PP=1/DP=48)**: this shape has **no reliable Slurm-side detection path** for a genuine fault at full 48-member scale. `_check_mean_tiered`'s own docstring documents it as a K8s-hierarchical-AllReduce-specific check that is "a silent no-op for every Slurm workload" on flat-ring topology — confirmed, not guessed, directly from its own code. The untiered `_check_mean` is the only thing left to catch this shape, and it is already independently documented elsewhere in this file as noisy/unreliable at large role_n. 1 healthy + 2 fault trials this round (300/300/1500 iters) produced zero reliably-attributed alerts naming the true injected rank.
+- **New, real finding — a single rank's crash can block the whole allocation**: a Megatron DP fault trial (1500 iters) hit a SIGSEGV on an un-injected rank (worker-3/rank27, `ChildFailedError`, exitcode -11; a "process group has NOT been destroyed" warning preceded it by ~11s, consistent with a post-training-teardown crash after real work completed, not a training-time failure) — not caused by, and on a different rank than, the injected fault. The underlying Slurm job stayed `RUNNING` for 10+ minutes afterward (never self-released), blocking the single-job-at-a-time cluster until manually `scancel`'d. Not root-caused further this round; reported as a genuine, newly-confirmed hang-safety-adjacent concern, not fixed.
+- **New, real finding — a live, stale `alert_engine.py` instance, not hypothetical**: the README already documents the "process-name-only, no code-identity check" gap (§ Known limitations). This round found a concrete, live instance of it: an `alert_engine.py` running since Oct 7, 53 commits behind, with a genuinely different `alert_engine.py`/`thresholds.py` (confirmed via `sha256sum` and full-file diff) — actively running and actively interfering with this round's own validation output until worked around via the README's own documented remedy (a separate, dedicated instance, not killing the ambient one).
+- **New data point — memory growth over a real multi-hour window is higher than previously documented, in this specific heavily-loaded environment**: the already-documented "+5-7 MB/hr aggregator, +4 MB/hr alert engine" figures (§ Known limitations) were measured over a 107-minute soak. Sampling this round's own dedicated `alert_engine.py` (PID 3128447) and worker-0's aggregator (PID 2297746) RSS over a ~7-hour window gave a different shape: the aggregator ramped from 31MB to ~250-266MB within the first ~1.5 hours, then **plateaued** for the remaining ~5.5 hours (bounded, not a leak, in this sample) — but the alert engine grew roughly continuously across the whole window, 48.7MB → 191.3MB (~20 MB/hour sustained, 3-5x the previously-documented rate), with no plateau observed in this sample. Consistent with, though not proven to be caused by, the same accumulated-discovery-state mechanism implicated in §6.45.2's 61-minute poll cost — more real history (comms, buckets, ranks, jobs) accumulated in this specific long-running, multi-checkout-contaminated environment plausibly drives both the slower polls and the faster growth. Not conclusively root-caused; reported as a new, real data point that revises the prior figure's applicability to a busy, long-lived deployment.
+
+#### 6.45.6 What this round deliberately did not attempt
+
+Given the above two headline results (the overall poll cycle time and the MoE re-trigger reliability — the two questions this round's own charter called "the single most important finding this capstone could produce") came back as genuine, unresolved negatives, and given this cluster's single-job-at-a-time constraint makes every additional full-scale trial a 30-90+ minute real-time cost, the remaining originally-scoped items (MoE CPU-pinning A/B/C, 5 back-to-back fault trials, a dedicated hang-safety stress campaign, a third independent log-readability round) were **not attempted this round** — a deliberate scope decision made and confirmed with the requester mid-round, not a silent omission. They remain open for a future round.
+
+#### 6.45.7 Honest final verdict, Slurm side, this round
+
+**Not yet POC-ready**, specifically because of two confirmed, real findings this round's own stated purpose was to test for:
+1. A real poll cycle takes **61.4 minutes** in this environment — far too slow for "live" monitoring, root-caused this round to a concrete, fixable-in-principle cause (stale multi-checkout aggregator contamination polluting the shared VM on every node), not fixed this round.
+2. The live MoE straggler signal, even after the windowing fix fully resolved the overhead question, **fires exactly once near a job's start and then goes silent for the rest of the job** — it does not reliably re-trigger, contradicting what would be required to trust it as a continuously-running production check.
+
+**Confirmed working, this round, with real evidence**: the windowing fix itself (90x payload reduction, 76-122x per-call speedup, a correct real-deployment `[STRAGGLER-INCIDENT]` fire); the orphan dump-file cleanup (live deletions observed, not just dry-run); the aggregator crash-auto-restart design; compute-bound fault injection (new mechanism, both workloads, nanoGPT trial-validated); nanoGPT DDP and 20k-step healthy soak at 48 GPUs; everything §6.6-6.44 already established for Megatron TP4/PP4/DP3, FSDP, CPU pinning, and MoE detection's offline path (unchanged, not re-litigated).
+
+**New, real, not-previously-documented gaps this round surfaced**: Megatron DP (TP=1/PP=1/DP=48) has no reliable Slurm detection path at all; a non-fault-related rank crash can block the shared cluster allocation for 10+ minutes; stale `node_aggregator_ref.py` instances from old checkouts accumulate on every node exactly like the already-documented stale-`alert_engine.py` gap, and plausibly explain much of this round's own worst numbers; real-world sustained memory growth in a busy environment runs 3-5x the previously-documented rate for the alert engine.
+
+Per this round's own explicit instruction: reported honestly regardless of outcome. The two gap-fixes were implemented correctly and are real, validated, additive progress — but they do not, by themselves, make this pipeline ready for a live, customer-facing 48-GPU MoE POC today.
+### 6.46 MoE live-detection K8s closeout: long-duration validation, parity, two real bugs found and fixed (2026-11)
+
+#### 6.46.1 Workspace state mismatch found and fixed (Step 0)
 
 The K8s workspace PVC had the old minimal guard (`09824f0e` — `if "coll_perf" not in d: return`, silently skipping proxy_peer_wait records) rather than the full `4ee1695`/`9c9b0046` fix that forwards them into real `agg_proxy_peer_wait_*` metrics. Fixed by running a workspace-update job. After update: all three key files (`alerting/alert_engine.py`, `aggregator/node_aggregator_ref.py`, `alerting/thresholds.py`) confirmed byte-for-byte identical between K8s workspace and local repo (Slurm). File hash signatures:
 - alert_engine.py: `afdc967bc900a623` (first 1000 lines)
 - node_aggregator_ref.py: `8a769b51e3eb1bbc`
 - thresholds.py: `774b2109d8640fbf`
 
-#### 6.44.2 Parity read-through: all checks confirmed identical across platforms
+#### 6.46.2 Parity read-through: all checks confirmed identical across platforms
 
 Every item on the parity list checked directly against deployed K8s code and local repo (Slurm):
 
@@ -6579,13 +6673,13 @@ Every item on the parity list checked directly against deployed K8s code and loc
 
 No divergence found. All items confirmed.
 
-#### 6.44.3 Bug found and fixed live: `KeyError: 'proxy_wait'` in `_emit`
+#### 6.46.3 Bug found and fixed live: `KeyError: 'proxy_wait'` in `_emit`
 
 After `_check_proxy_wait` builds a [STRAGGLER-INCIDENT] header, it calls `build_finding_for_alert()` which calls `classifier.py`'s `build_single_rank_finding()`. `classifier.py`'s `STAT_TO_TIMESCALE` table only knows `"mean"`, `"cv"`, and `"outlier_count"`. `stat_name="proxy_wait"` raised `KeyError: 'proxy_wait'` immediately after the incident header was printed — same failure class as §6.5.3's `mean_tiered` bug. Fix: extend the existing `classifier_stat` mapping from `"mean_tiered" → "mean"` to also cover `"proxy_wait" → "mean"`. One line, confirmed by analogy with the existing fix. The printed `stat=proxy_wait` label in the header is unchanged; only the internal classifier dispatch is affected. `classifier.py` itself is unchanged.
 
 **Evidence**: confirmed live from K8s alert engine log during the 300-step fault trial: `[STRAGGLER-INCIDENT] ... stat=proxy_wait ...` immediately followed by `[CHECK-FAILED] proxy_wait args=(): KeyError: 'proxy_wait'`. The incident header was printed but no `[ALERT]` body was built.
 
-#### 6.44.4 Log readability audit of `_check_proxy_wait` output — fix applied
+#### 6.46.4 Log readability audit of `_check_proxy_wait` output — fix applied
 
 **Actual alert output (before fix):**
 ```
@@ -6596,7 +6690,7 @@ After `_check_proxy_wait` builds a [STRAGGLER-INCIDENT] header, it calls `build_
 
 **Fix applied:** Added `straggler_direction=lowest_recv_wait_IS_straggler[physics: late-to-post-recv,peers-waited]` as a new header field on `proxy_wait` alerts only. This directly answers the reader's natural question about which direction is anomalous without touching any detection logic. Same pattern as `triage=` and `fired_at=` additions from prior log-readability rounds.
 
-#### 6.44.5 Long-duration validation results
+#### 6.46.5 Long-duration validation results
 
 **300-step fault run (100ms, rank 4), EXIT=0 both nodes:**
 
@@ -6625,7 +6719,7 @@ Z-score timeline from VM (90s rolling window, both nodes):
 - Full run complete: z=0.00 (no fire)
 - Zero false positives across the full run.
 
-#### 6.44.6 Practical reliability assessment (Known Limitation, stated precisely)
+#### 6.46.6 Practical reliability assessment (Known Limitation, stated precisely)
 
 The live `_check_proxy_wait` as currently deployed and configured:
 
@@ -6640,7 +6734,7 @@ The live `_check_proxy_wait` as currently deployed and configured:
 
 None of these are applied here. This is documented as a precisely-bounded limitation, not vague "needs further work."
 
-#### 6.44.7 Scripts, commands, and log paths
+#### 6.46.7 Scripts, commands, and log paths
 
 - Workspace update: `kubectl apply -f /tmp/ws_job.yaml` → `ws-full-update` job
 - Fault trial (300 steps): `k8s/run_moe_k8s.sh 300 29813 dump 0 ""` → `moe-1794299793`

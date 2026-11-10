@@ -163,6 +163,33 @@ if ddp:
     # chooses, and deletes it to end the fault -- full external control,
     # zero change to the job's own process.
     _straggler_trigger_file = os.environ.get('STRAGGLER_TRIGGER_FILE', '/tmp/straggler_trigger.json')
+    # Capstone fault-type diversity (2026-11): every existing trial in this
+    # project uses time.sleep() -- an idle Python-thread delay that leaves
+    # the GPU itself untouched. STRAGGLER_FAULT_KIND=compute is an
+    # additive alternative MECHANISM at the exact same call sites, same
+    # STRAGGLER_SLEEP_MS duration knob, same targeting/phase/mode
+    # machinery -- only the delay itself changes, to a real, repeated GPU
+    # matmul that keeps the target rank's GPU genuinely busy for the
+    # requested duration, so detection can be confirmed against a
+    # compute-bound slowdown, not only an idle one. Default 'sleep'
+    # preserves every existing trial's exact behavior unchanged.
+    _straggler_fault_kind = os.environ.get('STRAGGLER_FAULT_KIND', 'sleep')
+    _straggler_compute_tensor_cache = {}
+
+    def _straggler_delay(seconds, delay_device):
+        if seconds <= 0:
+            return
+        if _straggler_fault_kind != 'compute':
+            time.sleep(seconds)
+            return
+        t = _straggler_compute_tensor_cache.get(delay_device)
+        if t is None:
+            t = torch.randn(2048, 2048, device=delay_device, dtype=torch.float32)
+            _straggler_compute_tensor_cache[delay_device] = t
+        start = time.time()
+        while time.time() - start < seconds:
+            t = t @ t
+            torch.cuda.synchronize(delay_device)
 
     def _resolve_file_trigger(rank):
         if _straggler_mode != 'file_trigger':
@@ -427,7 +454,7 @@ while True:
             if _straggler_mode == 'warmup':
                 _straggler_fire = _straggler_should_fire(iter_num)
             if _straggler_fire:
-                time.sleep(_straggler_sleep_s)
+                _straggler_delay(_straggler_sleep_s, device)
         with ctx:
             logits, loss = model(X, Y)
             loss = loss / gradient_accumulation_steps # scale the loss to account for gradient accumulation
@@ -449,7 +476,7 @@ while True:
             elif _straggler_mode == 'warmup':
                 _straggler_fire = _straggler_should_fire(iter_num)
             if _straggler_fire:
-                time.sleep(_straggler_sleep_s)
+                _straggler_delay(_straggler_sleep_s, device)
         # backward pass, with gradient scaling if training in fp16
         scaler.scale(loss).backward()
     # clip the gradient
@@ -461,7 +488,7 @@ while True:
         if _straggler_mode == 'warmup':
             _straggler_fire = _straggler_should_fire(iter_num)
         if _straggler_fire:
-            time.sleep(_straggler_sleep_s)
+            _straggler_delay(_straggler_sleep_s, device)
     # step the optimizer and scaler if training in fp16
     scaler.step(optimizer)
     scaler.update()

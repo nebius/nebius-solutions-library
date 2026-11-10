@@ -282,21 +282,37 @@ detail; these are structural, currently-accepted gaps, not bugs waiting to be fi
    confirmed result) for the full history and evidence. **Detection today still requires a manual,
    offline analysis step** (`moe_signal_check.py`) — a live, automated scorer/firing function
    (`alert_engine.py`'s `_check_proxy_wait`) was built and is confirmed *mathematically correct*
-   (reproduces the manual z-score exactly, zero false positives, no crashes) in isolated testing,
-   but NOT yet confirmed to reliably fire throughout a production job's lifetime. K8s validation
-   (§6.44) confirmed: (1) `_check_proxy_wait` poll cost is 0.12–0.23s on K8s (not the >300s
-   Slurm problem — fresh cluster, less accumulated state); (2) the check fires reliably during
-   NCCL communicator setup (first ~4 minutes of wall-clock time) with z=6.08–6.35 on K8s,
-   matching Slurm's magnitude when measured with the same live 90s window; (3) after the startup
-   phase, the signal fades to z≈4.4 during the training iteration phase of a 300-step job and does
-   NOT re-trigger. This means: for a persistent fault present from job start, the check fires
-   during startup and is then silent for the remainder of the job. A manual offline analysis
-   (`moe_signal_check_k8s.py`) remains the only confirmed-reliable end-to-end path. Two real bugs
-   found and fixed during K8s validation: (a) `KeyError: 'proxy_wait'` in classifier dispatch (fix:
-   map `proxy_wait → mean`, same pattern as `mean_tiered`); (b) log readability — added explicit
-   `straggler_direction=` field to alert header (the inverted direction is counter-intuitive and
-   misread without it). See DESIGN_NOTES.md §6.44 for the full timeline, parity confirmation, and
-   bounded-limitation statement.
+   (reproduces the manual z-score exactly, zero false positives, no crashes) in isolated testing.
+   A follow-up capstone round (2026-11, Slurm) fixed the specific 82MB/65MB-per-query overhead
+   §6.44 found (windowing `agg_proxy_peer_wait_*` at the aggregator before push, mirroring
+   `score_mean_window`'s own pattern — confirmed ~90x smaller payload, 76-122x faster per-call cost)
+   and confirmed the real, continuously-running engine now *does* fire a correct, automated
+   `[STRAGGLER-INCIDENT]` naming the true rank within 1.2 minutes of a real job's start — genuine,
+   additive progress. But two things this fix did **not** resolve on Slurm, confirmed by direct
+   re-measurement rather than assumed: (1) a real `poll_once()` cycle in this environment takes
+   **61.4 minutes** — root-caused to multiple stale `node_aggregator_ref.py` instances from old
+   checkouts still running on every node, polluting the shared VM under identical hostname labels
+   (the same class of problem as the stale-`alert_engine.py` gap documented below, but on the write
+   side); (2) the raw signal itself still fades from z≈10 at job start down to a flat, sub-threshold
+   plateau (~z≈1.4) by roughly the 10-12 minute mark and **does not re-trigger for the rest of a
+   60+-minute job** — exactly one alert fires, near the start, then silence. A separate K8s closeout
+   round (2026-11) confirmed the same shape on that platform with a fresh, lightly-loaded cluster:
+   `_check_proxy_wait`'s own poll cost there is 0.12-0.23s (not Slurm's 61.4-minute problem — far
+   less accumulated state), the check fires reliably during NCCL communicator setup (first ~4
+   minutes, z=6.08-6.35, matching Slurm's magnitude on the same live 90s window), but after startup
+   the signal fades to z≈4.4 during the training-iteration phase of a 300-step job and does **not**
+   re-trigger there either — the same fundamental fade/no-re-trigger behavior independent of poll
+   speed. Two real bugs were found and fixed during the K8s round: (a) `KeyError: 'proxy_wait'` in
+   classifier dispatch (fix: map `proxy_wait → mean`, same pattern as `mean_tiered`); (b) log
+   readability — added an explicit `straggler_direction=` field to the alert header (the inverted
+   direction is counter-intuitive and misread without it). **Net effect, both platforms: this is not
+   yet a reliable, continuously-firing production alerting path** — the overhead problem that
+   originally blocked Slurm is fixed, but the signal's own fade/no-re-trigger behavior is a platform-
+   independent property of the raw metric, not an artifact of poll speed. A manual offline analysis
+   (`moe_signal_check.py`/`moe_signal_check_k8s.py`) remains the only confirmed-reliable end-to-end
+   path on either platform. See DESIGN_NOTES.md §6.44 (original build), §6.45 (Slurm capstone
+   re-validation, full real numbers), and §6.46 (K8s closeout, parity confirmation, the two bug
+   fixes) for the complete evidence.
 
 - **Shape/strategy coverage (2026-11, DESIGN_NOTES.md 6.12-6.19):** MoE has a real, intermittent (1-in-3 observed)
   collective-participation hang on healthy runs, independent of the detector, not root-caused (6.12.1). Deep
@@ -427,8 +443,48 @@ detail; these are structural, currently-accepted gaps, not bugs waiting to be fi
   returned a plain **"I would not page off this alone"** — nothing in this pipeline reaches a tier an on-call
   engineer should act on unattended, which is the known-beta-limitation #1 above, not a presentation defect. See
   DESIGN_NOTES §6.26.
+- **Orphaned dump-file disk growth: RESOLVED (2026-11).** A dump file from a job whose owning process has already
+  exited never got touched by size-based rotation (it stops growing once the process exits). An always-on sweep in
+  `run_aggregator_supervised.sh`, independent of whether `logrotate` is installed, now removes a dump file once its
+  owning PID is confirmed dead (`kill -0` fails) AND it is at least `ORPHAN_GRACE_S=600` seconds old — the grace
+  period exists so a job that just exited still gets fully drained by `node_aggregator_ref.py`'s own
+  `poll_files()`, and so a human has a window to grab a raw file for postmortem, before it is ever removed.
+  Live-confirmed, not just dry-run: real deletions observed firing during 2026-11's capstone round (eight
+  18.9-22.0 GB dump files plus matching `apptiming-*.jsonl` siblings removed automatically from one dead job on
+  one node, at the correct grace-period age). See DESIGN_NOTES §6.45.4.
+- **`node_aggregator_ref.py` has the same "stale instance" gap as `alert_engine.py` (below), and it's live on this
+  cluster today.** Found 2026-11: every one of this cluster's 6 nodes is running 4-5 separate
+  `node_aggregator_ref.py` processes simultaneously, from 4 different old project checkouts, all still alive
+  (each was launched with an intentionally-long effective duration and auto-restarted by its own supervisor if it
+  ever exits — see `run_aggregator_supervised.sh`'s own top-of-file comment), all still pushing to the same shared
+  VM under identical hostname labels. This directly implicates a real, measured **61.4-minute** `poll_once()`
+  cycle time (see item 3 above and DESIGN_NOTES §6.45.2) — every live check queries a VM time series written
+  concurrently, under identical labels, by multiple overlapping aggregator generations going back weeks. No
+  detection/remedy for this exists today (unlike the `alert_engine.py` case below, which at least has a documented
+  workaround). Not fixed this round — explicitly out of the two gaps this round was scoped to close.
+- **Megatron DP (TP=1/PP=1/DP=48) has no reliable Slurm-side detection path at full 48-GPU scale.** Found 2026-11:
+  `_check_mean_tiered`'s own docstring documents it as a Slurm no-op by design (it exists specifically for K8s's
+  hierarchical AllReduce topology); the untiered `_check_mean` is the only remaining check for this shape, and it
+  is independently documented elsewhere in this list as unreliable at large `role_n`. 1 healthy + 2 fault trials
+  (300/300/1500 iters) produced zero reliably-attributed alerts naming the true injected rank. See
+  DESIGN_NOTES §6.45.5.
+- **A single rank's crash can leave the whole 6-node Slurm allocation stuck.** Found 2026-11: a SIGSEGV on an
+  un-injected rank during a Megatron DP fault trial (likely a post-training-teardown crash, not training-time;
+  distinct from, not caused by, the injected fault) left the underlying Slurm job `RUNNING` for 10+ minutes with no
+  self-release, blocking this cluster's single-job-at-a-time constraint until manually `scancel`'d. Not
+  root-caused further; reported as a genuine hang-safety-adjacent concern. See DESIGN_NOTES §6.45.5.
+- **Memory growth, revised for a real multi-hour, heavily-loaded window.** The "+5-7MB/hr aggregator, +4MB/hr
+  alert engine" figures above were measured over a 107-minute soak. A 2026-11 capstone round sampled RSS over a
+  real ~7-hour window on this same (stale-instance-contaminated, see above) cluster: the aggregator ramped from
+  31MB to ~250-266MB in the first ~1.5 hours, then plateaued for the remaining ~5.5 hours (bounded in this
+  sample); the alert engine grew roughly continuously the whole window, 48.7MB → 191.3MB — about 20MB/hour
+  sustained, 3-5x the previously-documented rate, with no plateau observed in this sample. Not conclusively
+  root-caused, but plausibly the same accumulated-discovery-state mechanism behind the 61.4-minute poll cost
+  above. See DESIGN_NOTES §6.45.5.
 
-**Final, consolidated, honest state (Slurm side): DESIGN_NOTES §6.24.**
+**Final, consolidated, honest state (Slurm side): DESIGN_NOTES §6.24; capstone re-validation and current honest
+verdict: DESIGN_NOTES §6.45.7 — not yet POC-ready, specifically on live MoE detection reliability and poll-cycle
+real-time performance, both root-caused this round to a concrete, named, fixable-in-principle cause.**
 
 ## Further reading
 

@@ -99,6 +99,16 @@ from detection import CV_TRIM_EACH_SIDE, STAT_WINDOW_SIZE  # noqa: E402
 
 CV_WINDOW = STAT_WINDOW_SIZE["cv"]
 MEAN_WINDOW = STAT_WINDOW_SIZE["mean"]
+# Capstone gap-fix #1 (2026-11): proxy_peer_wait records arrive via
+# Inspector's dump thread at NCCL_INSPECTOR_DUMP_THREAD_INTERVAL_
+# MICROSECONDS=500 (0.5ms) cadence -- pushing every one of those directly
+# to VM (S6.42's original design) is what produced the measured 82MB/65MB
+# per-90s-query payload (DESIGN_NOTES Sec. 6.44.5). Reusing MEAN_WINDOW's
+# own already-established value rather than inventing a new number, same
+# discipline this file already applies elsewhere (see STAT_WINDOW_SIZE's
+# own docstring) -- a window of 100 raw records cuts the push rate (and
+# therefore the query payload) by ~100x at the source.
+PROXY_WAIT_WINDOW = MEAN_WINDOW
 TRIM = CV_TRIM_EACH_SIDE
 PERSIST_WINDOW = 3
 PERSIST_REQUIRED = 3
@@ -634,6 +644,12 @@ class NodeAggregator:
         self.file_inodes = {}
         self._offset_checkpointed_at = 0.0
         self.rate_logged = set()
+        # Capstone gap-fix #1 (2026-11): (comm_id, phys_id, peer, direction)
+        # -> unconsumed list of (mean_us, max_us, count, ts_us) raw records,
+        # mirroring close_windows()'s own mean_unconsumed/cv_unconsumed
+        # pattern -- see _handle_proxy_peer_wait_record's docstring for why
+        # this exists (DESIGN_NOTES Sec. 6.44.5's real 82MB/65MB finding).
+        self.proxy_wait_unconsumed = {}
         self.push_buf = []
         self.n_records_seen = 0
         self.n_pushes = 0
@@ -1579,20 +1595,26 @@ class NodeAggregator:
         """S6.42-aggregator-proxy-fix -- additive, parallel to
         _handle_coll_perf_record() above, for the proxy_peer_wait record
         shape (see handle_record()'s own docstring for why this exists).
-        Pushes the SAME per-peer mean/max/count values Inspector's own
-        plugin already computed over its own dump interval as a new,
-        additive metric family -- no new aggregation/windowing logic
-        invented here (unlike coll_perf's mean/CV window machinery),
-        since this data already arrives pre-summarized per peer. Uses
-        the same member=pid/role_rank/role_n/gpu_slot/base_labels
-        convention every other metric in this file already uses, so
-        existing label-driven tooling (_query_gpu_slot(), etc.) resolves
-        these with zero new plumbing. count is pushed alongside mean so
-        a downstream consumer can compute a correctly count-weighted
-        mean across multiple pushed samples, exactly like this
-        project's own moe_signal_check.py analysis script already does
-        reading the raw dump files directly -- this is that same real
-        math, now fed by the production path instead of a bypass."""
+
+        Capstone gap-fix #1 (2026-11): the original version of this
+        function pushed every raw per-dump-interval record straight to
+        VM, one push per (member,peer,direction) per Inspector dump-
+        thread flush (every 500us) -- confirmed live to be the direct
+        cause of the 82MB/65MB-per-90s-query overhead finding
+        (DESIGN_NOTES Sec. 6.44.5), since no other metric family in this
+        file is pushed that densely. This now windows records the same
+        way score_mean_window/score_cv_window already do for coll_perf
+        (PROXY_WAIT_WINDOW raw records accumulated per (comm_id,phys_id,
+        peer,direction) key, then combined into ONE pushed sample) --
+        same metric names/labels as before, so _check_proxy_wait and the
+        offline moe_signal_check.py script need no changes at all.
+        Combining preserves the exact math either consumer already does
+        (both compute a count-weighted mean across samples): the
+        combined mean here is the count-weighted mean of the window's
+        raw means, and the combined count is the raw counts' sum, so a
+        weighted-mean-of-weighted-means downstream is identical to one
+        flat weighted mean over the original raw samples (max combines
+        via plain max, the correct combination for a true max)."""
         h = d["header"]
         m = d["metadata"]
         pw = d["proxy_peer_wait"]
@@ -1607,14 +1629,27 @@ class NodeAggregator:
         for direction in ("send", "recv"):
             for entry in pw.get(direction, []):
                 peer = entry["peer"]
+                key = (comm_id, phys_id, peer, direction)
+                buf = self.proxy_wait_unconsumed.setdefault(key, [])
+                buf.append((entry["mean_us"], entry["max_us"], entry["count"], ts_us))
+                if len(buf) < PROXY_WAIT_WINDOW:
+                    continue
+                window, self.proxy_wait_unconsumed[key] = buf[:PROXY_WAIT_WINDOW], buf[PROXY_WAIT_WINDOW:]
+                combined_count = sum(c for _, _, c, _ in window)
+                if combined_count > 0:
+                    combined_mean = sum(mv * c for mv, _, c, _ in window) / combined_count
+                else:
+                    combined_mean = st.mean(mv for mv, _, _, _ in window)
+                combined_max = max(mx for _, mx, _, _ in window)
+                last_ts_us = window[-1][3]
                 common = (f'comm="{comm_id}",member="{phys_id}",peer="{peer}",dir="{direction}",'
                           f'role_rank="{role_rank}",role_n="{role_n}",gpu_slot="{gpu_slot}",{self.base_labels()}')
                 self.push_buf.append((f'agg_proxy_peer_wait_mean_us{{{common}}}',
-                                       entry["mean_us"], ts_us // 1000))
+                                       combined_mean, last_ts_us // 1000))
                 self.push_buf.append((f'agg_proxy_peer_wait_max_us{{{common}}}',
-                                       entry["max_us"], ts_us // 1000))
+                                       combined_max, last_ts_us // 1000))
                 self.push_buf.append((f'agg_proxy_peer_wait_count{{{common}}}',
-                                       entry["count"], ts_us // 1000))
+                                       combined_count, last_ts_us // 1000))
 
     def maybe_log_rate(self, comm_id, bucket, s):
         key = (comm_id, bucket)
