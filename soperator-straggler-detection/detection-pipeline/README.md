@@ -190,8 +190,15 @@ Run everything from the login node. Allow about 30 minutes plus the NCCL build (
    informational. Any non-zero exit means stop and read the message above it.
 3. **Build NCCL >= 2.32.3 for full CPU pinning** (optional; without it the dump thread is still pinned)
    ```bash
-   pinning/nccl/fetch_build_nccl.sh --dest /root/nccl-2.32.3     # a path every compute node can read
+   pinning/nccl/fetch_build_nccl.sh
    ```
+   No `--dest` needed for a normal checkout: the script's own default (`pinning/nccl/build-<tag>`, git-ignored,
+   already under this package root and therefore already on the shared filesystem every compute node mounts) is
+   correct as-is. **Real bug found and fixed (2026-11, capstone validation):** an earlier version of this step
+   told you to pass `--dest /root/nccl-2.32.3` — on a non-root checkout (the common case) this fails immediately
+   with `mkdir: cannot create directory '/root': Permission denied`, a confusing failure for a step billed as
+   optional-but-safe. Only pass `--dest` if you specifically need the build somewhere other than this package's
+   own tree.
    Allow 10-20 minutes. Success ends with `version=2.32.3 lib=... -> resolved mode=full` and
    `[nccl] OK: recorded <dir> in pinning/.nccl_override_dir` (8.5 minutes in the test run). On a GPU-less login node add
    `--gencode "-gencode=arch=compute_90,code=sm_90"` (H200/H100; use your GPU's arch).

@@ -1,0 +1,64 @@
+# S6.42-dump-disk-fix -- real, standard logrotate config for the
+# Inspector plugin's own raw per-rank dump files (var/dump*/worker-N/
+# worker-N-pidNNNNN.log), confirmed to previously have NO rotation
+# anywhere: the aggregator (node_aggregator_ref.py's poll_files()) only
+# ever reads these files forward from a tracked byte offset -- it never
+# deletes, truncates, or rotates what it has already consumed. The
+# project's own existing [DUMP-DISK-WARN]/[DUMP-DISK-CRITICAL] alerts
+# already monitor for this (see alert_engine.py), but that is detection,
+# not remediation -- their own wording ("consider clearing old dumps")
+# confirms clearing was always a manual operator action, never automatic.
+# Found live (2026-11, capstone validation): a single self_test.sh smoke
+# test run filled a 91GB filesystem to 100% and crashed a separate,
+# already-running alert_engine.py instance (OSError: No space left on
+# device) -- this is a real production-blocking gap, not a hypothetical.
+#
+# copytruncate is REQUIRED, for the SAME reason as alert_engine_
+# supervised.logrotate and aggregator_supervised.logrotate: confirmed
+# directly in the Inspector plugin's own source (inspector-plugin/json.cc)
+# that each dump file is opened once via fopen(path, "w") and held open
+# for that process's entire lifetime. A plain rename-based rotation
+# would leave that already-open fd writing forever into the renamed
+# (now-untracked) old file -- the plugin never reopens a path on its
+# own, exactly like the shell `>>` redirects the other two configs
+# already document this same requirement for. copytruncate truncates
+# the ORIGINAL path in place (same inode); node_aggregator_ref.py's own
+# poll_files() ALREADY has to handle exactly this shape of event for an
+# unrelated reason (PID reuse against the same dump path also calls
+# fopen(path, "w"), which truncates in place) -- its shrink-guard
+# (st_size < known_offset -> reset offset to 0, logged as
+# [DUMP-FILE-TRUNCATED]) was already safe for this before this fix
+# existed; this just makes the TRIGGER (a truncate-in-place) a deliberate,
+# bounded, scheduled event instead of an unbounded-growth incident. The
+# guard's own documented safety property holds unchanged: at most some
+# already-seen content gets reprocessed once more, never skipped.
+#
+# size 300M / a 60s check loop (NOT the 300s loop the other two configs
+# in this directory use): real reasoning, not copied defaults. Measured
+# live against this project's own new MoE proxy-wait capture (S6.41)
+# under real fault-trial load: ~0.28 GB/min of growth on a SINGLE rank's
+# dump file (3.0GB over 652s, one worker-0 rank, 100ms-fault nanoGPT
+# self-test) -- roughly 17x the growth rate that justified the existing
+# 50MB/300s pattern for alert_engine_supervised.log. At the measured
+# rate, a 300s check interval would let a single file reach ~1.4GB
+# before the next check even started; checking every 60s instead bounds
+# the worst-case overshoot past the 300M threshold to roughly one
+# interval's worth of growth (~280MB), for a worst-case real per-file
+# ceiling around ~600MB -- two orders of magnitude below the 62GB this
+# fix exists to prevent, not just "better than nothing."
+#
+# rotate 1: this is transient working data by design, not a retained
+# log -- the aggregator has already turned anything rotated out into
+# durable metrics in VictoriaMetrics before a rotation would ever be
+# needed to free space, and the one kept, compressed copy is enough
+# margin for a brief postmortem without meaningfully adding back the
+# disk pressure this fix exists to remove.
+__DUMP_GLOB__ {
+    size 300M
+    rotate 1
+    copytruncate
+    missingok
+    notifempty
+    compress
+    delaycompress
+}

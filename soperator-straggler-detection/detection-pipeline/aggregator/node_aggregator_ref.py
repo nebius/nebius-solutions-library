@@ -1403,10 +1403,34 @@ class NodeAggregator:
                                mv, ts_us // 1000))
 
     def handle_record(self, d):
-        # proxy_peer_wait records (§6.41 Inspector fix) have no coll_perf/header/metadata.
-        # They are analyzed offline via moe_signal_check_k8s.py, not the live pipeline.
-        if "coll_perf" not in d:
-            return
+        """S6.42-aggregator-proxy-fix -- real, new record shape added by
+        the S6.41 Inspector proxy-thread peer-wait tracking fix: it fires
+        for ANY cross-node NCCL collective that uses the proxy thread
+        (not just MoE AllToAll -- confirmed live: a plain nanoGPT DDP
+        self-test dump had 13,769 proxy_peer_wait lines vs 1,731
+        coll_perf lines in the SAME file), written into the SAME *.log
+        dump files coll_perf records already come from. This method
+        previously assumed every record was coll_perf-shaped (unguarded
+        d["coll_perf"]) and crashed with KeyError on the first
+        proxy_peer_wait-only line it ever saw -- confirmed live this
+        session: crash-looped all 6 workers' aggregators continuously
+        (98-164 crash-relaunches each) from the moment ANY workload
+        produced any cross-node traffic, meaning essentially no real
+        metrics (coll_perf OR proxy_peer_wait) were durably reaching
+        VictoriaMetrics this whole time. Dispatches by which top-level
+        key the record actually carries, instead of assuming one shape;
+        the pre-existing coll_perf body below is moved into
+        _handle_coll_perf_record() completely unchanged."""
+        if "coll_perf" in d:
+            self._handle_coll_perf_record(d)
+        elif "proxy_peer_wait" in d:
+            self._handle_proxy_peer_wait_record(d)
+        # else: a record shape with neither key this aggregator currently
+        # understands -- ignored, not crashed on (forward-compatible with
+        # any future Inspector record type, the same discipline this fix
+        # itself exists to establish).
+
+    def _handle_coll_perf_record(self, d):
         h = d["header"]
         cp = d["coll_perf"]
         m = d["metadata"]
@@ -1550,6 +1574,47 @@ class NodeAggregator:
                                len(s.all_vals), ts_us // 1000))
 
         self.drain_windows(comm_id, bucket, ts_us)
+
+    def _handle_proxy_peer_wait_record(self, d):
+        """S6.42-aggregator-proxy-fix -- additive, parallel to
+        _handle_coll_perf_record() above, for the proxy_peer_wait record
+        shape (see handle_record()'s own docstring for why this exists).
+        Pushes the SAME per-peer mean/max/count values Inspector's own
+        plugin already computed over its own dump interval as a new,
+        additive metric family -- no new aggregation/windowing logic
+        invented here (unlike coll_perf's mean/CV window machinery),
+        since this data already arrives pre-summarized per peer. Uses
+        the same member=pid/role_rank/role_n/gpu_slot/base_labels
+        convention every other metric in this file already uses, so
+        existing label-driven tooling (_query_gpu_slot(), etc.) resolves
+        these with zero new plumbing. count is pushed alongside mean so
+        a downstream consumer can compute a correctly count-weighted
+        mean across multiple pushed samples, exactly like this
+        project's own moe_signal_check.py analysis script already does
+        reading the raw dump files directly -- this is that same real
+        math, now fed by the production path instead of a bypass."""
+        h = d["header"]
+        m = d["metadata"]
+        pw = d["proxy_peer_wait"]
+        comm_id = h["id"]
+        phys_id = m["pid"]
+        self.phys_comm_role[(comm_id, phys_id)] = (h["rank"], h["n_ranks"])
+        if phys_id not in self.phys_gpu_slot:
+            self.phys_gpu_slot[phys_id] = m.get("gpu_slot_index", -1)
+        ts_us = m["dump_timestamp_us"]
+        role_rank, role_n = self.role_labels(comm_id, phys_id)
+        gpu_slot = self.gpu_slot_label(phys_id)
+        for direction in ("send", "recv"):
+            for entry in pw.get(direction, []):
+                peer = entry["peer"]
+                common = (f'comm="{comm_id}",member="{phys_id}",peer="{peer}",dir="{direction}",'
+                          f'role_rank="{role_rank}",role_n="{role_n}",gpu_slot="{gpu_slot}",{self.base_labels()}')
+                self.push_buf.append((f'agg_proxy_peer_wait_mean_us{{{common}}}',
+                                       entry["mean_us"], ts_us // 1000))
+                self.push_buf.append((f'agg_proxy_peer_wait_max_us{{{common}}}',
+                                       entry["max_us"], ts_us // 1000))
+                self.push_buf.append((f'agg_proxy_peer_wait_count{{{common}}}',
+                                       entry["count"], ts_us // 1000))
 
     def maybe_log_rate(self, comm_id, bucket, s):
         key = (comm_id, bucket)

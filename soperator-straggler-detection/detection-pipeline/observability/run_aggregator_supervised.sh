@@ -56,6 +56,36 @@ else
   echo "[supervisor:$HOSTNAME_ARG] WARNING: logrotate not found -- $LOG will grow unbounded" | tee -a "$LOG"
 fi
 
+# S6.42-dump-disk-fix -- separate rotation for the Inspector plugin's own
+# raw dump files in $DUMP_DIR itself (previously never rotated at all --
+# see dump_files.logrotate's own comment for the real incident and the
+# real measured growth rate this is sized against). A SEPARATE, faster
+# loop than the aggregator-log rotation above: dump files grow roughly
+# 17x faster under real fault-trial load than the volume that justified
+# the 300s loop above, so reusing that same slower cadence here would
+# leave real, substantial overshoot before ever catching it.
+if command -v logrotate >/dev/null 2>&1; then
+  # Real bug found live (this session): logrotate rejects a relative glob
+  # path outright ("keyword 'var' not properly separated") -- DUMP_DIR is
+  # passed in relative (e.g. "var/dump/worker-0") by run.sh, unlike $LOG
+  # above which is always already absolute ($_PKG_ROOT/var/...). Resolved
+  # here the same way, rather than assuming the caller passes an absolute
+  # path. mkdir -p "$DUMP_DIR" above guarantees this cd succeeds.
+  DUMP_DIR_ABS="$(cd "$DUMP_DIR" && pwd)"
+  _GENERATED_DUMP_LOGROTATE="$_PKG_ROOT/var/dump_files_$HOSTNAME_ARG.logrotate.generated"
+  sed "s|^__DUMP_GLOB__ {|$DUMP_DIR_ABS/*.log {|" \
+    "$_HERE/dump_files.logrotate" > "$_GENERATED_DUMP_LOGROTATE"
+  (
+    while true; do
+      logrotate --state "$_PKG_ROOT/var/.logrotate_state_dump_$HOSTNAME_ARG" "$_GENERATED_DUMP_LOGROTATE" 2>>"$_PKG_ROOT/var/logrotate_errors.log"
+      sleep 60
+    done
+  ) &
+  echo "[supervisor:$HOSTNAME_ARG] dump-file rotation loop started (pid $!) for $DUMP_DIR, checking every 60s" | tee -a "$LOG"
+else
+  echo "[supervisor:$HOSTNAME_ARG] WARNING: logrotate not found -- $DUMP_DIR will grow unbounded" | tee -a "$LOG"
+fi
+
 echo "[supervisor:$HOSTNAME_ARG] starting, dump_dir=$DUMP_DIR vm_url=$VM_URL log=$LOG" | tee -a "$LOG"
 while true; do
   START_TS=$(date -u +%FT%TZ)
