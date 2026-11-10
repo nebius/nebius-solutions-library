@@ -6434,3 +6434,54 @@ Rank 4 is the LOWEST in both recv-wait and send-wait in ALL analyzed fault trial
 #### 6.42.5 Summary
 
 MoE AllToAll straggler detection transfers to K8s with the proxy-thread signal present and correctly attributed. The z-score magnitude is weaker than Slurm (z≈−2.2 vs −8 to −13) due to TCP transport's higher baseline noise, but the straggler rank is unambiguously the lowest in every analyzed trial. Healthy baseline is within ±1.1. The operational detection gap (z=−2.2 vs healthy ±1.1) is real but narrower than Slurm's (which would need a threshold of approximately −2.0 on this platform vs −4 to −5 on Slurm to maintain similar false-positive rates). Full production deployment on K8s MoE requires: (1) threshold calibration to this cluster's TCP transport variance, (2) the aggregator fix (already committed), (3) TRAINING_NCCL_LIB_PATH wired in the MoE manifest.
+
+**Update (§6.43):** §6.42's TCP attribution was wrong — NCCL_IB_DISABLE=1 in the MoE manifest was an incorrect inherited config, not a hardware constraint. See §6.43 for the corrected result with IB enabled.
+
+### 6.43 MoE K8s IB transport investigation: wrong inherited NCCL_IB_DISABLE, corrected (2026-11)
+
+#### 6.43.1 Why NCCL was using TCP, and why the fix is a one-line manifest change
+
+**Root cause**: the MoE manifest (`08-moe-job.yaml.tmpl`) had `NCCL_IB_DISABLE=1` with the comment "MoE's AllToAll expert routing also creates multiple NCCL process groups" — a factually incorrect claim. `model_moe.py` calls `init_process_group()` exactly once and `new_group()` zero times. MoE uses a single communicator, the same structure as FSDP. FSDP's manifest has a comment explicitly noting it does NOT set `NCCL_IB_DISABLE=1` for exactly this reason. The MoE manifest inherited the flag from Megatron's workaround without verifying that MoE faces the same multi-communicator HPC-X teardown hazard. It doesn't.
+
+**Fix**: removed `NCCL_IB_DISABLE=1` from `08-moe-job.yaml.tmpl`. The HPC-X SHARP plugin loads, accesses IB hardware via HPC-X's proprietary RDMA path (not the standard `/dev/infiniband/` character devices), and runs correctly for single-communicator workloads. No segfault, no regression.
+
+#### 6.43.2 Hardware confirmation
+
+Cluster nodes have **8 × mlx5 InfiniBand devices** (`mlx5_0` through `mlx5_7`, all `link_layer=InfiniBand`), each PIX-connected to one GPU. Real IB hardware. The character device path (`/dev/infiniband/`) is absent in pods (K8s RDMA device plugin not configured), but `ibv_devinfo`'s "No IB devices found" report is misleading — HPC-X has its own proprietary access path that doesn't require the standard uverbs character devices. Confirmed by real recv-wait: probe run without `NCCL_IB_DISABLE=1` shows ~33µs inter-node recv-wait (IB territory vs TCP's ~1200µs baseline).
+
+**MoE smoke test without `NCCL_IB_DISABLE=1`**: EXIT=0 on both nodes, 20 steps, no HPC-X segfault. Confirmed: single-communicator MoE is safe with HPC-X/IB.
+
+#### 6.43.3 Re-validation with IB enabled — full results
+
+**6 fault trials (3×20ms + 3×100ms), all EXIT=0 (both nodes):**
+
+| trial | fault | rank 4 recv-wait | group mean | recv z-score | ratio |
+|---|---|---|---|---|---|
+| f20ms_t1 | 20ms | 114µs | 3014µs | **−2.35** | 0.038 |
+| f20ms_t2 | 20ms | 117µs | 3020µs | **−2.36** | 0.039 |
+| f20ms_t3 | 20ms | 111µs | 3018µs | **−2.36** | 0.037 |
+| f100ms_t1 | 100ms | 119µs | 14157µs | **−2.38** | 0.008 |
+| f100ms_t2 | 100ms | 119µs | 14217µs | **−2.37** | 0.008 |
+| f100ms_t3 | 100ms | 122µs | 14162µs | **−2.37** | 0.009 |
+
+Rank 4 is the LOWEST in all 6 trials. Healthy band (non-straggler ranks): −0.11 to +0.76 in every trial. Attribution is correct and consistent.
+
+**Z-score comparison across transport and platform:**
+
+| platform | transport | 20ms z | 100ms z | straggler recv ratio (100ms) |
+|---|---|---|---|---|
+| Slurm (§6.41) | IB RDMA | −8 to −13 | −10 to −11 | ~0.001-0.004 |
+| K8s TCP (§6.42) | TCP | −2.15 | −2.23 to −2.24 | ~0.051 |
+| **K8s IB (this)** | **IB (HPC-X)** | **−2.35 to −2.36** | **−2.37 to −2.38** | **0.008-0.009** |
+
+**IB vs TCP on K8s**: z-score is similar (−2.35 vs −2.15 at 20ms) but the ratio_to_group is dramatically different (0.038 vs 0.207 at 20ms, 0.008-0.009 vs 0.051 at 100ms). IB's faster transport makes rank 4's absolute recv-wait even smaller (114µs vs 257µs) and makes the peers' waits proportionally larger — but both effects scale the SD proportionally, keeping the z-score similar.
+
+**Why z≈−2.35 and not Slurm's −8 to −13**: the z-score is capped by the high within-group variance of the non-straggler ranks. With 100ms fault on IB, group mean=14162µs but SD=5919µs (CV=42%). Non-straggler ranks vary from 13521µs to 18659µs — a 38% spread within the group. This spread comes from MoE's data-dependent, non-uniform AllToAll routing (token counts vary 10–100× across experts per step) combined with the asymmetric GPU-NIC topology (GPUs 0-3 on NUMA 0 connected to NICs 4-7, GPUs 4-7 on NUMA 1 connected to NICs 0-3). With 48 Slurm ranks, the larger peer pool and potentially more uniform routing produces tighter clusters of peer wait-times and therefore larger z-scores. This is a structural difference in workload topology, not transport.
+
+#### 6.43.4 Revised thresholds and operational guidance
+
+**Threshold for this cluster**: z < −2.0 (safely below the healthy band maximum of +1.01, with ~1σ margin). This applies equally to IB and TCP runs on this cluster.
+
+**What changed in Known Limitations (§6.42.5 update)**: TCP was not the fundamental constraint — removing `NCCL_IB_DISABLE=1` fixed the config bug, and IB transport is now confirmed working. The z-score gap vs Slurm's −8 to −13 is explained by within-group routing variance, not transport. The z≈−2.35 on IB and z≈−2.2 on TCP are both above the healthy band; they just have smaller separation than Slurm's clear signal due to the smaller cluster (2 nodes/16 GPUs vs Slurm's larger runs) and non-uniform MoE routing patterns.
+
+**Regression check**: nanoGPT, FSDP, and Megatron manifests are unchanged. The fix is scoped to `08-moe-job.yaml.tmpl` only. Megatron still has `NCCL_IB_DISABLE=1` (correctly, for its multi-communicator HPC-X teardown reason).
