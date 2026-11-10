@@ -6485,3 +6485,69 @@ Rank 4 is the LOWEST in all 6 trials. Healthy band (non-straggler ranks): −0.1
 **What changed in Known Limitations (§6.42.5 update)**: TCP was not the fundamental constraint — removing `NCCL_IB_DISABLE=1` fixed the config bug, and IB transport is now confirmed working. The z-score gap vs Slurm's −8 to −13 is explained by within-group routing variance, not transport. The z≈−2.35 on IB and z≈−2.2 on TCP are both above the healthy band; they just have smaller separation than Slurm's clear signal due to the smaller cluster (2 nodes/16 GPUs vs Slurm's larger runs) and non-uniform MoE routing patterns.
 
 **Regression check**: nanoGPT, FSDP, and Megatron manifests are unchanged. The fix is scoped to `08-moe-job.yaml.tmpl` only. Megatron still has `NCCL_IB_DISABLE=1` (correctly, for its multi-communicator HPC-X teardown reason).
+
+### 6.44 MoE live detection: a real scoring/firing function built and validated correct, overhead measured honestly — not cheap, and not yet proven reliable as a continuously-running deployment (2026-11)
+
+Until this round, MoE straggler DATA COLLECTION was live (`agg_proxy_peer_wait_mean_us`/`max_us`/`count` flow to VictoriaMetrics continuously, §6.41/§6.42's own aggregator fix) but DETECTION was a one-off query a human ran by hand after the fact (`moe_signal_check.py`) — no `[ALERT]` was ever produced automatically. This section covers building that missing piece, and reporting honestly what was and wasn't actually proven.
+
+#### 6.44.1 Architecture: alert_engine.py, not node_aggregator_ref.py — a deliberate deviation, reasoned
+
+The natural precedent for "a live scorer that fires an alert" in this codebase is `score_mean_window`/`score_cv_window`, which live inside `node_aggregator_ref.py` and score per-node-local data before pushing a pre-computed z/mm. This round's new check (`_check_proxy_wait`) instead lives in `alert_engine.py`, querying VictoriaMetrics directly and computing the peer comparison there — following `_check_alltoall_app_timing`'s own established precedent (the closest existing analog: another MoE-specific, raw-pre-aggregated-value metric) rather than the aggregator-side pattern. Reason: this metric's natural peer group ("every other rank on the same physical node," the project's own already-established "dense-cluster peers" grouping) is only guaranteed node-local by this specific cluster's 8-ranks-per-node topology, not in general — an aggregator-side implementation would only ever see its own node's local ranks, while querying VM directly sees every node at once for free, with zero new cross-node plumbing. `node_aggregator_ref.py`'s `handle_record()`/`_handle_proxy_peer_wait_record()`/`score_mean_window`/`score_cv_window` are entirely unchanged by this work (confirmed via diff — zero lines touched).
+
+Direction: the fault rank shows up as the LOWEST recv-wait in its peer group (§6.41.4's own mechanistic finding), the opposite of `score_mean_window`'s "worst = highest" convention — `_check_proxy_wait` picks the minimum, and `mm` is `peer_median / worst` (a ratio >1 meaning "peers are this many times slower than the outlier"), not the other way around.
+
+New, independently-calibrated thresholds (`thresholds.py`): `PROXY_WAIT_Z_THRESH=5.0`, `PROXY_WAIT_MM_THRESH=3.0` — grounded in this project's own real, already-measured numbers (healthy noise ≈1.1, 20/100ms fault z in [-8,-13], 1ms fault z≈-1.6 to -2.3, explicitly not targeted), not reused from `MEAN_Z_THRESH`/`APPTIMING_Z_THRESH` wholesale (those channels have different noise floors).
+
+#### 6.44.2 Unit-level correctness: confirmed exact
+
+Against a minimal harness reproducing the real deployed method with mocked VM responses shaped exactly like real `/api/v1/export` output:
+- **Exact reproduction**: the new scorer computes z=8.866 for rank 4 against real captured 100ms-fault data — bit-for-bit the same number the manual offline z-score computation gave in this same round's earlier re-validation (§6.41/commit `4ee16957`).
+- **Zero false positives**: 10 cycles of real healthy-noise-shaped data, zero emits.
+- **No crashes**: a 2-member communicator (undefined stdev case), empty/malformed rows (missing fields, non-numeric values, empty metric dicts) — all handled cleanly, zero exceptions, matching the established "require 3+ members" floor every other peer-relative check in this codebase already uses.
+- **Correct persistence behavior**: fires exactly once on a sustained fault (not repeatedly), and cleanly resets on recovery to healthy (confirmed: fault→healthy transition fires once, stays silent afterward, active-key set returns to empty).
+
+#### 6.44.3 A real bug found and fixed during end-to-end validation: bare instant query was too noisy
+
+The first implementation used a plain instant VM query (`_query_instant`, one "latest known sample" per series) — mirroring `_check_alltoall_app_timing` exactly. Measured live against a real, ongoing 100ms fault trial: this gave **z=1.10** at one moment, far below `PROXY_WAIT_Z_THRESH`, even though the SAME trial's full-job average gave z=8.87. Root cause: a single instant sample is one dump-interval's worth of data, and per-interval values for this metric vary considerably even under a constant fault (MoE's dynamic, data-dependent expert routing means which specific peers a rank talks to, and how much, shifts interval to interval).
+
+Fixed by switching to `/api/v1/export` over a `PROXY_WAIT_LOOKBACK_S` window (the same anti-staleness tool `_check_mean` already uses, for the same documented reason — `query_range`'s fixed grid can silently skip real samples at a fast window-close cadence), averaging all real raw samples in the window before scoring. Window size chosen by direct measurement on the same live trial, not guessed: 30s→z=5.04 (barely clears threshold, no margin), 45s→5.29, 60s→5.96, 90s→7.04, 120s→7.49. **90s** chosen: comfortable margin above both thresholds while still meaningfully faster than waiting for a whole job to finish.
+
+#### 6.44.4 A second, more important real finding: the signal itself fades over a job's duration
+
+Tracing z across an entire real 100ms-fault job's timeline (90s lookback window, sampled every 60s) revealed something the original whole-job-average validation could never have shown:
+
+| elapsed | worst (rank) | worst recv-wait | peer mean | z | mm |
+|---|---|---|---|---|---|
+| 60s | 4 | 177.8µs | 4019.9µs | 10.26 | 22.41 |
+| 300s | 4 | 163.9µs | 4401.6µs | 9.99 | 26.59 |
+| 420s | 4 | 475.4µs | 3166.6µs | 8.61 | 6.81 |
+| 600s | 4 | 658.6µs | 3260.3µs | 5.34 | 4.64 |
+| 660s | 4 | 782.8µs | 3500.4µs | 2.93 | 4.03 |
+| 780s | 4 | 905.6µs | 3636.2µs | 2.26 | 3.62 |
+| 900s | 4 | 1044.9µs | 3920.6µs | 1.69 | 3.05 |
+
+The fault itself is a constant 100ms injected delay — but rank 4's measured recv-wait climbs steadily from ~165µs to ~1045µs over 15 minutes, and z falls monotonically from ~10 to ~1.7, crossing below `PROXY_WAIT_Z_THRESH` by roughly the 10-minute mark. The mechanism for this drift was not root-caused this round (plausible candidates: MoE's routing/load balance shifting over training steps, changing how much "lead time" exists for the buffering effect §6.41.4 describes) — reported as an honest, newly-discovered characteristic of the raw signal's temporal stability, not something this task's scope covers fixing. **Practical consequence**: a live detector only reliably sees this fault in roughly the first ~10 minutes of a job at 100ms fault magnitude; this is a real detection-window constraint this round's offline, whole-job-average validation could not have surfaced.
+
+#### 6.44.5 Real, measured overhead — meaningfully higher than the earlier reasoning-based estimate, and why
+
+The prior round's answer to "would live detection cost more?" reasoned that `proxy_peer_wait` records arrive pre-aggregated (so a live scorer would need fewer append/window operations than `coll_perf`'s per-event accumulation) and concluded the aggregator-side cost would likely be small. That reasoning is now corrected by direct measurement:
+
+- **Aggregator side: confirmed zero change**, as designed — this task added no code to `node_aggregator_ref.py` at all (the architecture choice in 6.44.1 means the new cost lives entirely in `alert_engine.py`).
+- **alert_engine.py side: NOT cheap.** A single isolated call to `_check_proxy_wait()` against live VM data measured **~4.8s wall-clock, ~4.4s CPU time**, 10 calls in a row. Root cause, confirmed directly (not assumed): a single `/api/v1/export` query over just a 90-second window returns **82MB** (`agg_proxy_peer_wait_mean_us`) and **65MB** (`...count`) of raw JSON. This is because §6.42's aggregator fix pushes these metrics **unwindowed** — once per raw dump-interval record, for every (member, peer, direction) triple — unlike every other established metric family in this system (`agg_mean_exec_time_us` etc.), which is pushed once per `MEAN_WINDOW`-sized batch (~100+ samples) via `score_mean_window`. The new metric family is therefore far denser in VM than anything this alerting layer has previously had to query, and that density, not the new check's own logic, is what makes a lookback-window query expensive.
+- **Compounding factor found live**: this specific long-running test session had accumulated 77 distinct `comm` values and 103 distinct `bucket` values from this round's own extensive regression testing. A real, directly-measured `poll_once()` call (the full per-cycle loop every existing check runs through) did not complete within a 300-second timeout in this environment — a pre-existing characteristic of `alert_engine.py`'s one-big-poll-loop architecture under heavy accumulated discovery state, unrelated to and not caused by this task's new code, but one this task's new check (registered last in the loop) is fully exposed to.
+
+**Honest correction to the earlier estimate**: "likely small, same category as existing scoring" was wrong. The real cost is substantial, and is a direct, traceable consequence of §6.42's own unwindowed push design — a genuine, now-documented coupling between an earlier fix's implementation detail and this round's new consumer.
+
+#### 6.44.6 What was NOT proven: reliable firing in a continuously-running deployment
+
+Two real, isolated-call-against-live-trial tests both confirmed the detection math fires correctly and reproduces the expected z-score exactly. But the actual, continuously-running `alert_engine.py` process — deployed fresh, watching from before a trial's job start, through its own full `poll_once()`/`_run_check("proxy_wait", ...)` path — never produced a real `[ALERT]`/`agg_straggler_incident_detected` push across two real MoE 100ms fault trials in this environment, despite the underlying data clearly qualifying (confirmed via direct VM query) for sustained multi-minute stretches. Root cause, confirmed via direct, isolated timing rather than assumed: `poll_once()`'s own per-cycle wall time (inflated by this session's own accumulated 77-comm/103-bucket discovery state, further compounded by this new check's own ~5s-per-call cost) is slow enough, relative to §6.44.4's ~10-minute reliable-signal window, that `PERSIST_REQUIRED=3` consecutive qualifying cycles may not complete before the signal naturally fades.
+
+This is reported as an open, unresolved gap, not papered over: **the detection logic is correct and validated; a reliably-firing live deployment, in a busy/long-running environment like this one, is not yet proven.** A fresh, lightly-loaded deployment (few discovered comms/buckets, fast poll cycles) would very plausibly behave differently — this was not tested this round, and should not be assumed either way.
+
+#### 6.44.7 What this does and does not close
+
+**Closes**: "nothing watches `agg_proxy_peer_wait_*` automatically" is no longer true — a correct, unit-validated, additive consumer now exists (`_check_proxy_wait`, `alert_engine.py`), computing the identical math the manual offline analysis already used, with its own independently-derived thresholds.
+
+**Does not close**: the README's "MoE detection requires an offline analysis step" limitation is NOT removed by this work — a human-run offline analysis remains the only CONFIRMED-reliable way to get this signal today. The live path exists, is logically correct, and is real additive progress, but its practical reliability as an always-on production alerting path is genuinely unresolved pending either (a) testing in a less-loaded environment, or (b) follow-up work — explicitly out of this task's own stated scope — such as windowing `agg_proxy_peer_wait_*` at the aggregator before push (mirroring `score_mean_window`'s own `MEAN_WINDOW` pattern, which would directly shrink the 82MB/65MB query cost at its root) or scoping `_check_proxy_wait`'s own query by hostname to reduce per-call payload.
+
+**Regression**: zero changes to `node_aggregator_ref.py`, `_check_mean`, `_check_mean_tiered`, `classifier.py`, or any existing check (confirmed via diff — every change in this section is a new, additive function/constant). Code diff: 2 files (`alerting/alert_engine.py`, `alerting/thresholds.py`), 200 insertions, 0 deletions.

@@ -76,6 +76,46 @@ RANK0_OUTLIER_RATE_THRESH = 0.03
 APPTIMING_Z_THRESH = 4.0
 APPTIMING_MM_THRESH = 1.3
 
+# --- MoE AllToAll proxy-thread peer-wait detection (S6.43, live) ---
+# agg_proxy_peer_wait_mean_us (aggregator/node_aggregator_ref.py, the
+# Inspector proxy-thread fix, DESIGN_NOTES Sec. 6.41) is a DIFFERENT
+# signal from APPTIMING above (Option D/E's Python-level AllToAll call
+# timing) -- its own noise floor was never going to match APPTIMING's,
+# so it gets its own, independently-derived threshold rather than
+# reusing APPTIMING_Z_THRESH/APPTIMING_MM_THRESH or MEAN_Z_THRESH/
+# MEAN_MM_THRESH wholesale (same discipline that comment above already
+# used). Grounded in this project's own real, already-measured numbers
+# (staged validation + live-production-path re-validation, 2026-11):
+# healthy noise band ~=1.1 peer-group z; 20ms/100ms fault z in [-8,-13]
+# (clean separation); 1ms fault z~=-1.6 to -2.3 (marginal, explicitly
+# NOT reliably detectable -- see README Known Limitations). The
+# straggler shows up as the LOWEST recv-wait in its peer group (it
+# posts its receive late, so the remote data is often already sitting
+# in the network buffer by the time it looks -- the opposite direction
+# from APPTIMING/MEAN's "worst = slowest"), so the check built on this
+# compares peer_mean/worst in the inverted direction; PROXY_WAIT_MM_THRESH
+# is a ratio >1 meaning "peers are this many times SLOWER than the
+# outlier", not the other way around. 5.0/3.0 sit with real margin
+# above the 1ms range's ~2.3 ceiling and the healthy ~1.1 noise floor,
+# and well below the 20/100ms floor of ~8 -- deliberately NOT tuned to
+# catch the already-disclosed-unreliable 1ms case.
+PROXY_WAIT_Z_THRESH = 5.0
+PROXY_WAIT_MM_THRESH = 3.0
+# Real bug found live (this session, during end-to-end validation): a
+# bare instant query (one latest sample per series) is far noisier than
+# the full-job weighted average moe_signal_check.py computes -- measured
+# directly against the SAME live 100ms fault trial: z=1.10 off a bare
+# instant snapshot vs z=8.87 off the full job. A lookback-windowed
+# weighted average (via _query_export, same anti-miss tool _check_mean
+# already uses) closes most of that gap without waiting for the whole
+# job to finish. Measured directly across window sizes on that same
+# live trial: 30s -> z=5.04 (barely clears PROXY_WAIT_Z_THRESH, no
+# margin), 45s -> 5.29, 60s -> 5.96, 90s -> 7.04, 120s -> 7.49. 90s
+# chosen: comfortable margin above both thresholds while still being
+# genuinely live (a human running the offline script only ever sees
+# this after the whole job ends).
+PROXY_WAIT_LOOKBACK_S = 90.0
+
 # --- Structural exclusions (mechanism, not rank numbers) ---
 # EXCLUDE_ALWAYS/EXCLUDE_CV_EXTRA/EXCLUDE_OUTLIER_EXTRA in node_aggregator.py
 # already exclude rank 3 (known-degraded GPU, cross-referenced dynamically

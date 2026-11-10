@@ -1889,6 +1889,16 @@ class AlertEngine:
         # calibrated, not reused from MEAN_Z_THRESH/MEAN_MM_THRESH.
         self._apptiming_tracker = CVPersistenceTracker(0.5, T.PERSIST_WINDOW, T.PERSIST_REQUIRED)
         self._apptiming_active_keys = set()
+        # S6.43 (MoE live detection, 2026-11) -- separate persistence
+        # tracker for the new agg_proxy_peer_wait_*-based check, keyed by
+        # (hostname, member) -- no comm/bucket/coll dimension exists for
+        # this metric either (same reasoning as _apptiming_tracker above).
+        # Its own PROXY_WAIT_Z_THRESH/PROXY_WAIT_MM_THRESH (thresholds.py)
+        # are independently calibrated against this signal's own real,
+        # measured noise floor -- not reused from APPTIMING_Z_THRESH/
+        # MEAN_Z_THRESH. See _check_proxy_wait's own docstring.
+        self._proxy_wait_tracker = CVPersistenceTracker(0.5, T.PERSIST_WINDOW, T.PERSIST_REQUIRED)
+        self._proxy_wait_active_keys = set()
         # P27-hotfix2 -- nv-hostengine liveness, same dead-man's-switch
         # discipline as pipeline_down/n_pipeline_down_cycles above: found
         # this session that nv-hostengine (the persistent DCGM daemon every
@@ -2217,6 +2227,14 @@ class AlertEngine:
         # _check_mean/_check_mean_tiered/_check_alltoall_tiered are unchanged.
         for _call in ("dispatch", "combine", "send", "recv"):
             self._run_check("alltoall_app_timing", self._check_alltoall_app_timing, _call)
+        # S6.43 (MoE live detection, 2026-11): live counterpart to the
+        # manual, offline moe_signal_check.py analysis -- see
+        # _check_proxy_wait's own docstring. Runs once per poll cycle,
+        # same shape as the alltoall_app_timing registration above (no
+        # comm/bucket/coll discovery loop needed -- the check itself
+        # queries VM globally). Additive: every other check above is
+        # unchanged.
+        self._run_check("proxy_wait", self._check_proxy_wait)
 
     def _find_dependent_small_comms(self, hostname, comm):
         """P21.6 -- generic dependent-communicator discovery. A communicator
@@ -6397,6 +6415,148 @@ class AlertEngine:
         for stale_key in mine - new_active_keys:
             self._apptiming_tracker.observe(stale_key, 0.0, now_ts)
         self._apptiming_active_keys = (self._apptiming_active_keys - mine) | new_active_keys
+
+    def _check_proxy_wait(self):
+        """S6.43 (MoE live detection, 2026-11): the live counterpart to
+        this project's own manual, offline moe_signal_check.py analysis
+        -- until this check existed, MoE straggler DATA COLLECTION was
+        live (agg_proxy_peer_wait_mean_us/max_us/count flow to
+        VictoriaMetrics continuously, S6.42-aggregator-proxy-fix) but
+        DETECTION was a one-off query a human had to run by hand; no
+        [ALERT] was ever produced automatically. This closes that gap.
+
+        Architecture note (a deliberate deviation from mirroring
+        score_mean_window/score_cv_window's in-aggregator design):
+        those two score INSIDE node_aggregator_ref.py because each
+        node's aggregator already holds the per-event raw samples it
+        needs, with no cross-node step required for THEIR peer groups.
+        This metric's natural peer group (see below) is NOT guaranteed
+        to be node-local in general, and even where it happens to be
+        (this project's own 8-ranks-per-node topology), an aggregator-
+        side implementation would duplicate windowing state in two
+        places for no benefit. _check_alltoall_app_timing (right above)
+        already established the precedent this follows instead: query
+        VictoriaMetrics directly (which already aggregates every node),
+        compute the peer comparison here, track persistence here. This
+        is why this task's new code cost lives in alert_engine.py, not
+        node_aggregator_ref.py -- confirmed and measured, not assumed
+        (see the A/B overhead results this fix's commit message cites).
+        node_aggregator_ref.py's handle_record()/_handle_proxy_peer_
+        wait_record() and score_mean_window/score_cv_window are all
+        completely unchanged by this function's existence.
+
+        Peer group: this project's own already-established "structural
+        dense-cluster peers" grouping (DESIGN_NOTES Sec. 6.41) is simply
+        "every other rank on the same physical node" -- already exactly
+        what the hostname= label on this metric encodes, so no new
+        grouping mechanism is needed, just reading an already-present
+        label. Requires 3+ members on a host for the same reason
+        _check_mean/_check_alltoall_app_timing already require it
+        (stdev of fewer than 2 peers is undefined/meaningless).
+
+        Direction: the straggler shows up as the LOWEST recv-wait in its
+        peer group (DESIGN_NOTES Sec. 6.41.4 -- it posts its receive
+        late, so the remote data is often already sitting in the network
+        buffer by the time it looks), the OPPOSITE of score_mean_window/
+        _check_alltoall_app_timing's "worst = highest value" convention
+        -- this picks the MINIMUM, not the maximum, and mm is peer_median
+        / worst (a ratio >1 meaning "peers are this many times slower
+        than the outlier"), not the other way around.
+
+        Per-rank recv-wait value: a count-weighted mean across every
+        peer that rank communicated with, reproducing moe_signal_check.
+        py's own already-validated math exactly (its "recv_mean" column)
+        -- not a new statistic invented for this check.
+
+        Lookback window, not a bare instant query (real bug found live
+        during this check's own end-to-end validation): a bare instant
+        query (VM's "latest known sample" per series) is far noisier per
+        poll than the full-job weighted average moe_signal_check.py
+        computes -- measured directly on a live 100ms fault trial: z=1.10
+        off one instant snapshot vs z=8.87 off the whole job. /api/v1/
+        export over PROXY_WAIT_LOOKBACK_S (same anti-miss tool _check_
+        mean already uses, for the same reason: query_range's fixed grid
+        can skip real samples) closes most of that gap without waiting
+        for the whole job to finish -- see thresholds.py's own comment
+        for the exact window-size comparison that picked 90s.
+        """
+        now_ts = time.time()
+        start_ts = now_ts - T.PROXY_WAIT_LOOKBACK_S
+        mean_rows = _query_export(self.vm_url, 'agg_proxy_peer_wait_mean_us{dir="recv"}', start_ts, now_ts)
+        count_rows = _query_export(self.vm_url, 'agg_proxy_peer_wait_count{dir="recv"}', start_ts, now_ts)
+
+        count_by_key = {}
+        for row in count_rows:
+            m = row.get("metric", {})
+            k = (m.get("hostname"), m.get("member"), m.get("peer"))
+            count_by_key[k] = dict(zip(row.get("timestamps", []), row.get("values", [])))
+
+        weighted_sum = defaultdict(float)
+        weighted_count = defaultdict(float)
+        role_info = {}
+        for row in mean_rows:
+            m = row.get("metric", {})
+            hostname = m.get("hostname")
+            member = m.get("member")
+            peer = m.get("peer")
+            if not hostname or not member:
+                continue
+            cnt_by_ts = count_by_key.get((hostname, member, peer), {})
+            key2 = (hostname, member)
+            for ts, mean_val in zip(row.get("timestamps", []), row.get("values", [])):
+                cnt = cnt_by_ts.get(ts)
+                if cnt is None or cnt <= 0:
+                    continue
+                try:
+                    weighted_sum[key2] += float(mean_val) * float(cnt)
+                    weighted_count[key2] += float(cnt)
+                except (ValueError, TypeError):
+                    continue
+            role_info[key2] = (m.get("role_rank", "na"), m.get("role_n", "na"), m.get("slurm_job_id", ""))
+
+        recv_mean_by_member = {k: weighted_sum[k] / weighted_count[k]
+                                for k in weighted_sum if weighted_count[k] > 0}
+
+        by_host = defaultdict(dict)
+        for (hostname, member), val in recv_mean_by_member.items():
+            by_host[hostname][member] = val
+
+        new_active_keys = set()
+        for hostname, members in by_host.items():
+            if len(members) < 3:
+                continue
+            worst = min(members, key=lambda p: members[p])
+            worst_val = members[worst]
+            peer_vals = [v for p, v in members.items() if p != worst]
+            peer_mean = statistics.mean(peer_vals)
+            peer_median = statistics.median(peer_vals)
+            peer_sd = statistics.stdev(peer_vals) if len(peer_vals) > 1 else 0
+            z = (peer_mean - worst_val) / peer_sd if peer_sd > 0 else (float("inf") if worst_val != peer_mean else 0.0)
+            mm = peer_median / worst_val if worst_val > 0 else float("inf")
+            qualifies = z > T.PROXY_WAIT_Z_THRESH and mm > T.PROXY_WAIT_MM_THRESH
+            key = ("proxy_wait", hostname, worst)
+            if qualifies:
+                new_active_keys.add(key)
+            persisted, duration_s = self._proxy_wait_tracker.observe(key, 1.0 if qualifies else 0.0, now_ts)
+            if persisted:
+                role_rank, role_n, slurm_job_id = role_info.get((hostname, worst), ("na", "na", ""))
+                z_report = z if z != float("inf") else 1e6
+                mm_report = mm if mm != float("inf") else 1e6
+                self._emit(
+                    "proxy_wait", hostname, "moe_proxy_wait", worst, "recv", "ProxyWait",
+                    z_report, mm_report, worst_val, peer_mean, slurm_job_id or None,
+                    anomaly_ts=now_ts, role_rank=role_rank, role_n=role_n,
+                    persist_duration_s=duration_s, is_likely_root_cause=True,
+                )
+        self._reset_proxy_wait_keys(new_active_keys, now_ts)
+
+    def _reset_proxy_wait_keys(self, new_active_keys, now_ts):
+        """Parallel to _reset_apptiming_keys -- see that function's own
+        docstring for why this per-group reset pattern is needed."""
+        mine = self._proxy_wait_active_keys
+        for stale_key in mine - new_active_keys:
+            self._proxy_wait_tracker.observe(stale_key, 0.0, now_ts)
+        self._proxy_wait_active_keys = new_active_keys
 
     def _reset_tiered_keys(self, new_active_keys, now_ts, comm, bucket, coll):
         """Record 0.0 (not qualifying) for any straggler keys seen in a previous

@@ -279,7 +279,19 @@ detail; these are structural, currently-accepted gaps, not bugs waiting to be fi
    below 20ms. Building this required one real crash (a cross-process NCCL proxy-context hazard
    plus a stale-handle-on-reuse hazard, both found and fixed) — see DESIGN_NOTES.md §6.27.2,
    §6.29.6, §6.33, §6.35, §6.36, §6.40 (the five failures) and §6.41 (the fix, the crash, and the
-   confirmed result) for the full history and evidence.
+   confirmed result) for the full history and evidence. **Detection today still requires a manual,
+   offline analysis step** (`moe_signal_check.py`) — a live, automated scorer/firing function
+   (`alert_engine.py`'s `_check_proxy_wait`) was built and is confirmed *mathematically correct*
+   (reproduces the manual z-score exactly, zero false positives, no crashes) in isolated testing,
+   but was NOT confirmed to reliably fire in a continuously-running deployment: in a long, busy
+   test environment, a single `alert_engine.py` poll cycle measured too slow (>5 minutes,
+   driven by both this session's own accumulated discovered state and this metric's own
+   unusually dense, unwindowed push pattern) relative to a second new finding — the raw signal
+   itself fades from z≈10 to z≈1.7 over a job's first ~10 minutes at 100ms fault, for reasons not
+   yet root-caused. See DESIGN_NOTES.md §6.44 for the full real measurements (including the
+   actual 82MB/65MB per-query payload size that explains the real, meaningfully-higher-than-
+   expected overhead) and what would need to change before this could be trusted as a production
+   alerting path.
 
 - **Shape/strategy coverage (2026-11, DESIGN_NOTES.md 6.12-6.19):** MoE has a real, intermittent (1-in-3 observed)
   collective-participation hang on healthy runs, independent of the detector, not root-caused (6.12.1). Deep
