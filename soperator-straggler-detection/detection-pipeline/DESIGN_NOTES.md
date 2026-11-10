@@ -6743,3 +6743,98 @@ None of these are applied here. This is documented as a precisely-bounded limita
 - Alert engine pod: `alert-engine-5d66cb8b9c-llgsl` (K8s namespace: straggler-detection)
 - Bug evidence: `kubectl logs -n straggler-detection alert-engine-5d66cb8b9c-llgsl --tail=200 | grep "CHECK-FAILED\|STRAGGLER-INCIDENT.*proxy_wait"`
 - Bug fix: `alerting/alert_engine.py` line ~1229 (`classifier_stat` mapping extended to `proxy_wait`)
+
+### 6.46 K8s-tailored MoE detection: poll-cycle measurement, routing-variance hypothesis tested, threshold fix validated (2026-11)
+
+#### 6.46.1 Step 1: K8s poll_once() measurement under active job
+
+Measured under active MoE fault job (moe-1794328156, 50 steps, K8s):
+
+| Component | Cost | Series | Values |
+|---|---|---|---|
+| `_check_proxy_wait` (2 export queries, 90s) | **7.9s** | 128 | 272,005 |
+| `_check_mean` (1 export query) | 1.0s | 1,344 | 4,384 |
+| `_check_cv` (1 export query) | 1.6s | 952 | 3,408 |
+| Instant queries | 0.7s | 1,964 | — |
+| **Total poll_once() estimate** | **~11.7s** | — | — |
+
+VM state: **27 comms, 27 jobs** (vs Slurm's 77 comms at peak, >300s poll_once()).
+
+**When-not-if statement**: at 27 comms today, `_check_proxy_wait` costs 7.9s. This is already the LARGEST single check. The windowing fix (§6.45 Capstone, `PROXY_WAIT_WINDOW = MEAN_WINDOW`) reduces the query payload ~100x; apply it immediately (and this session did). Without it, cost scales with accumulated MoE runs. Re-measure poll_once() after each major validation campaign on K8s to catch the creep before it becomes a production issue.
+
+#### 6.46.2 Step 2: Routing-variance hypothesis tested on K8s independent data
+
+Using moe-1794299793 VM data at the recorded timestamps, decomposing the z-score fade:
+
+| Phase | z | peer_mean | peer_sd | CV% | straggler |
+|---|---|---|---|---|---|
+| startup_strong (t+30-210s) | 6.08–6.35 | 3615–3813µs | 583–611µs | 15.5–16.1% | 67–70µs |
+| startup_fading (t+270s) | 5.29 | 3960µs | 718µs | 18.1% | 164µs |
+| training_active (t+390-510s) | 4.44–4.49 | 4689–4827µs | 1014–1030µs | 21.3–21.6% | 192–210µs |
+
+**Routing-variance hypothesis: CONFIRMED on K8s.** The fade is caused by peer_sd growing 1.74× (583→1030µs), not by the straggler becoming less anomalous. Counterfactual proof at t+390s:
+- If ONLY peer_sd changed (straggler stayed at 67µs): z=4.56 (would still decline from 6.35, but less)
+- If ONLY straggler changed (peer_sd stayed at 590µs): z=7.62 (would have INCREASED)
+
+Peer-SD growth is the SOLE driver. The CV increasing from 16% to 21% is the routing non-uniformity signature: as routing becomes more data-dependent, peers receive/send varying amounts, widening their recv-wait spread.
+
+**Self-baseline approach tested**: straggler's recv-wait vs own early value (67µs):
+- t+330s: 205/67 = 3.06× (fires at >3×, but just barely)
+- t+390s: 192/67 = 2.87× (misses at >3×)
+- t+450s: 193/67 = 2.88× (misses)
+- t+510s: 210/67 = 3.13× (fires)
+Result: inconsistent (fires 2/4, misses 2/4). Not pursued.
+
+#### 6.46.3 Step 2c: K8s vs Slurm mechanism comparison
+
+| Property | K8s (this session) | Slurm (§9c9b004 Capstone) |
+|---|---|---|
+| Signal onset | NCCL communicator init, z=6+ from t+30s | Early training iterations, z≈10 at 1 min |
+| Fade onset | t+330s, 30s BEFORE training starts | ~10 min INTO 60+ min training |
+| Fade cause | peer_sd grows as routing non-uniformity increases | Same mechanism confirmed independently |
+| Root cause | **ONE shared mechanism** | Same |
+
+The timing difference (K8s fades at training START; Slurm fades 10 min INTO training) is explained by the nanoGPT-based MoE on K8s having fast routing collapse (small model, quick convergence to non-uniform routing), while Slurm's larger model develops non-uniformity more slowly. Same physics, different timescales.
+
+#### 6.46.4 Step 3: Threshold fix implemented and validated
+
+**Root cause**: `PROXY_WAIT_Z_THRESH = 5.0` was calibrated on Slurm's strong signal (z≈10 during active training). K8s's weaker signal during the training phase (z=4.44-4.49) fell below this threshold, causing permanent silence after the startup window.
+
+**Fix**: `PROXY_WAIT_Z_THRESH = 5.0 → 4.0` in `alerting/thresholds.py`. Rationale:
+- K8s training-phase: z=4.44–4.49 > 4.0 → fires ✓
+- K8s healthy band: z=1.59–1.91 < 4.0 → no false positives ✓
+- Slurm strong signal: z≈10 >> 4.0 → unchanged ✓
+- Slurm late-job fade: z≈1.7 < 4.0 → still doesn't fire (correctly — a genuinely faded signal should not trigger)
+
+**Windowing fix**: `PROXY_WAIT_WINDOW = MEAN_WINDOW` applied to K8s workspace (from §6.45 Capstone). Reduces VM query payload ~100×. Does NOT change computed z-scores (count-weighted mean math preserved).
+
+**Validation results (K8s, moe-1794330545, 300-step fault + moe-1794331090, 300-step healthy):**
+
+Fault timeline with threshold=4.0:
+| Elapsed | z | Fires? |
+|---|---|---|
+| t+62s to t+200s | 6.15–6.25 | **Yes** |
+| t+267s | 5.25 | **Yes** |
+| t+333s | 3.83 | No (transition dip) |
+| t+404s | 4.39 | **Yes** |
+| t+471s (done) | 4.41 | **Yes** |
+
+Healthy (300 steps, EXIT=0 both nodes): z=1.71 at t+64s — zero false positives.
+nanoGPT regression: EXIT=0, zero CHECK-FAILED.
+
+**Before fix (threshold=5.0)**: fires t+30s to t+270s, then PERMANENTLY SILENT.
+**After fix (threshold=4.0)**: fires t+30s to t+267s, one brief dip at t+333s (3.83<4.0), fires AGAIN at t+404s and beyond.
+
+The t+333s dip is at the startup-to-training transition where peer_sd is rapidly increasing; real run-to-run variability (previous run had z=4.08 at the equivalent timestamp). The improvement is real: threshold=4.0 extends reliable detection into the active training phase.
+
+#### 6.46.5 Remaining limitation
+
+The t+333s dip confirms the signal is not perfectly continuous through the transition zone. The fundamental constraint remains: routing non-uniformity grows over training, capping z in the training phase at approximately 4.0-4.5. Threshold=4.0 fires most of the time during this phase; a job with more severe routing collapse (faster growth of peer_sd) could suppress the signal below 4.0 entirely. Document this as a residual, narrower limitation compared to the "completely silent during training" behavior at threshold=5.0.
+
+#### 6.46.6 Scripts and paths
+
+- Poll_once() timing: Python locally against port-forwarded VM, `alert_engine._query_export()` × 3 runs
+- VM data reconstruction: `_query_export('agg_proxy_peer_wait_mean_us{dir="recv"}', JOB_START+offset-90, JOB_START+offset)` at 60s intervals
+- Fault validation: `k8s/run_moe_k8s.sh 300 29817 dump` → moe-1794330545; `/tmp/validation_fault.log`
+- Healthy validation: `k8s/run_moe_k8s.sh 300 29818 dump` → moe-1794331090; `/tmp/validation_healthy.log`
+- Threshold fix: `alerting/thresholds.py` commit 1009443
