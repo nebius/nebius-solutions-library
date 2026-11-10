@@ -129,6 +129,37 @@ PROXY_WAIT_MM_THRESH = 3.0
 # this after the whole job ends).
 PROXY_WAIT_LOOKBACK_S = 90.0
 
+# Capstone round 2 (2026-11) -- real, root-caused fix for the long-
+# duration signal-fade finding the first capstone round disclosed as an
+# open mystery. Traced with real data, not guessed: across a real
+# 234-minute 100ms-fault job, the straggler rank's OWN absolute recv-
+# wait NEVER converges with its peers (confirmed the single lowest
+# value in the peer group at every one of ~90 sampled points spanning
+# the whole job). What actually degrades is the live PEER GROUP's own
+# cross-rank variance: real per-round MOE-TOKEN-LOAD data (this
+# project's own existing routing-distribution instrumentation) shows
+# the coefficient of variation of per-rank token load jumps from
+# ~0.24-0.38 in the job's first few hundred rounds to a sustained
+# ~0.75-0.82 within about the first 1000 rounds (minutes), and STAYS
+# there for the rest of the job -- MoE's own learned token router
+# settling into a persistent, legitimate (not fault-related) cross-rank
+# load imbalance. A z-score computed from the CURRENT window's peer
+# mean/stdev loses power over a long job purely because that denominator
+# (peer stdev) keeps growing, even though the underlying per-rank signal
+# (the straggler's own distinctly-lower recv-wait) is unchanged.
+#
+# Fix: freeze the peer reference distribution (mean, median, stdev) once
+# early in each (hostname, job)'s life -- PROXY_WAIT_BASELINE_BOOTSTRAP_N
+# consecutive polls, while peer spread is still tight -- and score every
+# later poll against that FROZEN reference rather than recomputing one
+# from the increasingly noisy live window. 3 chosen (not 1): a single
+# poll could itself be a noisy outlier (this project's own real data
+# shows real poll-to-poll swings even early in a job); 3 (same
+# consecutive-sample discipline PERSIST_REQUIRED already uses elsewhere
+# in this file) costs at most ~2 extra poll intervals of bootstrap delay
+# while meaningfully guarding against freezing on a single bad sample.
+PROXY_WAIT_BASELINE_BOOTSTRAP_N = 3
+
 # --- Structural exclusions (mechanism, not rank numbers) ---
 # EXCLUDE_ALWAYS/EXCLUDE_CV_EXTRA/EXCLUDE_OUTLIER_EXTRA in node_aggregator.py
 # already exclude rank 3 (known-degraded GPU, cross-referenced dynamically

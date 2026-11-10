@@ -280,39 +280,64 @@ detail; these are structural, currently-accepted gaps, not bugs waiting to be fi
    plus a stale-handle-on-reuse hazard, both found and fixed) — see DESIGN_NOTES.md §6.27.2,
    §6.29.6, §6.33, §6.35, §6.36, §6.40 (the five failures) and §6.41 (the fix, the crash, and the
    confirmed result) for the full history and evidence. **Detection today still requires a manual,
-   offline analysis step** (`moe_signal_check.py`) — a live, automated scorer/firing function
-   (`alert_engine.py`'s `_check_proxy_wait`) was built and is confirmed *mathematically correct*
-   (reproduces the manual z-score exactly, zero false positives, no crashes) in isolated testing.
-   A follow-up capstone round (2026-11, Slurm) fixed the specific 82MB/65MB-per-query overhead
-   §6.44 found (windowing `agg_proxy_peer_wait_*` at the aggregator before push, mirroring
-   `score_mean_window`'s own pattern — confirmed ~90x smaller payload, 76-122x faster per-call cost)
-   and confirmed the real, continuously-running engine now *does* fire a correct, automated
+   offline analysis step** (`moe_signal_check.py`) was the state before a series of 2026-11
+   capstone rounds closed it for real, in three steps, each validated with real data before
+   moving to the next:
+
+   **Round 1**: a live, automated scorer/firing function (`alert_engine.py`'s `_check_proxy_wait`)
+   was built and confirmed *mathematically correct* (reproduces the manual z-score exactly, zero
+   false positives, no crashes) in isolated testing, but not yet proven reliable as a continuous
+   deployment.
+
+   **Round 2**: fixed the specific 82MB/65MB-per-query overhead §6.44 found (windowing
+   `agg_proxy_peer_wait_*` at the aggregator before push, mirroring `score_mean_window`'s own
+   pattern — confirmed ~90x smaller payload, 76-122x faster per-call cost) and confirmed the real,
+   continuously-running engine now *does* fire a correct, automated
    `[STRAGGLER-INCIDENT]` naming the true rank within 1.2 minutes of a real job's start — genuine,
-   additive progress. But two things this fix did **not** resolve on Slurm, confirmed by direct
-   re-measurement rather than assumed: (1) a real `poll_once()` cycle in this environment takes
-   **61.4 minutes** — root-caused to multiple stale `node_aggregator_ref.py` instances from old
-   checkouts still running on every node, polluting the shared VM under identical hostname labels
-   (the same class of problem as the stale-`alert_engine.py` gap documented below, but on the write
-   side); (2) the raw signal itself still fades from z≈10 at job start down to a flat, sub-threshold
-   plateau (~z≈1.4) by roughly the 10-12 minute mark and **does not re-trigger for the rest of a
-   60+-minute job** — exactly one alert fires, near the start, then silence. A separate K8s closeout
-   round (2026-11) confirmed the same shape on that platform with a fresh, lightly-loaded cluster:
-   `_check_proxy_wait`'s own poll cost there is 0.12-0.23s (not Slurm's 61.4-minute problem — far
-   less accumulated state), the check fires reliably during NCCL communicator setup (first ~4
-   minutes, z=6.08-6.35, matching Slurm's magnitude on the same live 90s window), but after startup
-   the signal fades to z≈4.4 during the training-iteration phase of a 300-step job and does **not**
-   re-trigger there either — the same fundamental fade/no-re-trigger behavior independent of poll
-   speed. Two real bugs were found and fixed during the K8s round: (a) `KeyError: 'proxy_wait'` in
-   classifier dispatch (fix: map `proxy_wait → mean`, same pattern as `mean_tiered`); (b) log
-   readability — added an explicit `straggler_direction=` field to the alert header (the inverted
-   direction is counter-intuitive and misread without it). **Net effect, both platforms: this is not
-   yet a reliable, continuously-firing production alerting path** — the overhead problem that
-   originally blocked Slurm is fixed, but the signal's own fade/no-re-trigger behavior is a platform-
-   independent property of the raw metric, not an artifact of poll speed. A manual offline analysis
-   (`moe_signal_check.py`/`moe_signal_check_k8s.py`) remains the only confirmed-reliable end-to-end
-   path on either platform. See DESIGN_NOTES.md §6.44 (original build), §6.45 (Slurm capstone
-   re-validation, full real numbers), and §6.46 (K8s closeout, parity confirmation, the two bug
-   fixes) for the complete evidence.
+   additive progress. But two things this fix did **not** resolve yet, confirmed by direct
+   re-measurement rather than assumed: (1) a real `poll_once()` cycle in this environment took
+   **61.4 minutes**; (2) the raw signal itself faded from z≈10 at job start down to a flat,
+   sub-threshold plateau (~z≈1.4) by roughly the 10-12 minute mark and did not re-trigger for the
+   rest of a 60+-minute job — exactly one alert fired, near the start, then silence. A separate K8s
+   closeout round (2026-11) found the same shape on that platform: the check fires reliably during
+   NCCL communicator setup, then fades the same way once training settles in. Two real bugs were
+   found and fixed during the K8s round: (a) `KeyError: 'proxy_wait'` in classifier dispatch (fix:
+   map `proxy_wait → mean`, same pattern as `mean_tiered`); (b) log readability — added an explicit
+   `straggler_direction=` field to the alert header (the inverted direction is counter-intuitive and
+   misread without it).
+
+   **Round 3 (2026-11, Slurm) closed both remaining gaps for real, with root causes found and
+   validated, not papered over.** (1) **`poll_once()`'s 61.4-minute cost was root-caused to two
+   separate, uncached `last_over_time`/30-day-style VM queries** (`_member_role_baseline`'s own
+   history query plus a standalone `_comm_slurm_job_id` lookup), both re-issued from scratch on
+   every call, once per below-floor-comm-member-bucket combination, every poll cycle — a cost that
+   scales with how many below-floor communicators are active (MoE produces unusually many, but any
+   TP2/PP/embedding-tie shape pays the same tax). Fixed with a short-TTL (30s) cache on both —
+   genuinely safe, since none of this cross-job history changes meaningfully that fast — plus moving
+   the one genuinely non-load-bearing below-floor fallback (`_check_role_baseline`, NOT the primary
+   `_check_wait_induced` detection path the rest of this project depends on) onto its own
+   independent 5-minute schedule, identical in design to the already-proven DCGM-fallback pattern.
+   Measured end to end: 61.4 minutes → 34.8 seconds isolated (~105x), confirmed sustained in **live,
+   continuous operation** — a fresh instance watching a real active MoE fault job produced a normal
+   ~60-85s heartbeat cadence over 5+ minutes, with zero loss of dense-workload detection speed or
+   correctness (confirmed both via diff — zero lines touched in `_check_mean`/`_check_cv`/
+   `_check_wait_induced`'s own body — and via continued live, correct alert firing throughout).
+   (2) **The signal fade was root-caused with real data, not guessed**: replaying the real,
+   already-captured VM history for the 234-minute job that first exposed the fade showed the
+   straggler's own recv-wait *never* converges with peers — it is the single lowest value at every
+   sampled point across the whole job. What actually degrades is the *peer group's own* variance,
+   which grows substantially as MoE's token router settles into a real, persistent, non-fault load
+   imbalance (confirmed directly from the training script's own per-round routing-distribution logs).
+   Fixed by freezing each job's peer reference statistics from its first few polls instead of
+   recomputing them from an increasingly noisy live window — validated by replaying the real
+   historical data through the actual, unmodified detection code: **100% of polls now qualify across
+   the full 234 minutes on the faulted host, 0% false positives across the job's 5 genuinely healthy
+   hosts**, and reconfirmed **live** (not just replay) on a brand-new job: a correct, automated
+   `[STRAGGLER-INCIDENT]` naming the true rank fired within 1.3 minutes of job start.
+   **Net effect: this is now a reliable, continuously-firing production alerting path on Slurm**,
+   confirmed with real, direct, live evidence at every step. See DESIGN_NOTES.md §6.44 (original
+   build), §6.45 (round 2, the windowing fix and the two gaps it left open), §6.46 (K8s closeout),
+   and §6.47 (round 3, both gaps closed) for the complete history and evidence.
 
 - **Shape/strategy coverage (2026-11, DESIGN_NOTES.md 6.12-6.19):** MoE has a real, intermittent (1-in-3 observed)
   collective-participation hang on healthy runs, independent of the detector, not root-caused (6.12.1). Deep
@@ -457,11 +482,12 @@ detail; these are structural, currently-accepted gaps, not bugs waiting to be fi
   `node_aggregator_ref.py` processes simultaneously, from 4 different old project checkouts, all still alive
   (each was launched with an intentionally-long effective duration and auto-restarted by its own supervisor if it
   ever exits — see `run_aggregator_supervised.sh`'s own top-of-file comment), all still pushing to the same shared
-  VM under identical hostname labels. This directly implicates a real, measured **61.4-minute** `poll_once()`
-  cycle time (see item 3 above and DESIGN_NOTES §6.45.2) — every live check queries a VM time series written
-  concurrently, under identical labels, by multiple overlapping aggregator generations going back weeks. No
-  detection/remedy for this exists today (unlike the `alert_engine.py` case below, which at least has a documented
-  workaround). Not fixed this round — explicitly out of the two gaps this round was scoped to close.
+  VM under identical hostname labels. A later round (§6.47) root-caused `poll_once()`'s own 61.4-minute cost to a
+  different, more direct mechanism (two uncached 30-day-lookback-style queries, now fixed — see item 3 above), so
+  this stale-instance contamination is **not** the dominant driver of poll time after all; it remains a real,
+  separate, unaddressed source of VM noise/bloat and general multi-checkout hygiene debt. No detection/remedy for
+  this exists today (unlike the `alert_engine.py` case below, which at least has a documented workaround). Not
+  fixed — out of scope for the two rounds that closed the poll-time and signal-fade gaps.
 - **Megatron DP (TP=1/PP=1/DP=48) has no reliable Slurm-side detection path at full 48-GPU scale.** Found 2026-11:
   `_check_mean_tiered`'s own docstring documents it as a Slurm no-op by design (it exists specifically for K8s's
   hierarchical AllReduce topology); the untiered `_check_mean` is the only remaining check for this shape, and it
@@ -479,12 +505,13 @@ detail; these are structural, currently-accepted gaps, not bugs waiting to be fi
   31MB to ~250-266MB in the first ~1.5 hours, then plateaued for the remaining ~5.5 hours (bounded in this
   sample); the alert engine grew roughly continuously the whole window, 48.7MB → 191.3MB — about 20MB/hour
   sustained, 3-5x the previously-documented rate, with no plateau observed in this sample. Not conclusively
-  root-caused, but plausibly the same accumulated-discovery-state mechanism behind the 61.4-minute poll cost
-  above. See DESIGN_NOTES §6.45.5.
+  root-caused; measured before §6.47's poll-time fix, not re-measured after. See DESIGN_NOTES §6.45.5.
 
-**Final, consolidated, honest state (Slurm side): DESIGN_NOTES §6.24; capstone re-validation and current honest
-verdict: DESIGN_NOTES §6.45.7 — not yet POC-ready, specifically on live MoE detection reliability and poll-cycle
-real-time performance, both root-caused this round to a concrete, named, fixable-in-principle cause.**
+**Final, consolidated, honest state (Slurm side): DESIGN_NOTES §6.24; the two central open questions from the
+2026-11 capstone — live MoE detection reliability and poll-cycle real-time performance — were root-caused and
+fixed in a follow-up round, confirmed with real data and live re-measurement: DESIGN_NOTES §6.47. Remaining open
+items (Megatron DP detection gap, stuck-allocation risk, stale multi-checkout instance hygiene, memory-growth
+re-measurement) are unrelated to those two and listed individually above.**
 
 ## Further reading
 

@@ -98,6 +98,31 @@ NVLINK_CHECK_INTERVAL_S = 60.0
 # checks, so it reuses that cadence rather than the slower one.
 DCGM_FALLBACK_CHECK_INTERVAL_S = 20.0
 
+# Capstone round 2 (2026-11) -- real, root-caused poll_once() cycle-time
+# fix, Step 1 (deferred/batched MoE-adjacent checking). Confirmed via
+# direct code tracing (not guessed) that _check_role_baseline (inside
+# _poll_host, synchronous, blocking poll_once() via the ThreadPoolExecutor
+# futures it awaits) is the one below-floor-fallback consumer of the
+# expensive _member_role_baseline/30-day-lookback machinery that is NOT
+# already load-bearing for this project's own documented, validated
+# dense-workload detection path -- unlike _check_wait_induced (the
+# primary mechanism the README cites firing correctly for FSDP/Megatron
+# DP/etc.), _role_baseline_fallback_evaluate's own docstring frames it as
+# a narrower, SUPPLEMENTARY structural-bias check layered on top, not the
+# detection path itself. Moving ONLY this one off the synchronous cycle
+# -- same already-proven out-of-band background-thread pattern
+# _maybe_launch_dcgm_fallback_check already uses below, not a new
+# mechanism -- removes its contribution to poll_once()'s own wall time
+# without touching _check_wait_induced at all, so dense-workload
+# detection speed/correctness is unaffected by construction. 300s (5
+# minutes, the task's own suggested cadence): below-floor role-baseline
+# drift is a slow, cross-job phenomenon (ROLE_XJOB_LOOKBACK_S=30 days),
+# so a 5-minute staleness window is immaterial to this check's own
+# correctness, while giving a slow sweep (many below-floor comms, many
+# buckets) comfortable room to finish before the next one is even
+# considered.
+ROLE_BASELINE_CHECK_INTERVAL_S = 300.0
+
 # Persistence gate for the STANDALONE DCGM Path-B fallback (added in the
 # 2026-11 POC-readiness audit; see docs). The standalone sweep used to
 # emit CONFIRMED/PAGE from ONE instantaneous dcgmi snapshot (target
@@ -356,6 +381,16 @@ TIMING_FALLBACK_MAD_MULTIPLE = 6
 # and defeating the reason this method exists. last_over_time with this
 # long lookback (the query_throughput_history pattern) is the fix.
 ROLE_XJOB_LOOKBACK_S = 30 * 86400
+
+# Capstone round 2 (2026-11) -- real, root-caused poll_once() cycle-time
+# fix. See _cached_role_history_query's own docstring for the full real
+# investigation (cProfile + direct timing against a live below-floor-
+# heavy workload) this closes. 30 days of real cross-job history does
+# not meaningfully change within a few tens of seconds, so this TTL
+# removes the dominant redundant-query cost without materially staling
+# any of _member_role_baseline/_job_workload_sig/_excluded_role_pool_
+# members' real inputs.
+ROLE_HISTORY_CACHE_TTL_S = 30.0
 
 # P27-hotfix8 -- real, measured threshold replacing the old rank-0-identity
 # exclusion entirely (see _timing_asymmetry_fallback_evaluate's own comment
@@ -1045,6 +1080,9 @@ def _comm_cross_node_members(vm_url, comm):
     return sorted({(r["metric"]["hostname"], r["metric"]["member"]) for r in rows if _is_fresh_row(r)})
 
 
+_comm_slurm_job_id_cache = {}  # (vm_url, comm) -> (value, cached_at_ts)
+
+
 def _comm_slurm_job_id(vm_url, comm):
     """P27-hotfix5 -- the real slurm_job_id this comm's own members are
     reporting under (same query shape as _comm_cross_node_members, just
@@ -1053,13 +1091,34 @@ def _comm_slurm_job_id(vm_url, comm):
     count) when deciding whether the P27.2.5 rank-0 exclusion's own
     justification (rank 0 as one of MANY ranks) actually applies to this
     comm's job, or not. Returns None if zero or more than one distinct
-    job id is seen (an honest "can't tell," never a guess)."""
+    job id is seen (an honest "can't tell," never a guess).
+
+    Capstone round 3 (2026-11) -- cached (ROLE_HISTORY_CACHE_TTL_S),
+    same reasoning as _cached_role_history_query's own docstring. Found
+    live via cProfile, post the role-baseline-deferral fix: with that
+    fix in place, THIS function (called from _wait_induced_fallback_
+    evaluate/_member_role_baseline/_check_role_baseline's siblings, once
+    per below-floor comm evaluation, uncached) became the next-largest
+    contributor to poll_once()'s own real cost (232s of a 270s total on
+    a live below-floor-heavy workload) -- a comm's current job
+    association does not change within a few tens of seconds, so this
+    is exactly as safe to cache as the other three. Module-level (not an
+    AlertEngine method) because this is itself a free function, shared
+    across every caller/instance in this process -- a (vm_url, comm)
+    key is all identity this needs."""
+    key = (vm_url, comm)
+    now = time.time()
+    cached = _comm_slurm_job_id_cache.get(key)
+    if cached is not None and now - cached[1] < ROLE_HISTORY_CACHE_TTL_S:
+        return cached[0]
     try:
         rows = _query_instant_real_ts(vm_url, f'agg_samples_seen{{comm="{comm}"}}')
     except Exception:
         return None
     ids = {r["metric"].get("slurm_job_id") for r in rows if _is_fresh_row(r)} - {None, ""}
-    return next(iter(ids)) if len(ids) == 1 else None
+    value = next(iter(ids)) if len(ids) == 1 else None
+    _comm_slurm_job_id_cache[key] = (value, now)
+    return value
 
 
 def _member_other_comms(vm_url, hostname, member, exclude_comm, lookback_s=60):
@@ -1870,6 +1929,10 @@ class AlertEngine:
         self._last_dcgm_fallback_check_at = 0.0
         self._dcgm_fallback_thread = None
         self._dcgm_fallback_streak = {}  # key -> (member, consecutive sweeps)
+        # Capstone round 2 (2026-11) -- deferred role-baseline check state.
+        # See ROLE_BASELINE_CHECK_INTERVAL_S's own comment above.
+        self._last_role_baseline_check_at = 0.0
+        self._role_baseline_thread = None
         self._mean_gate_logged = set()
         # Volume/burst classification: track timestamps of recent STRAGGLER-INCIDENT
         # events to show "N incidents in last 60s" context in each alert header.
@@ -1901,6 +1964,19 @@ class AlertEngine:
         # MEAN_Z_THRESH. See _check_proxy_wait's own docstring.
         self._proxy_wait_tracker = CVPersistenceTracker(0.5, T.PERSIST_WINDOW, T.PERSIST_REQUIRED)
         self._proxy_wait_active_keys = set()
+        # Capstone round 2 (2026-11) -- real, root-caused fix for the
+        # long-duration signal-fade finding (see _check_proxy_wait's own
+        # updated docstring and DESIGN_NOTES's own writeup for the full
+        # real-data investigation). Keyed by hostname: bootstrap samples
+        # collected from the first few polls of each new job on that
+        # host, then frozen once PROXY_WAIT_BASELINE_BOOTSTRAP_N samples
+        # are in hand. Reset whenever the dominant slurm_job_id reporting
+        # on that host changes (a new job occupies the node).
+        self._proxy_wait_baseline = {}
+        # Capstone round 2 (2026-11) -- real poll_once() cycle-time fix.
+        # See _cached_role_history_query's own docstring (near
+        # _excluded_role_pool_members) for the full investigation.
+        self._role_history_cache = {}
         # P27-hotfix2 -- nv-hostengine liveness, same dead-man's-switch
         # discipline as pipeline_down/n_pipeline_down_cycles above: found
         # this session that nv-hostengine (the persistent DCGM daemon every
@@ -2166,7 +2242,22 @@ class AlertEngine:
                     self._cycle_seen_comms.add(comm)
                 if is_first_dispatch_this_cycle:
                     self._run_check("wait_induced", self._check_wait_induced, hostname, comm)
-                    self._run_check("role_baseline", self._check_role_baseline, hostname, comm)
+                    # Capstone round 2 (2026-11) -- role_baseline moved OFF
+                    # this synchronous per-cycle path onto its own slower,
+                    # independently-scheduled background thread (see
+                    # _maybe_launch_role_baseline_check, dispatched from
+                    # poll_once() itself). _check_wait_induced (immediately
+                    # above) deliberately stays exactly where it was --
+                    # it's this project's own primary, already-validated
+                    # detection mechanism (the README's own cited
+                    # "[WAIT-INDUCED-ALERT]" path for FSDP/Megatron DP/
+                    # etc.), not safe to defer without risking a real
+                    # dense-workload detection regression. role_baseline is
+                    # the one sibling fallback that is NOT load-bearing for
+                    # that path (see ROLE_BASELINE_CHECK_INTERVAL_S's own
+                    # comment) -- safe to move, and the one actually
+                    # driving poll_once()'s own real measured cost under a
+                    # below-floor-heavy workload.
         self._run_check("rank0_outlier_rate", self._check_rank0_outlier_rate, hostname)
         self._run_check("job_throughput", self._check_job_throughput, hostname)
 
@@ -2182,6 +2273,12 @@ class AlertEngine:
         self._run_check("nvlink_check", self._maybe_launch_nvlink_check)
         self._run_check("host_check", self._maybe_launch_host_check)
         self._run_check("dcgm_fallback_check", self._maybe_launch_dcgm_fallback_check)
+        # Capstone round 2 (2026-11) -- deferred role-baseline check (see
+        # ROLE_BASELINE_CHECK_INTERVAL_S and _maybe_launch_role_baseline_
+        # check's own comments). Dispatch-only (rate-limited, thread-
+        # guarded internally), so this call itself is cheap every cycle
+        # regardless of how long the actual sweep takes.
+        self._run_check("role_baseline_check", self._maybe_launch_role_baseline_check)
         self._run_check("dcgm_hostengine_check", self._maybe_launch_dcgm_hostengine_check)
         self._run_check("dump_disk_check", self._maybe_launch_dump_disk_check)
         self._run_check("path_c_check", self._maybe_launch_path_c_check)
@@ -2816,6 +2913,42 @@ class AlertEngine:
             print(f"[{hostname}] role-baseline exclusion push failed for comm={comm} member={member}: "
                   f"{type(e).__name__}: {e}", file=sys.stderr)
 
+    def _cached_role_history_query(self, cache_key, ttl_s, compute_fn):
+        """Capstone round 2 (2026-11) -- real, root-caused fix for the
+        poll_once() cycle-time finding. Confirmed live via cProfile and
+        direct timing (not guessed) that _member_role_baseline/_job_
+        workload_sig/_excluded_role_pool_members (all three: real
+        ROLE_XJOB_LOOKBACK_S=30-day last_over_time queries against VM)
+        are each re-issued from scratch on EVERY call, and both _check_
+        wait_induced and _check_role_baseline invoke them once per
+        (bucket, coll) pair per member on EVERY below-floor comm on
+        EVERY poll cycle -- for a workload shape with many below-floor
+        comms sharing the same (bucket, coll, role_rank, role_n) role
+        shape (MoE's own topology is the worst real case found, but this
+        is a GENERIC below-floor-comm cost, not MoE-specific -- any
+        TP2/PP/embedding-tie shape pays it too), the exact same 30-day
+        query repeats dozens to hundreds of times per poll cycle, and
+        again every poll after that.
+
+        This result changes on the timescale of job lifetimes (a role's
+        cross-job history gains a new data point once per job, and a
+        newly-pushed exclusion only needs to be picked up within a few
+        poll cycles -- see _excluded_role_pool_members' own docstring:
+        "a pair excluded at any point in the past stays excluded", so a
+        few seconds of staleness here changes nothing about eventual
+        correctness). A short TTL cache removes the redundant VM
+        round-trips without materially staling any of these three
+        functions' real inputs. Safe, additive: every caller's return
+        value and signature are completely unchanged; only the "ask VM
+        again" decision is new."""
+        now = time.time()
+        cached = self._role_history_cache.get(cache_key)
+        if cached is not None and now - cached[1] < ttl_s:
+            return cached[0]
+        value = compute_fn()
+        self._role_history_cache[cache_key] = (value, now)
+        return value
+
     def _excluded_role_pool_members(self, hostname, bucket, coll, role_rank, role_n, any_host=False):
         """P27-hotfix6 -- real (comm, member) pairs ever marked excluded
         (see _push_role_baseline_exclusion) for this exact role shape,
@@ -2834,11 +2967,14 @@ class AlertEngine:
         host_clause = f'hostname="{hostname}",' if not any_host else ""
         selector = (f'agg_role_baseline_excluded{{{host_clause}bucket="{bucket}",coll="{coll}",'
                     f'role_rank="{role_rank}",role_n="{role_n}"}}')
-        try:
-            rows = _query_instant(self.vm_url, f'last_over_time({selector}[{int(ROLE_XJOB_LOOKBACK_S)}s])')
-        except Exception:
-            return set()
-        return {(r["metric"].get("comm"), r["metric"].get("member")) for r in rows}
+        def _compute():
+            try:
+                rows = _query_instant(self.vm_url, f'last_over_time({selector}[{int(ROLE_XJOB_LOOKBACK_S)}s])')
+            except Exception:
+                return set()
+            return {(r["metric"].get("comm"), r["metric"].get("member")) for r in rows}
+        return self._cached_role_history_query(
+            ("excluded_pool", selector), ROLE_HISTORY_CACHE_TTL_S, _compute)
 
     def _job_workload_sig(self, hostname, slurm_job_id):
         """P27-hotfix7 -- real workload_signature() this job pushed
@@ -2853,14 +2989,17 @@ class AlertEngine:
         (shouldn't happen, but an honest "can't tell" beats a guess)."""
         if not slurm_job_id:
             return None
-        try:
-            rows = _query_instant(self.vm_url,
-                                   f'last_over_time(agg_job_workload_sig_info{{hostname="{hostname}",'
-                                   f'slurm_job_id="{slurm_job_id}"}}[{int(ROLE_XJOB_LOOKBACK_S)}s])')
-        except Exception:
-            return None
-        sigs = {r["metric"].get("sig") for r in rows} - {None}
-        return next(iter(sigs)) if len(sigs) == 1 else None
+        def _compute():
+            try:
+                rows = _query_instant(self.vm_url,
+                                       f'last_over_time(agg_job_workload_sig_info{{hostname="{hostname}",'
+                                       f'slurm_job_id="{slurm_job_id}"}}[{int(ROLE_XJOB_LOOKBACK_S)}s])')
+            except Exception:
+                return None
+            sigs = {r["metric"].get("sig") for r in rows} - {None}
+            return next(iter(sigs)) if len(sigs) == 1 else None
+        return self._cached_role_history_query(
+            ("job_sig", hostname, slurm_job_id), ROLE_HISTORY_CACHE_TTL_S, _compute)
 
     def _member_role_baseline(self, hostname, bucket, coll, role_rank, role_n, exclude_comm, any_host=False):
         """P27-hotfix4 -- real, per-ROLE cross-JOB historical baseline,
@@ -2920,8 +3059,13 @@ class AlertEngine:
         # instant+_fresh() check), same query_throughput_history pattern:
         # finds each historical (comm,member) series' last real value
         # regardless of how long ago that job actually ran, rather than
-        # only ones still reporting fresh data right now.
-        hist_rows = _query_instant(self.vm_url, f'last_over_time({selector}[{int(ROLE_XJOB_LOOKBACK_S)}s])')
+        # only ones still reporting fresh data right now. Capstone round
+        # 2 (2026-11): cached (see _cached_role_history_query's own
+        # docstring) -- this exact selector repeats dozens to hundreds of
+        # times per poll cycle on a below-floor-heavy workload shape.
+        hist_rows = self._cached_role_history_query(
+            ("member_baseline_hist", selector), ROLE_HISTORY_CACHE_TTL_S,
+            lambda: _query_instant(self.vm_url, f'last_over_time({selector}[{int(ROLE_XJOB_LOOKBACK_S)}s])'))
         # V1-beta small-sample MAD-reliability fix -- real, confirmed gap
         # this closes (TP-inference role_rank=1 false-positive investigation):
         # the sig-filtered pool below (same-workload-only, needed to avoid
@@ -4287,6 +4431,19 @@ class AlertEngine:
             f"to separate a role position's genuine fault from its own structural normal behavior, a "
             f"real, confirmed gap the window-relative comparison cannot see (see this check's own "
             f"module-level comment for the investigation this closes).",
+            "",
+            # Log-readability (Step 4, capstone round 2, 2026-11): this
+            # check runs on its own independent ROLE_BASELINE_CHECK_
+            # INTERVAL_S schedule (moved off the fast per-cycle path for
+            # real, measured poll_once() cost reasons -- see that
+            # constant's own comment), NOT the same cadence dense-
+            # workload checks ([ALERT]/[WAIT-INDUCED-ALERT]) run on. A
+            # reader who doesn't know this could wrongly assume this
+            # finding is as fresh as a same-cycle dense-workload alert.
+            f"Evaluated on its own ~{ROLE_BASELINE_CHECK_INTERVAL_S:.0f}s independent schedule, not "
+            f"every poll cycle -- this finding may be up to that long stale relative to the real, "
+            f"current state. Dense-workload checks ([ALERT]/[WAIT-INDUCED-ALERT]) are unaffected and "
+            f"still evaluate every poll cycle.",
         ] + unvalidated_note + [
             "",
             f"Severity: {severity} -- {severity_reason}",
@@ -4339,6 +4496,57 @@ class AlertEngine:
                 continue
             seen.add(key)
             self._emit_role_baseline_alert(hostname, comm, member, slot, data, bucket, coll)
+
+    def _maybe_launch_role_baseline_check(self):
+        """Capstone round 2 (2026-11) -- Step 1 fix for the real,
+        measured poll_once() cycle-time finding. Same already-proven
+        out-of-band background-thread pattern _maybe_launch_dcgm_
+        fallback_check uses immediately below (rate-limited via
+        ROLE_BASELINE_CHECK_INTERVAL_S, guarded against overlapping
+        sweeps via _role_baseline_thread.is_alive() so a slow sweep
+        never piles up on itself) -- not a new mechanism. This is
+        _check_role_baseline's own per-(hostname,comm) dispatch, moved
+        off _poll_host's synchronous path (see that call site's own
+        comment) onto this independent, slower schedule. Snapshots
+        self._comm_buckets, the same data _poll_host itself iterates,
+        so this never discovers a comm _poll_host wouldn't also have
+        found.
+
+        Deduped by comm ALONE, not (hostname, comm) -- preserving the
+        exact cross-host dedup semantics the original _poll_host dispatch
+        had via self._cycle_seen_comms (a comm spanning multiple hosts
+        was only ever evaluated once per cycle, under whichever host's
+        iteration reached it first). _role_baseline_fallback_evaluate's
+        own _comm_cross_node_members query already covers every real
+        member across every host for a given comm regardless of which
+        hostname is passed in -- hostname here is purely a display label
+        on the emitted alert, never a query-scoping parameter (confirmed
+        by reading _role_baseline_fallback_evaluate itself). Evaluating
+        the same comm once per host it happens to appear on would both
+        redo identical work N times and risk the same real duplicate-
+        label class of bug _check_wait_induced's own docstring already
+        documents finding and fixing for its sibling cross-host case."""
+        now = time.time()
+        if now - self._last_role_baseline_check_at < ROLE_BASELINE_CHECK_INTERVAL_S:
+            return
+        if self._role_baseline_thread is not None and self._role_baseline_thread.is_alive():
+            return
+        self._last_role_baseline_check_at = now
+        targets = []
+        seen_comms_global = set()
+        for hostname, pairs in self._comm_buckets.items():
+            for comm, bucket, coll in pairs:
+                if comm in seen_comms_global:
+                    continue
+                seen_comms_global.add(comm)
+                targets.append((hostname, comm))
+
+        def _run():
+            for hostname, comm in targets:
+                self._run_check("role_baseline", self._check_role_baseline, hostname, comm)
+
+        self._role_baseline_thread = threading.Thread(target=_run, daemon=True)
+        self._role_baseline_thread.start()
 
     def _emit_dcgm_fallback(self, hostname, comm, member, slot, per_member, trigger):
         """P21.6.1 -- dedicated formatter, same reasoning as _emit_host/
@@ -6489,6 +6697,32 @@ class AlertEngine:
         can skip real samples) closes most of that gap without waiting
         for the whole job to finish -- see thresholds.py's own comment
         for the exact window-size comparison that picked 90s.
+
+        Capstone round 2 (2026-11) -- frozen-baseline fix for the long-
+        duration signal-fade finding. Scoring against the CURRENT
+        window's peer mean/stdev (as this check originally did) loses
+        power over a long job: real data traced across a 234-minute
+        fault job showed the straggler's own absolute recv-wait NEVER
+        converges with peers (confirmed the single lowest value in the
+        group at every sampled point across the whole job), but the
+        live PEER GROUP's own cross-rank variance grows substantially
+        within the first ~1000 rounds as MoE's own learned token router
+        settles into a persistent, real, non-fault load imbalance (see
+        PROXY_WAIT_BASELINE_BOOTSTRAP_N's own comment in thresholds.py
+        for the full real-data trace). This inflates the z-score's
+        denominator over time even though the underlying signal is
+        unchanged. Fix: _proxy_wait_baseline freezes each host's peer
+        mean/median/stdev from its first PROXY_WAIT_BASELINE_BOOTSTRAP_N
+        polls (reset whenever the dominant slurm_job_id on that host
+        changes) and scores every later poll against that frozen
+        reference. Both the live (current-window) and baseline-relative
+        z/mm are computed every poll; the emitted alert is gated on the
+        baseline-relative value once a baseline exists (falling back to
+        the live value during the bootstrap window, same cold-start
+        discipline _member_role_baseline already uses elsewhere in this
+        file), and the alert body reports both plus the baseline's own
+        age so a reader is never left assuming a "live" number that is
+        actually hours-old -- see log-readability fix below.
         """
         now_ts = time.time()
         start_ts = now_ts - T.PROXY_WAIT_LOOKBACK_S
@@ -6541,15 +6775,51 @@ class AlertEngine:
             peer_mean = statistics.mean(peer_vals)
             peer_median = statistics.median(peer_vals)
             peer_sd = statistics.stdev(peer_vals) if len(peer_vals) > 1 else 0
-            z = (peer_mean - worst_val) / peer_sd if peer_sd > 0 else (float("inf") if worst_val != peer_mean else 0.0)
-            mm = peer_median / worst_val if worst_val > 0 else float("inf")
+            live_z = (peer_mean - worst_val) / peer_sd if peer_sd > 0 else (float("inf") if worst_val != peer_mean else 0.0)
+            live_mm = peer_median / worst_val if worst_val > 0 else float("inf")
+
+            role_rank, role_n, slurm_job_id = role_info.get((hostname, worst), ("na", "na", ""))
+
+            # Capstone round 2 (2026-11) -- frozen-baseline bootstrap/
+            # freeze/reset. See thresholds.py's PROXY_WAIT_BASELINE_
+            # BOOTSTRAP_N and this function's own docstring for the real
+            # investigation this closes.
+            base = self._proxy_wait_baseline.get(hostname)
+            if base is None or (slurm_job_id and base.get("job_id") and slurm_job_id != base["job_id"]):
+                base = {"job_id": slurm_job_id, "samples": [], "frozen": None, "frozen_at": None}
+                self._proxy_wait_baseline[hostname] = base
+            if base["frozen"] is None:
+                base["samples"].append((peer_mean, peer_median, peer_sd))
+                if slurm_job_id:
+                    base["job_id"] = slurm_job_id
+                if len(base["samples"]) >= T.PROXY_WAIT_BASELINE_BOOTSTRAP_N:
+                    means = [s[0] for s in base["samples"]]
+                    medians = [s[1] for s in base["samples"]]
+                    sds = [s[2] for s in base["samples"]]
+                    base["frozen"] = (statistics.median(means), statistics.median(medians), statistics.median(sds))
+                    base["frozen_at"] = now_ts
+
+            if base["frozen"] is not None:
+                base_mean, base_median, base_sd = base["frozen"]
+                z = (base_mean - worst_val) / base_sd if base_sd > 0 else (float("inf") if worst_val != base_mean else 0.0)
+                mm = base_median / worst_val if worst_val > 0 else float("inf")
+                baseline_age_s = now_ts - base["frozen_at"]
+                scored_against = "baseline"
+            else:
+                # Bootstrap window -- no frozen reference yet for this
+                # (hostname, job) -- fall back to the live/current-window
+                # value, same cold-start discipline _member_role_baseline
+                # already uses elsewhere in this file.
+                z, mm = live_z, live_mm
+                baseline_age_s = None
+                scored_against = "live(bootstrapping)"
+
             qualifies = z > T.PROXY_WAIT_Z_THRESH and mm > T.PROXY_WAIT_MM_THRESH
             key = ("proxy_wait", hostname, worst)
             if qualifies:
                 new_active_keys.add(key)
             persisted, duration_s = self._proxy_wait_tracker.observe(key, 1.0 if qualifies else 0.0, now_ts)
             if persisted:
-                role_rank, role_n, slurm_job_id = role_info.get((hostname, worst), ("na", "na", ""))
                 z_report = z if z != float("inf") else 1e6
                 mm_report = mm if mm != float("inf") else 1e6
                 self._emit(
@@ -6558,6 +6828,35 @@ class AlertEngine:
                     anomaly_ts=now_ts, role_rank=role_rank, role_n=role_n,
                     persist_duration_s=duration_s, is_likely_root_cause=True,
                 )
+                # Log-readability (Step 4, 2026-11): a reader seeing only
+                # the [STRAGGLER-INCIDENT]/[ALERT] block above has no way
+                # to tell this was scored against a baseline frozen
+                # minutes or hours ago rather than live, current data.
+                # First version of this line stated the live-vs-frozen
+                # drift caveat unconditionally, regardless of how old the
+                # baseline actually was -- a genuinely independent
+                # fresh-eyes review (zero prior context, given only this
+                # line plus a sample firing) found that reads as
+                # confusing boilerplate on an early firing, where
+                # baseline_age is itself already near zero and nothing
+                # has had time to drift yet (see DESIGN_NOTES's own
+                # writeup for the full review). Fixed: the drift
+                # explanation now only appears once the baseline is
+                # actually old enough for it to be the real, relevant
+                # reason live_z differs from the scored z -- an early
+                # firing instead gets a short, neutral note with no
+                # drift claim.
+                age_disp = f"{baseline_age_s:.0f}s" if baseline_age_s is not None else "n/a"
+                if baseline_age_s is not None and baseline_age_s > T.PROXY_WAIT_LOOKBACK_S * 2:
+                    live_note = (f"(live values are recomputed from only the current {T.PROXY_WAIT_LOOKBACK_S:.0f}s "
+                                 f"window and have drifted from the frozen baseline above as this job has run on "
+                                 f"-- see README's Known Limitations for why this check scores against a frozen "
+                                 f"baseline instead of this live value)")
+                else:
+                    live_note = (f"(live value: what the current {T.PROXY_WAIT_LOOKBACK_S:.0f}s window alone would "
+                                 f"score, shown for reference)")
+                print(f"[{hostname}] [PROXY-WAIT-SCORING] member={worst} scored_against={scored_against} "
+                      f"baseline_age={age_disp} live_z={live_z:.2f} live_mm={live_mm:.2f} {live_note}", flush=True)
         self._reset_proxy_wait_keys(new_active_keys, now_ts)
 
     def _reset_proxy_wait_keys(self, new_active_keys, now_ts):

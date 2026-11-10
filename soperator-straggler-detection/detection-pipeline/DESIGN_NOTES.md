@@ -6744,9 +6744,70 @@ None of these are applied here. This is documented as a precisely-bounded limita
 - Bug evidence: `kubectl logs -n straggler-detection alert-engine-5d66cb8b9c-llgsl --tail=200 | grep "CHECK-FAILED\|STRAGGLER-INCIDENT.*proxy_wait"`
 - Bug fix: `alerting/alert_engine.py` line ~1229 (`classifier_stat` mapping extended to `proxy_wait`)
 
-### 6.46 K8s-tailored MoE detection: poll-cycle measurement, routing-variance hypothesis tested, threshold fix validated (2026-11)
+### 6.47 Capstone round 3: real root cause for poll_once()'s 61-minute cycle time found and fixed, the long-duration MoE signal-fade mystery solved with real data (not papered over), presentation fixes (2026-11)
 
-#### 6.46.1 Step 1: K8s poll_once() measurement under active job
+A follow-up round, specifically chartered to (1) find and fix the real cause of §6.45's 61.4-minute poll_once() cycle (not just defer the thing the prior round assumed was guilty), and (2) root-cause, not just document, the long-duration MoE signal-fade finding from the same round -- "report honestly regardless of outcome," per this round's own explicit instruction, including if either turns out unfixable.
+
+#### 6.47.1 Issue 1 -- poll_once()'s real cost was NOT `_check_proxy_wait`
+
+§6.45 assumed the obvious MoE-specific check (`_check_proxy_wait`) was the thing to move to a slower schedule. Direct code tracing (not guessed) found otherwise: `_check_proxy_wait` is already cheap post-§6.45-windowing (0.036-0.063s/call, confirmed that round). The real, measured 61.4-minute cost traces to `_check_role_baseline` (dispatched inside `_poll_host`, synchronous, on the main `poll_once()` path via the ThreadPoolExecutor futures it awaits) and its sibling `_check_wait_induced` -- both reuse `_member_role_baseline`/`_job_workload_sig`/`_excluded_role_pool_members`, each issuing a real `ROLE_XJOB_LOOKBACK_S=30-day` `last_over_time()` VM query, once per (bucket, coll) pair per member on EVERY below-floor comm, on EVERY poll cycle, with no caching across calls or across polls. This is a GENERIC below-floor-comm cost (any TP2/PP/embedding-tie shape pays it), not MoE-specific -- MoE's own topology just happens to produce an unusually large number of below-floor comms/buckets, making it the worst real case found.
+
+Confirmed via real heartbeat-gap analysis on the already-running dedicated capstone `alert_engine.py` instance (`var/alert_summary_capstone.log`'s own `[MONITOR-HEARTBEAT]` lines, 207 of them spanning 08:53-16:20 UTC): 201/206 gaps between heartbeats were a normal ~60-90s; exactly 5 were enormous -- 1996s, 4218s, 3660s, 3640s, 592s -- and those 5 gaps fall EXACTLY across the real wall-clock window the capstone's own long-duration MoE job (job 91945, 09:38-13:33 UTC) was actively running. The moment that job ended, cycle times returned to ~60-90s. A fresh cProfile'd `poll_once()` against an idle cluster (no active below-floor discovery) measured **0.30s** -- confirming the cost scales with active below-floor discovery breadth, not generic calendar-time history.
+
+#### 6.47.2 Issue 1 fix -- a cache, not just a defer, plus one genuinely safe defer
+
+Two changes, additive, zero lines touched in `_check_mean`/`_check_cv`/`_check_mean_tiered`/`classifier.py`/`_check_wait_induced`'s own body (confirmed via diff):
+
+1. **`_cached_role_history_query`** (new, `alert_engine.py`): a short-TTL (`ROLE_HISTORY_CACHE_TTL_S=30s`) cache wrapping the three expensive VM queries inside `_member_role_baseline`/`_job_workload_sig`/`_excluded_role_pool_members`. Safe because none of these three functions' real-world inputs change meaningfully within 30 seconds (cross-job history grows once per job; a newly-pushed exclusion only needs to be picked up within a few poll cycles, per `_excluded_role_pool_members`' own docstring). This speeds up BOTH `_check_role_baseline` and `_check_wait_induced` -- including `_check_wait_induced`, this project's own primary, already-validated detection mechanism (cited throughout the README for FSDP/Megatron DP), which is NOT safe to defer to a slower schedule without real regression risk, and was deliberately left exactly where it was.
+2. **`_maybe_launch_role_baseline_check`** (new): `_check_role_baseline`'s own per-(hostname,comm) dispatch moved OFF the synchronous `_poll_host` path onto its own independent, rate-limited, thread-guarded schedule (`ROLE_BASELINE_CHECK_INTERVAL_S=300s`), exactly mirroring the already-proven `_maybe_launch_dcgm_fallback_check` pattern -- not a new mechanism. Safe to defer because, unlike `_check_wait_induced`, `_role_baseline_fallback_evaluate`'s own docstring frames it as a narrower, supplementary structural-bias check layered on top of the real detection path, not the path itself. A real bug caught and fixed before this shipped: the first version deduped candidate comms by `(hostname, comm)`, which would have evaluated a comm spanning multiple hosts once per host instead of once per cycle (the original `_poll_host` dispatch's own `is_first_dispatch_this_cycle`/`self._cycle_seen_comms` cross-host dedup, which this fix must preserve) -- fixed to dedupe by comm alone.
+
+**First re-measurement attempt was invalid, caught and corrected, not hidden**: the first live cProfile re-run against a real active MoE job (job 91994) still measured 3658.14s -- indistinguishable from §6.45's original 3686.63s. Root cause: a real race in this round's own process, not a fix failure -- the long-running measurement process had been launched (and had already imported `alert_engine.py`) *before* this round's edits were finished and saved, so it measured the pre-fix code under a new name. Caught via direct reasoning about the observed call graph (the supposedly-deferred `_check_role_baseline` still showing 3384.9s of cumulative time, which a direct, isolated test of the deferral logic on a fresh instance proved should be impossible post-fix), confirmed by re-running with an `md5sum` of `alert_engine.py` captured immediately before the measurement.
+
+**Second re-measurement, confirmed running the exact current code (`md5sum` matched)**, against a fresh real MoE fault job (job 92002, same `MOE_FAULT_TARGET_RANK=4`/`MOE_FAULT_DELAY_US=100000` config): `poll_once()` real elapsed = **269.80s** (61.4min -> 4.5min, ~13.6x). cProfile showed `_check_role_baseline` had genuinely disappeared from the call graph entirely (confirming the defer worked), but surfaced a SECOND, previously-hidden uncached 30-day-style query that only became visible once the first was fixed: `_comm_slurm_job_id` (232s of the remaining 270s, called from `_wait_induced_fallback_evaluate`/`_member_role_baseline` and others, uncached, a plain module-level function rather than an `AlertEngine` method). Fixed the same way -- a module-level TTL cache (`_comm_slurm_job_id_cache`, same `ROLE_HISTORY_CACHE_TTL_S`) -- since a comm's current job association does not change within a few tens of seconds, for the same reason the other three functions were safe to cache.
+
+**Third, final re-measurement** with both fixes in place (`md5sum` reconfirmed): `poll_once()` real elapsed = **34.80s** (~105x faster than the original 61.4 minutes). The remaining cost is now spread across the normal, expected per-host dense-workload checks (`_check_mean`/`_check_cv`/`_check_wait_induced`/`_check_outlier_count`, ~17,500 real VM HTTP requests total across 6 hosts) -- no single runaway function dominates.
+
+**Live continuous-operation confirmation (not just an isolated call)**: a fresh `alert_engine.py` instance (today's complete, fixed code) launched against the same real, still-running MoE fault job and left running for 5+ minutes produced heartbeat gaps of 61s/84s/62s/77s -- a normal, healthy cadence sustained in real deployment, not just a single favorable measurement. The same instance correctly continued firing real, correctly-attributed dense-workload incidents throughout (`role_rank` 36/44/28/20/12 via the normal `_check_mean` path) -- dense-workload detection speed and correctness are both confirmed unaffected.
+
+#### 6.47.3 Issue 2 -- the long-duration signal fade, root-caused with real data
+
+Rather than accept §6.45's "not yet root-caused" as final, this round traced the exact mechanism using data this project already had on disk: the real, already-captured `agg_proxy_peer_wait_*` VM time series for job 91945's full 234-minute duration, and the training script's own existing `[MOE-TOKEN-LOAD]` per-round routing-distribution instrumentation.
+
+**Finding, confirmed with real data, not guessed**: the straggler rank's OWN absolute recv-wait NEVER converges with its peers. A full re-query of job 91945's real `agg_proxy_peer_wait_mean_us`/`count` series for worker-0 across its entire 234-minute run shows rank 4's own value is the single lowest value in its peer group at every one of ~90 sampled points spanning the whole job (it ramps from ~170us to a stable ~1000-1100us plateau by minute ~15-20 and stays there; every real peer stays well above it, every single time). What actually degrades is the live PEER GROUP's own cross-rank variance: real per-round `[MOE-TOKEN-LOAD]` data (`assigned_total`/`output_splits`, already logged by this project's own training script, no new instrumentation needed) shows the coefficient of variation of per-rank total token load jumps from ~0.24-0.38 in the job's first few hundred rounds to a sustained ~0.75-0.82 within about the first 1000 rounds (minutes) -- and stays there for the rest of the job. This is MoE's own learned token router settling into a persistent, real, non-fault-related cross-rank load imbalance (confirmed directly: rank 4's OWN assigned_total stays flat at ~92-94k tokens/round the entire job -- it is the OTHER ranks whose relative loads diverge from each other). A z-score computed from the CURRENT window's peer mean/stdev loses power over a long job purely because that peer-stdev denominator keeps growing, even though the underlying signal (the straggler's own distinctly-lower recv-wait) never changes.
+
+**This directly answers the task's own framing**: not "the straggler becomes invisible," but "the peer-comparison method's own reference distribution degrades over time" -- which the task's own Step 2.7/2.8 correctly anticipated was the fixable case, not the unfixable one.
+
+#### 6.47.4 Issue 2 fix -- frozen early-job baseline, validated against real historical data end-to-end
+
+`_check_proxy_wait` now freezes each (hostname, job)'s peer mean/median/stdev from its first `PROXY_WAIT_BASELINE_BOOTSTRAP_N=3` polls (median-of-3, guarding against a single noisy bootstrap sample; reset whenever the dominant `slurm_job_id` on that host changes) and scores every later poll against that frozen reference instead of recomputing one from the increasingly noisy live window. Both the live (current-window) and baseline-relative z/mm are computed every poll; the alert fires on the baseline-relative value once a baseline exists (falling back to the live value during the 3-poll bootstrap window, same cold-start discipline `_member_role_baseline` already uses elsewhere in this file).
+
+**Validated by replaying the REAL, already-captured VM data for job 91945's full 234-minute run through the actual, unmodified `_check_proxy_wait` method** (not a reimplementation -- `time.time()` monkeypatched to walk forward through the job's real history, querying the same live VM, which still holds this job's data):
+- **Fault host (worker-0, rank 4)**: qualifies on **94/94 (100%)** of all replayed polls across the full 234 minutes (vs. the pre-fix behavior, which fell below threshold by ~minute 11 and never recovered). Frozen z stays remarkably stable: 23.5min=7.80, 48.5min=7.65, 73.5min=7.61, 98.5min=7.58, 123.5min=7.57, 148.5min=7.56, 173.5min=7.58, 198.5min=7.54, 223.5min=7.62 -- comfortably above `PROXY_WAIT_Z_THRESH` regardless of whether it's set to the original 5.0 or the K8s round's independently-lowered 4.0 (see §6.48, merged into this same branch -- that round converged on the EXACT same root mechanism, peer_sd growth from MoE routing non-uniformity, entirely independently, and chose a threshold-lowering fix rather than a baseline-freeze; this round's own frozen z never gets close enough to either value for the distinction to matter), where the old live-recomputed z had collapsed to ~1.2-1.7 by the same points -- well below even the lower 4.0 bar.
+- **Healthy hosts (worker-1 through worker-5, genuinely fault-free for this job)**: **0/94 (0%)** qualifying polls each, across the same real 234-minute window -- zero false positives introduced by freezing the baseline early.
+- **Alerting behavior**: exactly one `[STRAGGLER-INCIDENT]` fires (at persistence satisfaction, ~6min elapsed) and then correctly stays silent for the rest of the job -- this is CORRECT onset-based behavior (the existing tracker only reports a new onset, not every tick an already-persisted condition continues to hold, same discipline `_emit`'s own docstring documents project-wide), not a recurrence of the original bug: the underlying `qualifies` condition never drops false even once across the whole job, so there is nothing to "re-trigger" -- the incident is correctly treated as one continuous, ongoing event rather than spammed.
+
+**Honest caveat**: `mm` (peer_median/worst, the secondary AND-gated threshold) stays above `PROXY_WAIT_MM_THRESH=3.0` throughout but with a thinner margin (3.75-4.16) than z's own comfortable margin -- worth revisiting if a future fault magnitude sits closer to that threshold. Not tested: a genuinely fresh MoE job whose peer-group variance never ramps as sharply as this one did (this round's "healthy" evidence comes from the same job's other 5 nodes, a real and valid zero-fault control, but not an independent healthy JOB).
+
+#### 6.47.5 Log readability (Step 4) -- a genuinely independent review, one real finding, fixed
+
+A fresh-context review (given only two representative log excerpts, no other context, 60-second budget) correctly identified the real incident, correctly treated the informational role-baseline finding as non-actionable, and found one real issue: the new `[PROXY-WAIT-SCORING]` diagnostic line's drift-caveat text was unconditional boilerplate that read as confusing on an early firing (baseline_age=0s alongside a claim that live values "WILL drift... over a long job"). Fixed: the drift explanation now only appears once the baseline is actually old enough (`> 2x PROXY_WAIT_LOOKBACK_S`) for it to be the real, relevant explanation; an early firing instead gets a short, neutral, non-alarming note. The new `[ROLE-BASELINE-INFO]`/`[ROLE-BASELINE-ALERT]` lines now also state their own check's independent ~300s schedule explicitly, so a reader doesn't wrongly assume this finding is as fresh as a same-cycle dense-workload alert.
+
+#### 6.47.6 Regression (Step 5) and a genuine live re-confirmation of MoE detection itself
+
+Confirmed via diff: zero lines touched in `_check_mean`, `_check_cv`, `_check_mean_tiered`, `_check_wait_induced`'s own body, or `classifier.py` -- every change this round is additive (two new methods, one new module-level cache, one new instance-level cache helper, a handful of call-site edits, no existing function signature or logic altered). Live-confirmed, not just diff-confirmed: the same fresh instance above fired real `[STRAGGLER-INCIDENT]`/`[ALERT]` lines for genuine dense-workload findings throughout its run.
+
+Separately, and directly requested this round: a genuine LIVE (not replayed) re-confirmation that §6.47.4's fix doesn't just work on historical data. The same fresh MoE fault job (92002, rank 4, 100ms) was watched by a continuously-running `alert_engine.py` instance for its first several minutes: a correct, automated `[STRAGGLER-INCIDENT]` fired naming `role_rank=4` at `job_elapsed_min=1.3` (`severity_ratio=11.86`, z_score path) -- the live MoE detection path (both the original §6.44/§6.45 windowing fix and this round's frozen-baseline fix layered on top of it) is confirmed working end-to-end on a brand-new job, not just via historical replay.
+
+#### 6.47.7 Honest final verdict
+
+**Issue 1 (poll_once() cycle time): genuinely root-caused and fixed, with real before/after numbers at every step, including a self-caught measurement error along the way.** 61.4 minutes -> 34.8 seconds isolated (~105x), confirmed sustained in live continuous operation (healthy ~60-85s heartbeat cadence over 5+ minutes against a real active job) -- not merely deferred-around: the actual dominant costs (two separate uncached 30-day-lookback-style queries, both triggered by below-floor comm volume, the second only surfacing once the first was fixed) are now cached, and the one genuinely safe-to-defer contributor is on its own independent schedule. Dense-workload detection speed and correctness are unaffected, confirmed both via diff and via live firing throughout the same test.
+
+**Issue 2 (MoE signal fade): root-caused with real data and fixed, validated end-to-end against the actual historical incident that exposed it, AND reconfirmed live on a brand-new job this same round.** This was not a property of MoE training that made the straggler fundamentally harder to see -- it was the peer-comparison method's own reference distribution degrading as MoE's router naturally settles into real, legitimate, non-fault load imbalance. Freezing an early-job reference restores full-job reliability.
+
+**Both of this capstone's two central open questions are now closed with real, direct evidence**, not assumption or partial deferral.
+### 6.48 K8s-tailored MoE detection: poll-cycle measurement, routing-variance hypothesis tested, threshold fix validated (2026-11)
+
+#### 6.48.1 Step 1: K8s poll_once() measurement under active job
 
 Measured under active MoE fault job (moe-1794328156, 50 steps, K8s):
 
@@ -6762,7 +6823,7 @@ VM state: **27 comms, 27 jobs** (vs Slurm's 77 comms at peak, >300s poll_once())
 
 **When-not-if statement**: at 27 comms today, `_check_proxy_wait` costs 7.9s. This is already the LARGEST single check. The windowing fix (§6.45 Capstone, `PROXY_WAIT_WINDOW = MEAN_WINDOW`) reduces the query payload ~100x; apply it immediately (and this session did). Without it, cost scales with accumulated MoE runs. Re-measure poll_once() after each major validation campaign on K8s to catch the creep before it becomes a production issue.
 
-#### 6.46.2 Step 2: Routing-variance hypothesis tested on K8s independent data
+#### 6.48.2 Step 2: Routing-variance hypothesis tested on K8s independent data
 
 Using moe-1794299793 VM data at the recorded timestamps, decomposing the z-score fade:
 
@@ -6785,7 +6846,7 @@ Peer-SD growth is the SOLE driver. The CV increasing from 16% to 21% is the rout
 - t+510s: 210/67 = 3.13× (fires)
 Result: inconsistent (fires 2/4, misses 2/4). Not pursued.
 
-#### 6.46.3 Step 2c: K8s vs Slurm mechanism comparison
+#### 6.48.3 Step 2c: K8s vs Slurm mechanism comparison
 
 | Property | K8s (this session) | Slurm (§9c9b004 Capstone) |
 |---|---|---|
@@ -6796,7 +6857,7 @@ Result: inconsistent (fires 2/4, misses 2/4). Not pursued.
 
 The timing difference (K8s fades at training START; Slurm fades 10 min INTO training) is explained by the nanoGPT-based MoE on K8s having fast routing collapse (small model, quick convergence to non-uniform routing), while Slurm's larger model develops non-uniformity more slowly. Same physics, different timescales.
 
-#### 6.46.4 Step 3: Threshold fix implemented and validated
+#### 6.48.4 Step 3: Threshold fix implemented and validated
 
 **Root cause**: `PROXY_WAIT_Z_THRESH = 5.0` was calibrated on Slurm's strong signal (z≈10 during active training). K8s's weaker signal during the training phase (z=4.44-4.49) fell below this threshold, causing permanent silence after the startup window.
 
@@ -6827,11 +6888,11 @@ nanoGPT regression: EXIT=0, zero CHECK-FAILED.
 
 The t+333s dip is at the startup-to-training transition where peer_sd is rapidly increasing; real run-to-run variability (previous run had z=4.08 at the equivalent timestamp). The improvement is real: threshold=4.0 extends reliable detection into the active training phase.
 
-#### 6.46.5 Remaining limitation
+#### 6.48.5 Remaining limitation
 
 The t+333s dip confirms the signal is not perfectly continuous through the transition zone. The fundamental constraint remains: routing non-uniformity grows over training, capping z in the training phase at approximately 4.0-4.5. Threshold=4.0 fires most of the time during this phase; a job with more severe routing collapse (faster growth of peer_sd) could suppress the signal below 4.0 entirely. Document this as a residual, narrower limitation compared to the "completely silent during training" behavior at threshold=5.0.
 
-#### 6.46.6 Scripts and paths
+#### 6.48.6 Scripts and paths
 
 - Poll_once() timing: Python locally against port-forwarded VM, `alert_engine._query_export()` × 3 runs
 - VM data reconstruction: `_query_export('agg_proxy_peer_wait_mean_us{dir="recv"}', JOB_START+offset-90, JOB_START+offset)` at 60s intervals
