@@ -79,6 +79,32 @@ _straggler_sleep_s = float(os.environ.get('STRAGGLER_SLEEP_MS', '0')) / 1000.0
 _straggler_targets_env = os.environ.get('STRAGGLER_TARGET_RANKS', '')
 _straggler_target_ranks = {int(r) for r in _straggler_targets_env.split(',') if r.strip() != ''}
 
+# Capstone fault-type diversity (2026-11): same additive compute-bound
+# delay mechanism as the nanoGPT copy (train.py's own _straggler_delay) --
+# STRAGGLER_FAULT_KIND=compute keeps the target rank's GPU genuinely busy
+# via a real, repeated matmul instead of an idle time.sleep(), same
+# STRAGGLER_SLEEP_MS duration knob, same target-rank selection. Default
+# 'sleep' preserves this file's exact existing behavior unchanged.
+_straggler_fault_kind = os.environ.get('STRAGGLER_FAULT_KIND', 'sleep')
+_straggler_compute_tensor_cache = {}
+
+
+def _straggler_delay(seconds):
+    if seconds <= 0:
+        return
+    if _straggler_fault_kind != 'compute':
+        time.sleep(seconds)
+        return
+    dev = torch.cuda.current_device()
+    t = _straggler_compute_tensor_cache.get(dev)
+    if t is None:
+        t = torch.randn(2048, 2048, device=dev, dtype=torch.float32)
+        _straggler_compute_tensor_cache[dev] = t
+    start = time.time()
+    while time.time() - start < seconds:
+        t = t @ t
+        torch.cuda.synchronize(dev)
+
 # Real storage I/O-wait fault injection (Path C validation): unlike
 # STRAGGLER_SLEEP_MS above (a synthetic time.sleep()), this does a real
 # blocking read() of a real file on /tmp (confirmed real-disk-backed,
@@ -308,7 +334,7 @@ def forward_step(data_iterator, model: GPTModel):
                               labels=labels)
 
     if _straggler_sleep_s > 0 and int(os.environ.get('RANK', '-1')) in _straggler_target_ranks:
-        time.sleep(_straggler_sleep_s)
+        _straggler_delay(_straggler_sleep_s)
 
     if _storage_fault_file_mb > 0 and int(os.environ.get('RANK', '-1')) in _storage_fault_target_ranks:
         global _storage_fault_file_path
