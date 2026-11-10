@@ -99,7 +99,20 @@ APPTIMING_MM_THRESH = 1.3
 # above the 1ms range's ~2.3 ceiling and the healthy ~1.1 noise floor,
 # and well below the 20/100ms floor of ~8 -- deliberately NOT tuned to
 # catch the already-disclosed-unreliable 1ms case.
-PROXY_WAIT_Z_THRESH = 5.0
+# S6.44 K8s long-duration investigation: original 5.0 missed the training
+# phase entirely on this cluster (z=4.44-4.49 during active training, below
+# threshold). Root cause confirmed: peer_sd grows 1.74× as routing non-
+# uniformity increases once training begins, diluting z from 6.35 to 4.44;
+# the straggler is STILL anomalous (mm=22-25, ratio vs own early baseline
+# 2.9x), but the z-score denominator grew faster than the numerator.
+# 4.0 fires throughout all training phases (z=4.44-4.49 > 4.0) while
+# maintaining 2.4-unit clearance above the healthy band max (z=1.59).
+# Effect on Slurm: none — Slurm's strong-signal z≈10 >> 4.0 (still fires
+# as before); Slurm's known late-job fade to z≈1.7 still doesn't fire
+# regardless of this threshold (1.7 < 4.0), which is correct: a signal
+# that has genuinely faded should not fire. Validated on K8s: 300-step
+# fault fires throughout all training phases; healthy stays silent.
+PROXY_WAIT_Z_THRESH = 4.0
 PROXY_WAIT_MM_THRESH = 3.0
 # Real bug found live (this session, during end-to-end validation): a
 # bare instant query (one latest sample per series) is far noisier than
