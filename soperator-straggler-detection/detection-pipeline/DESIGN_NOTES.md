@@ -6838,3 +6838,82 @@ The t+333s dip confirms the signal is not perfectly continuous through the trans
 - Fault validation: `k8s/run_moe_k8s.sh 300 29817 dump` → moe-1794330545; `/tmp/validation_fault.log`
 - Healthy validation: `k8s/run_moe_k8s.sh 300 29818 dump` → moe-1794331090; `/tmp/validation_healthy.log`
 - Threshold fix: `alerting/thresholds.py` commit 1009443
+
+### 6.47 Transition-window dip characterization, Slurm threshold re-evaluation, final cross-platform verdict (2026-11)
+
+#### 6.47.1 K8s transition-window dip: repeatable, root-caused, NOT safely closeable
+
+**Three trials run** (moe-1794330545, moe-1794332021, moe-1794332582), all 300-step, 100ms, rank 4, threshold=4.0:
+
+| Trial | t+~330s z | Below 4.0? | t+~400s z | Done z |
+|---|---|---|---|---|
+| Trial 1 (moe-1794330545) | 3.83 | **Yes** | 4.39 | 4.41 |
+| Trial 2 (moe-1794332021) | 4.03 | No (barely above) | 4.44 | 4.40 |
+| Trial 3 (moe-1794332582) | 3.84 | **Yes** | 4.39 | 4.42 |
+
+**The dip is repeatable**: 2/3 trials show z < 4.0 at t≈320-350s. The range is 3.83-4.03.
+
+**Root cause confirmed via peer_sd data** (from Trial 3):
+- During startup strong signal (t+60s to t+192s): peer_sd = 597-607µs (CV=16%)
+- At transition dip (t+322s): peer_sd = 1003µs (CV=25%) — 1.67× spike in one 60s window
+- Counterfactual: if peer_sd had stayed at 600µs, z at t+322s would be (4049-200)/600 = 6.41 (fires well)
+- Same peer_sd-growth mechanism as the main fade, but compressed into one poll window as the routing non-uniformity onset is abrupt
+
+**Why NOT safely closeable**: healthy run at the same transition window showed z=3.23 (peer_mean=664µs, peer_sd=66µs). Gap between healthy and fault dip: only 0.60-0.80 z-units (3.83-3.23 to 4.03-3.23). Threshold 3.7 would provide only 0.47 z-units margin above the highest measured healthy z (3.23 < 3.7, so no false positive from this run, but the margin is too thin for confident production deployment).
+
+**Formally bounded gap**: one poll window (60-90 seconds) near t≈320-350s (the NCCL-init-to-training handover) where z briefly dips to 3.83-4.03 and may (2/3 probability) fall just below the 4.0 threshold. The fault resumes firing at z=4.39-4.44 in the NEXT poll window. This is documented as a known, small, bounded limitation, not "fully solved." The detector fires for the initial startup strong signal AND throughout active training, with one brief transition gap.
+
+#### 6.47.2 Slurm threshold re-evaluation
+
+Using the §6.45.3 windowed Slurm z-score trace (100ms fault, role_rank=4, 60+ minute job):
+
+| Elapsed | z | Fires at 5.0? | Fires at 4.0? | Fires at 3.0? |
+|---|---|---|---|---|
+| 4.35 min | 11.68 | Yes | Yes | Yes |
+| 6.8 min | 8.74 | Yes | Yes | Yes |
+| 9.3 min | 6.71 | Yes | Yes | Yes |
+| 11.8 min | 1.80 | No | No | No |
+| 29.3 min | 1.43 | No | No | No |
+| Plateau | ~1.46 | No | No | No |
+
+**Key structural difference from K8s**: Slurm's z drops SHARPLY from 6.71 to 1.80 in one 2.5-minute window, then plateaus at z≈1.46. The plateau sits AT OR BELOW Slurm's healthy band (estimated ~1.5-1.9 based on Slurm's noise floor). No threshold between 1.5 and 11.8 fires during the plateau without also risking false positives on healthy runs.
+
+**Slurm threshold stays at 5.0.** The K8s fix (5.0→4.0) was justified because K8s's training-phase signal (z≈4.4) was well above the K8s healthy ceiling (z≈1.91), providing 2.1+ z-units of safe margin. Slurm's plateau (z≈1.46) is below any threshold that would maintain healthy-band separation. Lowering Slurm's threshold to 4.0 extends detection by approximately 2 minutes (until ~11.8 min) but does NOT cover the 60-minute job duration, and provides no additional practical value.
+
+#### 6.47.3 K8s vs Slurm mechanism comparison — resolved
+
+Both platforms confirm the same mechanism: peer_sd grows as routing non-uniformity increases, diluting z. The quantitative difference:
+
+| Property | K8s | Slurm |
+|---|---|---|
+| Signal onset | NCCL init, z=6.1-6.3 | Early training iterations, z≈11.7 |
+| Fade onset | t≈270-350s (startup-to-training transition) | t≈9-12 min into training |
+| z at steady state | 4.4-4.5 (above 4.0 threshold) | 1.4-1.5 (at/below healthy band) |
+| Threshold that fires | 4.0 (implemented, works) | None available without false positives |
+
+This IS one shared mechanism (peer_sd growth) with different severity:
+- K8s: peer_sd grows 1.67× at the transition, then stabilizes → z≈4.4 (recoverable)
+- Slurm: peer_sd grows enough to push z to 1.4 → irrecoverable without false positives
+
+The SEVERITY difference (K8s: z recovers to 4.4; Slurm: z drops to 1.4) reflects model/topology differences: K8s uses the smaller nanoGPT-MoE with 16 GPUs; Slurm uses a larger Megatron-MoE with 48 GPUs and potentially more complex routing dynamics. Same root cause, different degree.
+
+#### 6.47.4 Final consolidated cross-platform MoE live detection verdict
+
+| Platform | Threshold | Fires during? | Gap |
+|---|---|---|---|
+| K8s | 4.0 | Startup + active training (with brief 60-90s transition dip in ~2/3 runs) | One window near t≈320-350s |
+| Slurm | 5.0 | First ~10 min of job only | Remainder of job (60+ min) silent |
+
+**K8s**: substantially improved by the threshold fix. Live detection fires throughout a realistic job with one documented, narrow, bounded gap. Appropriate for production monitoring with the gap disclosed.
+
+**Slurm**: the late-job silence (after t≈12 min) is a confirmed fundamental limitation of the proxy-wait signal on this platform at this model scale. No threshold adjustment can recover detection during the plateau. The first ~10 minutes of detection is reliable and correct; beyond that the signal has entered the healthy noise band and cannot be distinguished from zero-fault conditions using this metric alone.
+
+**Regression**: nanoGPT 100-step, EXIT=0 both nodes, 0 CHECK-FAILED, 0 false alerts.
+
+#### 6.47.5 Scripts and paths
+
+- K8s trials: `k8s/run_moe_k8s.sh 300 29820/29821 dump` → moe-1794332021, moe-1794332582
+- Healthy trial: `k8s/run_moe_k8s.sh 300 29822 dump` → moe-1794334578
+- Poll logs: `/tmp/trial2_poll.log`, `/tmp/trial3_poll.log`, `/tmp/healthy_full_poll.log`
+- Slurm data source: §6.45.3 windowed z-score trace
+- Regression: `k8s/run_k8s.sh 100 29823 auto` → straggler-train-1794335596
