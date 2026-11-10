@@ -43,6 +43,40 @@ if [ -z "${NEBIUS_REGION}" ]; then
   return 1
 fi
 
+# Match Terraform's default and the documented terraform.tfvars workflow when
+# deciding whether a Grafana Observability credential is needed. This is not a
+# general Terraform input evaluator; alternate -var/-var-file values are not
+# available when environment.sh runs.
+K8S_GRAFANA_ENABLED="${TF_VAR_enable_grafana:-true}"
+case "${K8S_GRAFANA_ENABLED}" in
+  true|false) ;;
+  *)
+    echo "Error: TF_VAR_enable_grafana must be true or false when set." >&2
+    return 1
+    ;;
+esac
+
+K8S_TERRAFORM_TFVARS="${PWD}/terraform.tfvars"
+if [[ -f "${K8S_TERRAFORM_TFVARS}" ]]; then
+  K8S_TFVARS_GRAFANA_ASSIGNMENT=$(sed -En \
+    '/^[[:space:]]*enable_grafana[[:space:]]*=/p' \
+    "${K8S_TERRAFORM_TFVARS}")
+  if [[ -n "${K8S_TFVARS_GRAFANA_ASSIGNMENT}" ]]; then
+    if [[ "${K8S_TFVARS_GRAFANA_ASSIGNMENT}" == *$'\n'* ]]; then
+      echo "Error: terraform.tfvars must contain at most one literal enable_grafana = true or false assignment." >&2
+      return 1
+    fi
+    K8S_TFVARS_GRAFANA_VALUE=$(printf '%s\n' "${K8S_TFVARS_GRAFANA_ASSIGNMENT}" | sed -En \
+      's/^[[:space:]]*enable_grafana[[:space:]]*=[[:space:]]*(true|false)([[:space:]]*(#|\/\/).*)?$/\1/p')
+    if [[ "${K8S_TFVARS_GRAFANA_VALUE}" != "true" && "${K8S_TFVARS_GRAFANA_VALUE}" != "false" ]]; then
+      echo "Error: terraform.tfvars must contain at most one literal enable_grafana = true or false assignment." >&2
+      return 1
+    fi
+    K8S_GRAFANA_ENABLED="${K8S_TFVARS_GRAFANA_VALUE}"
+  fi
+fi
+unset K8S_TERRAFORM_TFVARS K8S_TFVARS_GRAFANA_ASSIGNMENT K8S_TFVARS_GRAFANA_VALUE
+
 # IAM token
 unset NEBIUS_IAM_TOKEN
 export NEBIUS_IAM_TOKEN=$(nebius iam get-access-token)
@@ -159,6 +193,28 @@ else
   echo "Service account is already a member of editors group"
 fi
 
+# Prepare the six-month, service-specific Observability static key before
+# Terraform planning. The helper reuses it until its final 30 days.
+K8S_TRAINING_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+if [[ "${K8S_GRAFANA_ENABLED}" == "true" ]]; then
+  GRAFANA_OBSERVABILITY_PROJECT_ID="${NEBIUS_PROJECT_ID}"
+  GRAFANA_OBSERVABILITY_SERVICE_ACCOUNT_ID="${NEBIUS_SA_ID}"
+  GRAFANA_OBSERVABILITY_CACHE_NAMESPACE="${TF_VAR_cluster_name}"
+  if ! source "${K8S_TRAINING_DIR}/../scripts/prepare-grafana-observability-key.sh"; then
+    unset K8S_TRAINING_DIR K8S_GRAFANA_ENABLED GRAFANA_OBSERVABILITY_PROJECT_ID
+    unset GRAFANA_OBSERVABILITY_SERVICE_ACCOUNT_ID GRAFANA_OBSERVABILITY_CACHE_NAMESPACE
+    return 1
+  fi
+  unset GRAFANA_OBSERVABILITY_PROJECT_ID GRAFANA_OBSERVABILITY_SERVICE_ACCOUNT_ID
+  unset GRAFANA_OBSERVABILITY_CACHE_NAMESPACE
+else
+  unset TF_VAR_grafana_observability_key_id
+  unset TF_VAR_grafana_observability_access_token
+  unset GRAFANA_OBSERVABILITY_KEY_EXPIRES_AT
+  echo "Grafana is disabled; skipping Observability key preparation."
+fi
+unset K8S_TRAINING_DIR
+
 # Nebius service account access key
 DATE_FORMAT='+%Y-%m-%dT%H:%M:%SZ'
 if [[ "$(uname)" == "Darwin" ]]; then
@@ -229,3 +285,10 @@ echo "NEBIUS_VPC_SUBNET_ID: ${NEBIUS_VPC_SUBNET_ID}"
 echo "NEBIUS_BUCKET_NAME: ${NEBIUS_BUCKET_NAME}"
 echo "AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}"
 echo "AWS_SECRET_ACCESS_KEY: <redacted>"
+if [[ "${K8S_GRAFANA_ENABLED}" == "true" ]]; then
+  echo "GRAFANA_OBSERVABILITY_KEY_ID: ${TF_VAR_grafana_observability_key_id}"
+  echo "GRAFANA_OBSERVABILITY_KEY_EXPIRES_AT: ${GRAFANA_OBSERVABILITY_KEY_EXPIRES_AT}"
+else
+  echo "GRAFANA_OBSERVABILITY_KEY: not prepared (Grafana disabled)"
+fi
+unset K8S_GRAFANA_ENABLED

@@ -17,7 +17,7 @@ variables {
   o11y = {
     nebius_o11y_agent = { enabled = false }
     prometheus        = { enabled = false }
-    grafana           = { enabled = true }
+    grafana           = { enabled = false }
     loki = {
       enabled = true
       region  = "eu-west2"
@@ -37,11 +37,6 @@ run "default_cluster_with_loki_enabled" {
     condition     = nebius_iam_v2_access_key.loki_s3_key[0].name == "k8s-training.loki-s3-access-key" && nebius_iam_v2_access_key.loki_s3_key[0].secret_delivery_mode == "MYSTERY_BOX"
     error_message = "Loki must use the cluster-specific key name and MysteryBox delivery."
   }
-
-  assert {
-    condition     = nebius_iam_v2_access_key.grafana_key[0].name == "k8s-training.grafana-access-key"
-    error_message = "Grafana must use the cluster-specific key name."
-  }
 }
 
 run "additional_cluster_has_distinct_key_names" {
@@ -52,8 +47,8 @@ run "additional_cluster_has_distinct_key_names" {
   }
 
   assert {
-    condition     = nebius_iam_v2_access_key.loki_s3_key[0].name == "training-b.loki-s3-access-key" && nebius_iam_v2_access_key.grafana_key[0].name == "training-b.grafana-access-key"
-    error_message = "Additional clusters must have distinct access-key names."
+    condition     = nebius_iam_v2_access_key.loki_s3_key[0].name == "training-b.loki-s3-access-key"
+    error_message = "Additional clusters must have distinct Loki access-key names."
   }
 }
 
@@ -65,7 +60,7 @@ run "legacy_module_caller_keeps_names" {
   }
 
   assert {
-    condition     = nebius_iam_v2_access_key.loki_s3_key[0].name == "loki-s3-access-key" && nebius_iam_v2_access_key.grafana_key[0].name == "grafana-access-key"
-    error_message = "Callers without a cluster name must retain their legacy access-key names."
+    condition     = nebius_iam_v2_access_key.loki_s3_key[0].name == "loki-s3-access-key"
+    error_message = "Callers without a cluster name must retain the legacy Loki access-key name."
   }
 }

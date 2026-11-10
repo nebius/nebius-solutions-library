@@ -30,6 +30,34 @@ class EnvironmentTests(unittest.TestCase):
         self.stub("nebius", '''#!/bin/sh
 printf '%s\n' "$*" >> "$TEST_CALL_LOG"
 case "$*" in
+  "iam service-account get-by-name "*)
+    printf '%s\\n' 'mock-id'
+    exit 0
+    ;;
+  "iam static-key issue "*)
+    if [ "${TEST_STATIC_KEY_ISSUE_NO_ID:-0}" -eq 1 ]; then
+      printf '%s\\n' '{"token":"mock-grafana-token","operation":{"id":"mock-operation"}}'
+    else
+      printf '%s\\n' '{"metadata":{"id":"mock-grafana-key"},"token":"mock-grafana-token"}'
+    fi
+    exit 0
+    ;;
+  "iam static-key get-by-name "*)
+    printf '%s\\n' '{"metadata":{"id":"mock-grafana-key"}}'
+    exit 0
+    ;;
+  "iam static-key delete "*|"iam static-key revoke "*)
+    cat >/dev/null 2>&1 || true
+    exit 0
+    ;;
+  "iam static-key find "*)
+    cat >/dev/null
+    if [ "${TEST_STATIC_KEY_FIND_EXIT:-0}" -ne 0 ]; then
+      exit "${TEST_STATIC_KEY_FIND_EXIT}"
+    fi
+    printf '%s\\n' "{\\"staticKey\\":{\\"metadata\\":{\\"id\\":\\"${TEST_STATIC_KEY_FIND_ID:-mock-grafana-key}\\"},\\"status\\":{\\"active\\":${TEST_STATIC_KEY_FIND_ACTIVE:-true}}}}"
+    exit 0
+    ;;
   "vpc network list "*)
     printf '%s\\n' "$TEST_NETWORKS_JSON"
     exit "${TEST_NETWORKS_EXIT:-0}"
@@ -206,6 +234,203 @@ printf '%s\n' '{"metadata":{"id":"mock-id"},"items":[{"metadata":{"id":"mock-sub
         self.assertIn('key    = "k8s-training.tfstate"',
                       (self.root / "terraform_backend_override.tf").read_text())
         self.assertTrue(self.log.exists())
+
+    def test_grafana_observability_key_is_created_once_and_reused(self):
+        helper = SCRIPT.parents[1] / "scripts/prepare-grafana-observability-key.sh"
+        self.assertNotIn("--arg token", helper.read_text())
+        legacy_file = self.root / "grafana_access_token.txt"
+        legacy_file.write_text("legacy-token")
+        result = self.source(
+            command=(
+                'source "$1" && source "$1" && '
+                'test "$TF_VAR_grafana_observability_access_token" = mock-grafana-token && '
+                'printf "key=%s expires=%s\\n" '
+                '"$TF_VAR_grafana_observability_key_id" '
+                '"$GRAFANA_OBSERVABILITY_KEY_EXPIRES_AT"'
+            ),
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("key=mock-grafana-key expires=", result.stdout)
+        calls = self.log.read_text().splitlines()
+        self.assertEqual(sum(call.startswith("iam static-key issue ") for call in calls), 1)
+        self.assertEqual(sum(call.startswith("iam static-key find ") for call in calls), 1)
+        find_call = next(call for call in calls if call.startswith("iam static-key find "))
+        self.assertIn("--file /dev/stdin", find_call)
+        self.assertNotIn("mock-grafana-token", find_call)
+        key_file = self.root / ".grafana_observability_key.k8s-training.json"
+        self.assertEqual(key_file.stat().st_mode & 0o777, 0o600)
+        self.assertNotIn("mock-grafana-token", result.stdout)
+        self.assertFalse(legacy_file.exists())
+
+    def test_issued_key_id_is_resolved_by_name_when_issue_response_omits_it(self):
+        result = self.source({"TEST_STATIC_KEY_ISSUE_NO_ID": "1"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        key_file = self.root / ".grafana_observability_key.k8s-training.json"
+        self.assertEqual(json.loads(key_file.read_text())["key_id"], "mock-grafana-key")
+        calls = self.log.read_text().splitlines()
+        lookup_call = next(
+            call for call in calls if call.startswith("iam static-key get-by-name ")
+        )
+        self.assertIn("--parent-id mock-id", lookup_call)
+        self.assertIn("--name k8s-training.grafana-observability-", lookup_call)
+
+    def test_new_key_is_deleted_when_local_cache_cannot_be_written(self):
+        result = self.source({
+            "GRAFANA_OBSERVABILITY_KEY_FILE": str(
+                self.root / "missing-parent" / "grafana-key.json"
+            )
+        })
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(
+            "Removed newly issued Grafana Observability key mock-grafana-key "
+            "after credential preparation failed.",
+            result.stderr,
+        )
+        calls = self.log.read_text().splitlines()
+        self.assertIn("iam static-key delete --id mock-grafana-key", calls)
+        self.assertFalse((self.root / "missing-parent" / "grafana-key.json").exists())
+
+    def test_reused_cache_permissions_are_repaired(self):
+        key_file = self.root / ".grafana_observability_key.k8s-training.json"
+        key_file.write_text(json.dumps({
+            "project_id": "mock-project",
+            "service_account_id": "mock-id",
+            "key_id": "mock-grafana-key",
+            "token": "mock-grafana-token",
+            "expires_at": "2099-01-01T00:00:00Z",
+        }))
+        key_file.chmod(0o644)
+        result = self.source()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(key_file.stat().st_mode & 0o777, 0o600)
+        calls = self.log.read_text().splitlines()
+        self.assertEqual(sum(call.startswith("iam static-key find ") for call in calls), 1)
+        self.assertEqual(sum(call.startswith("iam static-key issue ") for call in calls), 0)
+
+    def test_remotely_invalid_cached_key_is_replaced(self):
+        key_file = self.root / ".grafana_observability_key.k8s-training.json"
+        key_file.write_text(json.dumps({
+            "project_id": "mock-project",
+            "service_account_id": "mock-id",
+            "key_id": "revoked-key",
+            "token": "revoked-token",
+            "expires_at": "2099-01-01T00:00:00Z",
+        }))
+        result = self.source({"TEST_STATIC_KEY_FIND_EXIT": "13"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("no longer exists; issuing a replacement", result.stdout)
+        self.assertEqual(json.loads(key_file.read_text())["key_id"], "mock-grafana-key")
+        calls = self.log.read_text().splitlines()
+        self.assertEqual(sum(call.startswith("iam static-key find ") for call in calls), 1)
+        self.assertEqual(sum(call.startswith("iam static-key issue ") for call in calls), 1)
+
+    def test_inactive_cached_key_is_replaced(self):
+        key_file = self.root / ".grafana_observability_key.k8s-training.json"
+        key_file.write_text(json.dumps({
+            "project_id": "mock-project",
+            "service_account_id": "mock-id",
+            "key_id": "mock-grafana-key",
+            "token": "inactive-token",
+            "expires_at": "2099-01-01T00:00:00Z",
+        }))
+        result = self.source({"TEST_STATIC_KEY_FIND_ACTIVE": "false"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("is inactive; issuing a replacement", result.stdout)
+        calls = self.log.read_text().splitlines()
+        self.assertEqual(sum(call.startswith("iam static-key find ") for call in calls), 1)
+        self.assertEqual(sum(call.startswith("iam static-key issue ") for call in calls), 1)
+
+    def test_cached_key_validation_error_does_not_rotate(self):
+        key_file = self.root / ".grafana_observability_key.k8s-training.json"
+        original = {
+            "project_id": "mock-project",
+            "service_account_id": "mock-id",
+            "key_id": "mock-grafana-key",
+            "token": "cached-token",
+            "expires_at": "2099-01-01T00:00:00Z",
+        }
+        key_file.write_text(json.dumps(original))
+        result = self.source({"TEST_STATIC_KEY_FIND_EXIT": "7"})
+        self.assertNotEqual(result.returncode, 0, result.stderr)
+        self.assertIn("failed to validate cached Grafana Observability key", result.stderr)
+        self.assertEqual(json.loads(key_file.read_text()), original)
+        self.assertNotIn("iam static-key issue ", self.log.read_text())
+
+    def test_malformed_cached_key_fails_without_rotation(self):
+        key_file = self.root / ".grafana_observability_key.k8s-training.json"
+        key_file.write_text('{"project_id":"mock-project","token":')
+        result = self.source()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("key cache is malformed", result.stderr)
+        self.assertNotIn("iam static-key find ", self.log.read_text())
+        self.assertNotIn("iam static-key issue ", self.log.read_text())
+
+    def test_cache_from_another_context_is_replaced_explicitly(self):
+        key_file = self.root / ".grafana_observability_key.k8s-training.json"
+        key_file.write_text(json.dumps({
+            "project_id": "another-project",
+            "service_account_id": "another-service-account",
+            "key_id": "other-context-key",
+            "token": "other-context-token",
+            "expires_at": "2099-01-01T00:00:00Z",
+        }))
+        result = self.source()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("belongs to another project or service account", result.stdout)
+        self.assertEqual(json.loads(key_file.read_text())["key_id"], "mock-grafana-key")
+        calls = self.log.read_text().splitlines()
+        self.assertEqual(sum(call.startswith("iam static-key find ") for call in calls), 0)
+        self.assertEqual(sum(call.startswith("iam static-key issue ") for call in calls), 1)
+
+    def test_near_expiry_grafana_key_is_replaced(self):
+        key_file = self.root / ".grafana_observability_key.k8s-training.json"
+        key_file.write_text(json.dumps({
+            "project_id": "mock-project",
+            "service_account_id": "mock-id",
+            "key_id": "expiring-key",
+            "token": "expiring-token",
+            "expires_at": "2000-01-01T00:00:00Z",
+        }))
+        result = self.source(command='source "$1" && printf "key=%s\\n" "$TF_VAR_grafana_observability_key_id"')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("key=mock-grafana-key", result.stdout)
+        self.assertEqual(json.loads(key_file.read_text())["key_id"], "mock-grafana-key")
+        self.assertEqual(
+            sum(call.startswith("iam static-key issue ") for call in self.log.read_text().splitlines()),
+            1,
+        )
+
+    def test_grafana_disabled_in_tfvars_skips_key_preparation(self):
+        (self.root / "terraform.tfvars").write_text(
+            "enable_grafana = false # do not deploy managed Grafana\n"
+        )
+        result = self.source(
+            command=(
+                'source "$1" && '
+                'test -z "${TF_VAR_grafana_observability_key_id:-}" && '
+                'test -z "${TF_VAR_grafana_observability_access_token:-}"'
+            ),
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Grafana is disabled; skipping Observability key preparation.", result.stdout)
+        self.assertNotIn("iam static-key issue ", self.log.read_text())
+        self.assertFalse(
+            (self.root / ".grafana_observability_key.k8s-training.json").exists()
+        )
+
+    def test_grafana_tfvars_parser_rejects_nonliteral_or_duplicate_values(self):
+        for contents in (
+            'enable_grafana = "false"\n',
+            "enable_grafana = false\nenable_grafana = true\n",
+            'enable_grafana = false\nenable_grafana = "true"\n',
+        ):
+            with self.subTest(contents=contents):
+                self.log.unlink(missing_ok=True)
+                (self.root / "terraform.tfvars").write_text(contents)
+                result = self.source()
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("literal enable_grafana", result.stderr)
+                self.assertFalse(self.log.exists())
 
     def test_existing_state_key_is_preserved(self):
         for key in ("k8s-training.tfstate", "clusters/legacy.tfstate"):

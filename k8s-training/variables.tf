@@ -433,6 +433,20 @@ variable "enable_grafana" {
   default     = true
 }
 
+variable "grafana_observability_access_token" {
+  description = "Service-specific Observability static-key token prepared by environment.sh for Grafana."
+  type        = string
+  sensitive   = true
+  ephemeral   = true
+  default     = ""
+}
+
+variable "grafana_observability_key_id" {
+  description = "ID of the Observability static key supplied to Grafana; changes trigger an in-place application update."
+  type        = string
+  default     = ""
+}
+
 variable "loki" {
   type = object({
     enabled            = optional(bool, false)

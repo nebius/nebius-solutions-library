@@ -37,8 +37,7 @@ variable "o11y" {
       pv_size       = optional(string, "25Gi")
       adminPassword = optional(string, "")
       nebius = optional(object({
-        projectId   = optional(string, "")
-        accessToken = optional(string, "")
+        projectId = optional(string, "")
       }), {})
     })),
     loki = optional(object({
@@ -54,6 +53,20 @@ variable "o11y" {
   })
   description = "Configuration of observability stack."
   default     = {}
+}
+
+variable "grafana_observability_access_token" {
+  description = "Service-specific Observability static-key token passed to Grafana's write-only configuration."
+  type        = string
+  sensitive   = true
+  ephemeral   = true
+  default     = ""
+}
+
+variable "grafana_observability_key_id" {
+  description = "ID of the Observability static key supplied to Grafana."
+  type        = string
+  default     = ""
 }
 
 variable "k8s_node_group_sa_id" {

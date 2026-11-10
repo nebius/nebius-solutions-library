@@ -23,6 +23,46 @@ if [ -z "${NEBIUS_REGION1}" ] || [ -z "${NEBIUS_REGION2}" ]; then
   return 1
 fi
 
+# Resolve the two values needed before Terraform can configure managed Grafana.
+# terraform.tfvars has higher precedence than TF_VAR_* and is the documented
+# configuration path for this solution.
+SKYPILOT_GRAFANA_ENABLED="${TF_VAR_enable_grafana:-true}"
+SKYPILOT_CLUSTER_NAME="${TF_VAR_cluster_name:-infra}"
+SKYPILOT_TFVARS="${PWD}/terraform.tfvars"
+if [[ -f "${SKYPILOT_TFVARS}" ]]; then
+  SKYPILOT_GRAFANA_ASSIGNMENT=$(sed -En '/^[[:space:]]*enable_grafana[[:space:]]*=/p' "${SKYPILOT_TFVARS}")
+  SKYPILOT_CLUSTER_ASSIGNMENT=$(sed -En '/^[[:space:]]*cluster_name[[:space:]]*=/p' "${SKYPILOT_TFVARS}")
+  if [[ "${SKYPILOT_GRAFANA_ASSIGNMENT}" == *$'\n'* || "${SKYPILOT_CLUSTER_ASSIGNMENT}" == *$'\n'* ]]; then
+    echo "Error: terraform.tfvars must contain at most one literal enable_grafana and cluster_name assignment." >&2
+    return 1 2>/dev/null || exit 1
+  fi
+  if [[ -n "${SKYPILOT_GRAFANA_ASSIGNMENT}" ]]; then
+    SKYPILOT_GRAFANA_VALUE=$(printf '%s\n' "${SKYPILOT_GRAFANA_ASSIGNMENT}" | sed -En \
+      's/^[[:space:]]*enable_grafana[[:space:]]*=[[:space:]]*(true|false)([[:space:]]*(#|\/\/).*)?$/\1/p')
+    if [[ "${SKYPILOT_GRAFANA_VALUE}" != "true" && "${SKYPILOT_GRAFANA_VALUE}" != "false" ]]; then
+      echo "Error: terraform.tfvars enable_grafana must be a literal true or false." >&2
+      return 1 2>/dev/null || exit 1
+    fi
+    SKYPILOT_GRAFANA_ENABLED="${SKYPILOT_GRAFANA_VALUE}"
+  fi
+  if [[ -n "${SKYPILOT_CLUSTER_ASSIGNMENT}" ]]; then
+    SKYPILOT_CLUSTER_VALUE=$(printf '%s\n' "${SKYPILOT_CLUSTER_ASSIGNMENT}" | sed -En \
+      's/^[[:space:]]*cluster_name[[:space:]]*=[[:space:]]*"([A-Za-z0-9][A-Za-z0-9._-]*)"([[:space:]]*(#|\/\/).*)?$/\1/p')
+    if [[ -z "${SKYPILOT_CLUSTER_VALUE}" ]]; then
+      echo "Error: terraform.tfvars cluster_name must be a literal string using letters, digits, dots, underscores, or hyphens." >&2
+      return 1 2>/dev/null || exit 1
+    fi
+    SKYPILOT_CLUSTER_NAME="${SKYPILOT_CLUSTER_VALUE}"
+  fi
+fi
+unset SKYPILOT_TFVARS SKYPILOT_GRAFANA_ASSIGNMENT SKYPILOT_CLUSTER_ASSIGNMENT
+unset SKYPILOT_GRAFANA_VALUE SKYPILOT_CLUSTER_VALUE
+
+if [[ "${SKYPILOT_GRAFANA_ENABLED}" == "true" && "${BASH_SOURCE[0]}" == "$0" ]]; then
+  echo "Error: Grafana is enabled; run 'source ./environment.sh' so its ephemeral credential remains available to Terraform." >&2
+  exit 1
+fi
+
 # IAM token
 unset NEBIUS_IAM_TOKEN
 export NEBIUS_IAM_TOKEN=$(nebius iam get-access-token)
@@ -109,6 +149,27 @@ else
   echo "Service account is already a member of editors group"
 fi
 
+SKYPILOT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+if [[ "${SKYPILOT_GRAFANA_ENABLED}" == "true" ]]; then
+  GRAFANA_OBSERVABILITY_PROJECT_ID="${NEBIUS_PROJECT_ID_REGION1}"
+  GRAFANA_OBSERVABILITY_SERVICE_ACCOUNT_ID="${NEBIUS_SA_ID}"
+  GRAFANA_OBSERVABILITY_CACHE_NAMESPACE="${SKYPILOT_CLUSTER_NAME}"
+  if ! source "${SKYPILOT_DIR}/../../scripts/prepare-grafana-observability-key.sh"; then
+    unset SKYPILOT_DIR SKYPILOT_GRAFANA_ENABLED SKYPILOT_CLUSTER_NAME
+    unset GRAFANA_OBSERVABILITY_PROJECT_ID GRAFANA_OBSERVABILITY_SERVICE_ACCOUNT_ID
+    unset GRAFANA_OBSERVABILITY_CACHE_NAMESPACE
+    return 1
+  fi
+  unset GRAFANA_OBSERVABILITY_PROJECT_ID GRAFANA_OBSERVABILITY_SERVICE_ACCOUNT_ID
+  unset GRAFANA_OBSERVABILITY_CACHE_NAMESPACE
+else
+  unset TF_VAR_grafana_observability_key_id
+  unset TF_VAR_grafana_observability_access_token
+  unset GRAFANA_OBSERVABILITY_KEY_EXPIRES_AT
+  echo "Grafana is disabled; skipping Observability key preparation."
+fi
+unset SKYPILOT_DIR
+
 # Nebius service account access key
 DATE_FORMAT='+%Y-%m-%dT%H:%M:%SZ'
 if [[ "$(uname)" == "Darwin" ]]; then
@@ -167,7 +228,7 @@ export TF_VAR_subnet_id_region1="${NEBIUS_VPC_SUBNET_ID_REGION1}"
 export TF_VAR_subnet_id_region2="${NEBIUS_VPC_SUBNET_ID_REGION2}"
 export TF_VAR_tenant_id="${NEBIUS_TENANT_ID}"
 
-# Also persist values for users who run `./environment.sh` (non-sourced shell).
+# Persist non-secret regional values for Terraform automatic loading.
 cat > zzz_environment.auto.tfvars << EOF
 parent_id_region1   = "${NEBIUS_PROJECT_ID_REGION1}"
 parent_id_region2   = "${NEBIUS_PROJECT_ID_REGION2}"
@@ -191,3 +252,10 @@ echo "NEBIUS_BUCKET_NAME: ${NEBIUS_BUCKET_NAME}"
 echo "NEBIUS_BUCKET_REGION: ${NEBIUS_BUCKET_REGION}"
 echo "AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}"
 echo "AWS_SECRET_ACCESS_KEY: <redacted>"
+if [[ "${SKYPILOT_GRAFANA_ENABLED}" == "true" ]]; then
+  echo "GRAFANA_OBSERVABILITY_KEY_ID: ${TF_VAR_grafana_observability_key_id}"
+  echo "GRAFANA_OBSERVABILITY_KEY_EXPIRES_AT: ${GRAFANA_OBSERVABILITY_KEY_EXPIRES_AT}"
+else
+  echo "GRAFANA_OBSERVABILITY_KEY: not prepared (Grafana disabled)"
+fi
+unset SKYPILOT_GRAFANA_ENABLED SKYPILOT_CLUSTER_NAME

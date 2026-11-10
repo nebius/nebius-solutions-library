@@ -23,7 +23,6 @@ BLOCKS = {
         ('resource', 'nebius_iam_v1_group_membership', 'loki_sa_storage_editor'),
         ('resource', 'nebius_iam_v2_access_key', 'loki_s3_key'),
     ),
-    "grafana.tf": (('resource', 'nebius_iam_v2_access_key', 'grafana_key'),),
 }
 
 

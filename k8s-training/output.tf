@@ -13,11 +13,11 @@ output "grafana_password" {
   value     = module.o11y.nebius_grafana_password
 }
 
-output "grafana_service_account" {
-  description = "Grafana service account information."
-  sensitive   = true
-  value       = module.o11y.grafana_service_account
+output "grafana_observability_status" {
+  description = "Grafana Observability credential configuration status."
+  value       = module.o11y.grafana_observability_status
 }
+
 output "kube_cluster_ca_certificate" {
   sensitive = true
   value     = nebius_mk8s_v1_cluster.k8s-cluster.status.control_plane.auth.cluster_ca_certificate

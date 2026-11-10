@@ -522,6 +522,34 @@ kubectl get pods -A
 
 Observability stack by default use Nebius Observability Agent deployment for metrics and logs storage. and Grafana® solution by Nebius.
 
+When `environment.sh` is sourced, it prepares a six-month, service-specific
+Observability key for Grafana before Terraform plans. The key is cached per
+cluster in a gitignored file with owner-only permissions. Ordinary runs reuse
+the key after confirming with the Nebius API that its token is still valid; a
+replacement is issued if it was deleted or revoked, or during its final 30 days.
+Existing cache permissions are repaired to owner-only before the token is read.
+Previous keys are not revoked automatically and expire at their configured
+time. Terraform uses
+a hash of the key ID and generated Grafana admin password as the sensitive
+configuration version, so replacing either credential updates the existing
+Grafana application release instead of requiring a second apply. The token is
+an ephemeral sensitive Terraform input: it is passed only to the provider's
+write-only field and is omitted from state and saved plan files. When applying
+a saved plan, keep the environment sourced (or source `environment.sh` again in
+the new shell) so Terraform receives the ephemeral value at apply time.
+When the standard local `terraform.tfvars` contains a literal
+`enable_grafana = false`, `environment.sh` skips credential preparation. This
+early check does not evaluate later command-line overrides or alternate variable
+files; those workflows must supply consistent Grafana inputs explicitly.
+
+When upgrading, note that the `grafana_service_account` Terraform output has
+been removed. The Observability credential is now prepared before Terraform and
+is deliberately not exposed as an output. Any automation that referenced that
+output must stop consuming it. Use `grafana_observability_status` to confirm
+that the Grafana release was configured with the supplied credential.
+The first successful key preparation also removes the obsolete local
+`grafana_access_token.txt` file; it does not revoke the older remote key.
+
 To access Grafana GUI:
 ```
 Nebius Web GUI > Main menu > Applications > grafana-solution-by-nebius > Endpoints + Create > Copy URL
@@ -636,7 +664,7 @@ the historical `k8s-training.tfstate` key, not a cluster-specific key.
 ### Observability upgrades and testing
 
 Kubernetes training passes its cluster name to the observability module, which
-prefixes the Grafana and Loki access-key names. Existing module callers that omit
+prefixes the Loki access-key names. Existing module callers that omit
 `cluster_name` retain the legacy names. Source inspection of Nebius provider
 [0.6.23][access-key-schema-0623] and [0.6.72][access-key-schema-0672] shows no
 replacement modifier on `name`; their update implementations pass resource
@@ -659,6 +687,9 @@ behavior. The fixture excludes ephemeral MysteryBox resources, which Terraform
 1.11 cannot mock; secret retrieval and application deployment are not covered.
 Run the same check locally with
 `python3 modules/o11y/tests/check_access_keys.py` from the repository root.
+The Grafana credential regression fixture separately verifies first-plan token
+propagation, replacement-key propagation, and missing-credential rejection. Run
+it with `python3 modules/o11y/tests/check_grafana_token.py`.
 
 [access-key-schema-0623]: https://github.com/nebius/terraform-provider-nebius/blob/v0.6.23/generated/nebius/iam/v2/access_key_service.tfgen.go#L206-L211
 [access-key-schema-0672]: https://github.com/nebius/terraform-provider-nebius/blob/v0.6.72/generated/nebius/iam/v2/access_key_service.tfgen.go#L210-L217

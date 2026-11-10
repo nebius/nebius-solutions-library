@@ -36,6 +36,13 @@ Load variables:
 source ./environment.sh
 ```
 
+When managed Grafana is enabled, `environment.sh` prepares a service-specific
+Observability key for the primary project and exports it as an ephemeral
+Terraform input. The script must be **sourced**; running `./environment.sh` in
+a subprocess does not preserve the credential. The key is cached locally with
+owner-only permissions and reused until rotation is required. Keep the same
+shell environment when applying a saved Terraform plan.
+
 ---
 
 ## 2) Deploy Terraform infrastructure
@@ -62,6 +69,10 @@ Validate outputs:
 terraform output
 terraform output -json kube_cluster | jq
 ```
+
+`grafana_service_account` has been removed because credentials are no longer
+exposed through Terraform outputs. Use `grafana_observability_status` to confirm
+that the managed Grafana release received its Observability credential.
 
 ---
 

@@ -23,13 +23,8 @@ output "nebius_grafana_password" {
   value     = var.o11y.grafana.enabled ? random_password.grafana_password[0].result : null
 }
 
-output "grafana_service_account" {
-  description = "Grafana service account information"
-  value = var.o11y.grafana.enabled && var.k8s_node_group_sa_enabled ? {
-    id                = var.k8s_node_group_sa_id
-    access_key_id     = nebius_iam_v2_access_key.grafana_key[0].status.aws_access_key_id
-    secret_access_key = nebius_iam_v2_access_key.grafana_key[0].status.secret
-    access_token      = local.grafana_access_token
-  } : null
-  sensitive = true
+output "grafana_observability_status" {
+  description = "Whether the Grafana release was configured with an Observability credential."
+  value       = var.o11y.grafana.enabled ? "Grafana Observability credential configured." : "Grafana is disabled."
+  depends_on  = [nebius_applications_v1alpha1_k8s_release.grafana]
 }
