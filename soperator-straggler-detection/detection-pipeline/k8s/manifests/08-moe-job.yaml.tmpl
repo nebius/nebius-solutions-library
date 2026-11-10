@@ -90,10 +90,14 @@ spec:
               value: /inspector-dumps
             - name: PIN_MODE
               value: "${PIN_MODE}"
-            # NCCL_IB_DISABLE=1: same workaround as FSDP and Megatron jobs.
-            # MoE's AllToAll expert routing also creates multiple NCCL process groups.
-            - name: NCCL_IB_DISABLE
-              value: "1"
+            # NCCL_IB_DISABLE: NOT set for MoE. MoE creates ONE NCCL process group
+            # (init_process_group() once, zero new_group() calls — same structure as FSDP).
+            # The HPC-X SHARP plugin loads and uses IB/RDMA safely for a single communicator.
+            # The ncclIbDeregMr segfault is specific to Megatron's concurrent multi-group
+            # teardown; confirmed absent for MoE's single-communicator pattern (IB smoke test
+            # EXIT=0 with recv-wait ~33µs = real RDMA, not TCP's ~1200µs baseline).
+            # Keeping RDMA is essential for detection quality: IB gives z≈-8 to -13,
+            # TCP gives z≈-2.2 (DESIGN_NOTES §6.42).
             # sleep-before-backward fault injection (WRONG for MoE — sleep runs after
             # the AllToAll in forward, so the AllToAll never sees the straggler signal).
             # Use MOE_FAULT_TARGET_RANK + MOE_FAULT_DELAY_US instead (see below).
