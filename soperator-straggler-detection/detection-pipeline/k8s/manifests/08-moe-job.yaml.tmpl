@@ -85,7 +85,7 @@ spec:
             - name: TRAINING_GPUS_PER_NODE
               value: "${TRAIN_GPUS}"
             - name: TRAINING_NCCL_LIB_PATH
-              value: ""
+              value: "${NCCL_LIB_PATH}"
             - name: NCCL_INSPECTOR_DUMP_DIR
               value: /inspector-dumps
             - name: PIN_MODE
