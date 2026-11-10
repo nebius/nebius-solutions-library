@@ -1226,7 +1226,9 @@ def build_finding_for_alert(vm_url, hostname, comm, member, bucket, stat_name, z
     # (a variant of the sustained mean signal) raised KeyError there, after the incident header was already
     # printed, so no full alert was built. Map it to "mean" for the classifier call ONLY; the printed
     # stat= label stays mean_tiered. classifier.py itself is unchanged.
-    classifier_stat = "mean" if stat_name == "mean_tiered" else stat_name
+    # Same issue confirmed live for "proxy_wait" (S6.44 K8s validation): STAT_TO_TIMESCALE has no
+    # "proxy_wait" key. Map to "mean" for the same reason. The printed stat= label stays proxy_wait.
+    classifier_stat = "mean" if stat_name in ("mean_tiered", "proxy_wait") else stat_name
     stat_hits = [(classifier_stat, result)]
     real_slot = _query_gpu_slot(vm_url, hostname, member)
     slot_known = real_slot is not None and real_slot >= 0
@@ -4826,8 +4828,16 @@ class AlertEngine:
             # Reviewers flagged absence of a real firing time — persisted_s shows duration
             # but not WHEN. Presentation-only: does not affect detection, attribution, or gating.
             _fired_at = datetime.datetime.fromtimestamp(event_ts_ms / 1000.0, tz=datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            # Log-readability fix for proxy_wait (S6.44, 2026-11): the straggler shows as LOWEST
+            # recv-wait (inverse of every other check in this system where higher=worse). Without
+            # an explicit note, reviewers naturally assume the flagged member waited LONGEST — wrong.
+            # The flagged member waited SHORTEST because it posted its network receive LATE, so the
+            # data from peers was already in the buffer when it arrived. severity_ratio here is
+            # peer_median / straggler (> 1 means peers waited longer, confirming this rank was slow
+            # to call AllToAll). Added as a header field, same pattern as triage= and fired_at=.
+            _direction_note = " straggler_direction=lowest_recv_wait_IS_straggler[physics: late-to-post-recv,peers-waited]" if stat_name == "proxy_wait" else ""
             header = (f"[STRAGGLER-INCIDENT] incident_id={incident_id} fired_at={_fired_at} stat={stat_name} host={hostname} comm={comm} member={member}[OS-PID] "
-                      f"gpu_slot={slot_disp} bucket={bucket}{_bucket_mb} coll={coll} severity_ratio={severity_ratio:.2f} [{_ratio_label}] "
+                      f"gpu_slot={slot_disp} bucket={bucket}{_bucket_mb} coll={coll} severity_ratio={severity_ratio:.2f} [{_ratio_label}]{_direction_note} "
                       f"persisted_s={dur_disp} role_rank={role_rank} role_n={role_n}{_window_ctx}{job_ctx_disp}")
             print(header, flush=True)
             self._append_alert_summary(header)

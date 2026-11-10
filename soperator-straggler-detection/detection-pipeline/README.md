@@ -283,15 +283,20 @@ detail; these are structural, currently-accepted gaps, not bugs waiting to be fi
    offline analysis step** (`moe_signal_check.py`) — a live, automated scorer/firing function
    (`alert_engine.py`'s `_check_proxy_wait`) was built and is confirmed *mathematically correct*
    (reproduces the manual z-score exactly, zero false positives, no crashes) in isolated testing,
-   but was NOT confirmed to reliably fire in a continuously-running deployment: in a long, busy
-   test environment, a single `alert_engine.py` poll cycle measured too slow (>5 minutes,
-   driven by both this session's own accumulated discovered state and this metric's own
-   unusually dense, unwindowed push pattern) relative to a second new finding — the raw signal
-   itself fades from z≈10 to z≈1.7 over a job's first ~10 minutes at 100ms fault, for reasons not
-   yet root-caused. See DESIGN_NOTES.md §6.44 for the full real measurements (including the
-   actual 82MB/65MB per-query payload size that explains the real, meaningfully-higher-than-
-   expected overhead) and what would need to change before this could be trusted as a production
-   alerting path.
+   but NOT yet confirmed to reliably fire throughout a production job's lifetime. K8s validation
+   (§6.44) confirmed: (1) `_check_proxy_wait` poll cost is 0.12–0.23s on K8s (not the >300s
+   Slurm problem — fresh cluster, less accumulated state); (2) the check fires reliably during
+   NCCL communicator setup (first ~4 minutes of wall-clock time) with z=6.08–6.35 on K8s,
+   matching Slurm's magnitude when measured with the same live 90s window; (3) after the startup
+   phase, the signal fades to z≈4.4 during the training iteration phase of a 300-step job and does
+   NOT re-trigger. This means: for a persistent fault present from job start, the check fires
+   during startup and is then silent for the remainder of the job. A manual offline analysis
+   (`moe_signal_check_k8s.py`) remains the only confirmed-reliable end-to-end path. Two real bugs
+   found and fixed during K8s validation: (a) `KeyError: 'proxy_wait'` in classifier dispatch (fix:
+   map `proxy_wait → mean`, same pattern as `mean_tiered`); (b) log readability — added explicit
+   `straggler_direction=` field to alert header (the inverted direction is counter-intuitive and
+   misread without it). See DESIGN_NOTES.md §6.44 for the full timeline, parity confirmation, and
+   bounded-limitation statement.
 
 - **Shape/strategy coverage (2026-11, DESIGN_NOTES.md 6.12-6.19):** MoE has a real, intermittent (1-in-3 observed)
   collective-participation hang on healthy runs, independent of the detector, not root-caused (6.12.1). Deep

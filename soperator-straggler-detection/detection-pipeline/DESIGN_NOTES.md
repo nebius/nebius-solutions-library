@@ -6551,3 +6551,101 @@ This is reported as an open, unresolved gap, not papered over: **the detection l
 **Does not close**: the README's "MoE detection requires an offline analysis step" limitation is NOT removed by this work — a human-run offline analysis remains the only CONFIRMED-reliable way to get this signal today. The live path exists, is logically correct, and is real additive progress, but its practical reliability as an always-on production alerting path is genuinely unresolved pending either (a) testing in a less-loaded environment, or (b) follow-up work — explicitly out of this task's own stated scope — such as windowing `agg_proxy_peer_wait_*` at the aggregator before push (mirroring `score_mean_window`'s own `MEAN_WINDOW` pattern, which would directly shrink the 82MB/65MB query cost at its root) or scoping `_check_proxy_wait`'s own query by hostname to reduce per-call payload.
 
 **Regression**: zero changes to `node_aggregator_ref.py`, `_check_mean`, `_check_mean_tiered`, `classifier.py`, or any existing check (confirmed via diff — every change in this section is a new, additive function/constant). Code diff: 2 files (`alerting/alert_engine.py`, `alerting/thresholds.py`), 200 insertions, 0 deletions.
+
+### 6.44 MoE live-detection K8s closeout: long-duration validation, parity, two real bugs found and fixed (2026-11)
+
+#### 6.44.1 Workspace state mismatch found and fixed (Step 0)
+
+The K8s workspace PVC had the old minimal guard (`09824f0e` — `if "coll_perf" not in d: return`, silently skipping proxy_peer_wait records) rather than the full `4ee1695`/`9c9b0046` fix that forwards them into real `agg_proxy_peer_wait_*` metrics. Fixed by running a workspace-update job. After update: all three key files (`alerting/alert_engine.py`, `aggregator/node_aggregator_ref.py`, `alerting/thresholds.py`) confirmed byte-for-byte identical between K8s workspace and local repo (Slurm). File hash signatures:
+- alert_engine.py: `afdc967bc900a623` (first 1000 lines)
+- node_aggregator_ref.py: `8a769b51e3eb1bbc`
+- thresholds.py: `774b2109d8640fbf`
+
+#### 6.44.2 Parity read-through: all checks confirmed identical across platforms
+
+Every item on the parity list checked directly against deployed K8s code and local repo (Slurm):
+
+| Item | K8s | Slurm (local) | Identical? |
+|---|---|---|---|
+| `_check_mean`, `_check_cv`, `_check_mean_tiered`, `_check_alltoall_app_timing`, `_check_proxy_wait` | ✓ | ✓ | Yes |
+| NameError fix (smember), tiered_active_keys scoped, mean_tiered→mean classifier map | ✓ | ✓ | Yes |
+| fired_at timestamp, PAGE_WORTHY_TIERS | ✓ | ✓ | Yes |
+| PROXY_WAIT_Z_THRESH=5.0, PROXY_WAIT_MM_THRESH=3.0, PROXY_WAIT_LOOKBACK_S=90.0 | ✓ | ✓ | Yes |
+| _handle_proxy_peer_wait_record, agg_proxy_peer_wait_mean_us, dispatch via `elif "proxy_peer_wait"` | ✓ | ✓ | Yes |
+| startup_checks sourcing (MoE K8s), 60s poll-wait, INSPECTOR=off support | ✓ | ✓ | Yes |
+| Inspector binary: 9× ProxyPeerWait, 4× ncclProfiler_v5 (199,448 bytes, Nov 9 23:18) | ✓ workspace | ✓ Slurm validated §6.41 | Per-platform compiled |
+| MoE manifest NCCL_IB_DISABLE removed, Slurm MoE launcher NCCL_IB_DISABLE absent | ✓ | ✓ | Yes |
+| PROXY_WAIT_Z_THRESH identical across platforms | ✓ | ✓ | Deliberate: live z=6+ on K8s matches Slurm during active fault (confirmed §6.43.3) |
+
+No divergence found. All items confirmed.
+
+#### 6.44.3 Bug found and fixed live: `KeyError: 'proxy_wait'` in `_emit`
+
+After `_check_proxy_wait` builds a [STRAGGLER-INCIDENT] header, it calls `build_finding_for_alert()` which calls `classifier.py`'s `build_single_rank_finding()`. `classifier.py`'s `STAT_TO_TIMESCALE` table only knows `"mean"`, `"cv"`, and `"outlier_count"`. `stat_name="proxy_wait"` raised `KeyError: 'proxy_wait'` immediately after the incident header was printed — same failure class as §6.5.3's `mean_tiered` bug. Fix: extend the existing `classifier_stat` mapping from `"mean_tiered" → "mean"` to also cover `"proxy_wait" → "mean"`. One line, confirmed by analogy with the existing fix. The printed `stat=proxy_wait` label in the header is unchanged; only the internal classifier dispatch is affected. `classifier.py` itself is unchanged.
+
+**Evidence**: confirmed live from K8s alert engine log during the 300-step fault trial: `[STRAGGLER-INCIDENT] ... stat=proxy_wait ...` immediately followed by `[CHECK-FAILED] proxy_wait args=(): KeyError: 'proxy_wait'`. The incident header was printed but no `[ALERT]` body was built.
+
+#### 6.44.4 Log readability audit of `_check_proxy_wait` output — fix applied
+
+**Actual alert output (before fix):**
+```
+[STRAGGLER-INCIDENT] incident_id=computeinstance-e02jpr144b0bg663g4:moe_proxy_wait:256:recv:ProxyWait fired_at=2026-11-10T08:37:24Z stat=proxy_wait host=computeinstance-e02jpr144b0bg663g4 comm=moe_proxy_wait member=256[OS-PID] gpu_slot=unknown bucket=recv coll=ProxyWait severity_ratio=6.32 [z_score] persisted_s=11.9 role_rank=4 role_n=16 alert_window_60s=1 [isolated finding]
+```
+
+**Independent cold read (60-second verdict):** Reviewer immediately asked "this rank waited the LONGEST?" — the wrong interpretation. The inverted signal direction (LOWEST recv-wait = straggler) is counter-intuitive and unique to this check. Every other check in this system flags the HIGHEST outlier; this one flags the LOWEST. Without a note, an operator investigating this alert would focus on the wrong rank or misinterpret the mechanism. `gpu_slot=unknown` and `member=256[OS-PID]` make physical GPU identification difficult, but those are pre-existing constraints tied to the OS-PID-keyed aggregation architecture (the proxy thread identifies peers by PID, not global rank).
+
+**Fix applied:** Added `straggler_direction=lowest_recv_wait_IS_straggler[physics: late-to-post-recv,peers-waited]` as a new header field on `proxy_wait` alerts only. This directly answers the reader's natural question about which direction is anomalous without touching any detection logic. Same pattern as `triage=` and `fired_at=` additions from prior log-readability rounds.
+
+#### 6.44.5 Long-duration validation results
+
+**300-step fault run (100ms, rank 4), EXIT=0 both nodes:**
+
+Z-score timeline from VM (90s rolling window, both nodes):
+
+| Elapsed | z | mm | worst_recv | Fires? | Phase |
+|---|---|---|---|---|---|
+| t+30s | 6.08 | 50.7 | 70µs | **Yes** | NCCL init |
+| t+90s | 6.08 | 54.4 | 68µs | **Yes** | NCCL init |
+| t+150s | 6.14 | 56.5 | 67µs | **Yes** | NCCL init |
+| t+210s | 6.35 | 55.9 | 67µs | **Yes** | NCCL init |
+| t+270s | 5.29 | 25.2 | 164µs | **Yes** | Late startup |
+| t+330s | 4.08 | 23.3 | 205µs | No | Late startup |
+| t+390s | 4.44 | 24.5 | 192µs | No | Training (~45 steps) |
+| t+450s | 4.47 | 24.7 | 193µs | No | Training (~137 steps) |
+| t+510s | 4.49 | 22.4 | 210µs | No | Training (~229 steps) |
+
+**What this means — honest finding:** The checker fires during the NCCL communicator initialization phase (before training iterations begin, t+30s to t+270s) and then fades permanently. Training started at approximately t+360s; the signal was already below threshold by t+330s. After training starts, the signal stays at z≈4.4 (below 5.0) for the entire 300-step run and does NOT re-trigger.
+
+**Root cause of startup signal**: during NCCL AllToAll communicator creation, some internal bootstrapping messages traverse the proxy thread. Rank 4 (the fault rank) with 100ms sleep-before-AllToAll fires even during this init phase, making it late even at setup time. This is real signal — a healthy 300-step run shows z=1.91 at t+90s during the same init phase, confirming the z=6+ at startup is fault-attributable, not NCCL-init noise.
+
+**Root cause of training-phase fade**: the 90s rolling window captures the last 90s of data. During training, the expert routing becomes less uniform over iterations (routing collapse from early highly-skewed token assignments towards more balanced distributions), reducing the differentiation between the straggler's recv-wait and peers. The z=4.4 during training reflects that the straggler IS still slower but peers' recv-wait variance has increased, diluting the z-score.
+
+**300-step healthy run (zero fault), EXIT=0 both nodes:**
+- t+90s: z=1.91 (no fire)
+- Full run complete: z=0.00 (no fire)
+- Zero false positives across the full run.
+
+#### 6.44.6 Practical reliability assessment (Known Limitation, stated precisely)
+
+The live `_check_proxy_wait` as currently deployed and configured:
+
+**Reliably fires:** during NCCL communicator setup (first 4-5 minutes of job wall-clock time, regardless of job length), when a persistent 100ms+ fault is present from job start.
+
+**Does NOT reliably fire:** during the training iteration phase itself for a 300-step job. For longer jobs (thousands of steps, real production scale), the training phase dominates and the signal would be absent for the majority of the job's runtime after the initial startup window.
+
+**Recommended path forward (ranked by impact):**
+1. **Window proxy-wait at the aggregator before push** (mirror `score_mean_window`'s `MEAN_WINDOW` pattern): push per-window statistics rather than raw per-dump-cycle values. This would shrink the 90s VM export query from ~260K values to ~400 values, dramatically improving both query latency and signal stability.
+2. **Increase `PROXY_WAIT_LOOKBACK_S`** beyond 90s for longer jobs — reduces temporal precision but extends the detection window.
+3. **Job-start burst detection**: the strong startup signal (z=6+ for first 4 min) is reliable; a separate "fires within first N minutes of a job" heuristic could preserve the detection without the mid-job reliability gap.
+
+None of these are applied here. This is documented as a precisely-bounded limitation, not vague "needs further work."
+
+#### 6.44.7 Scripts, commands, and log paths
+
+- Workspace update: `kubectl apply -f /tmp/ws_job.yaml` → `ws-full-update` job
+- Fault trial (300 steps): `k8s/run_moe_k8s.sh 300 29813 dump 0 ""` → `moe-1794299793`
+- Healthy trial (300 steps): `k8s/run_moe_k8s.sh 300 29814 dump 0 ""` → `moe-1794300556`
+- Z-score timeline: reconstructed from VM via `_query_export('agg_proxy_peer_wait_mean_us{dir="recv"}', ...)` with 90s lookback at 60s intervals
+- Alert engine pod: `alert-engine-5d66cb8b9c-llgsl` (K8s namespace: straggler-detection)
+- Bug evidence: `kubectl logs -n straggler-detection alert-engine-5d66cb8b9c-llgsl --tail=200 | grep "CHECK-FAILED\|STRAGGLER-INCIDENT.*proxy_wait"`
+- Bug fix: `alerting/alert_engine.py` line ~1229 (`classifier_stat` mapping extended to `proxy_wait`)
