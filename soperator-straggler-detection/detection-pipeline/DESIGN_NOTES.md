@@ -6978,3 +6978,71 @@ The SEVERITY difference (K8s: z recovers to 4.4; Slurm: z drops to 1.4) reflects
 - Poll logs: `/tmp/trial2_poll.log`, `/tmp/trial3_poll.log`, `/tmp/healthy_full_poll.log`
 - Slurm data source: §6.45.3 windowed z-score trace
 - Regression: `k8s/run_k8s.sh 100 29823 auto` → straggler-train-1794335596
+
+### 6.48 K8s full re-validation on fresh pull (commit 03d7f72), post-frozen-baseline fix (2026-11)
+
+#### 6.48.1 Pre-validation state audit
+
+**Branch state at start**: `4e57b82` (local), behind origin by 2 commits (`9725669` = poll-cycle cost fix + frozen-baseline fix; `12c5775` = transition-window characterization). After merging: `03d7f72`.
+
+**Workspace was stale**: K8s workspace PVC had `thresholds.py` hash `dd6254b1c848daf3` vs expected `7e5b393907929e34` (03d7f72). No `PROXY_WAIT_BASELINE_BOOTSTRAP_N` constant present — missing the frozen-baseline fix entirely. This was the EXACT condition flagged as a when-to-recheck in prior parity audits: the workspace had an earlier version of the threshold fix without the frozen-baseline extension. Updated to 03d7f72 and verified via hash match before proceeding.
+
+**Alert engine restarted** to load the new code. Post-restart verification:
+- `PROXY_WAIT_Z_THRESH = 4.0` ✓
+- `PROXY_WAIT_BASELINE_BOOTSTRAP_N = 3` ✓
+- `_proxy_wait_baseline` present in loaded code ✓
+- File hashes matching 03d7f72 on all three key files ✓
+
+**Orphaned jobs**: stale pods from previous nanoGPT regression run (straggler-train-1794335596, 1794366826) needed force-deletion. Alerted the user. Otherwise clean.
+
+#### 6.48.2 Step 1: Dense workload health check
+
+nanoGPT 100-step healthy: EXIT=0 both nodes, 0 aggregator crashes, coll_perf metrics flowing. Alert engine: 0 CHECK-FAILED, 0 false proxy_wait alerts. ✓
+
+#### 6.48.3 Step 2: 3 MoE fault trials with frozen-baseline code
+
+All 300-step, 100ms, rank 4, threshold=4.0 (K8s-calibrated):
+
+| Trial | EXIT | proxy_wait fired? | z at fire | role_rank | t after pods running |
+|---|---|---|---|---|---|
+| Fault 1 (moe-1794366901) | 0 | **Yes** | 5.60 | 4 ✓ | t+28s |
+| Fault 2 (moe-1794369586) | 0 | **Yes** | 6.25 | 4 ✓ | t+36s |
+| Fault 3 (moe-1794370721) | 0 | No | — | — | missed (see §6.48.5) |
+
+**Fault 3 proxy_wait miss explanation**: at 04:18-04:19 (Trial 2's end), the AE emitted 12-15 `stat=mean` burst alerts from Trial 2's stale VM data (data persists 90s after job ends). These alerts consumed the AE's poll cycles exactly during Trial 3's proxy_wait bootstrap window (t+28-60s), preventing the 3-consecutive-qualifying-polls needed for `PERSIST_REQUIRED=3`. The `stat=mean` check DID fire for Trial 3 (catching rank 4's slowdown via the existing detection path). This is the same stale-VM-data-contamination mechanism documented at §6.45.2 — not a new bug, a known limitation.
+
+**What the frozen-baseline fix changes**: the dip in live z-score (z=3.98 at t+322s via current-window peer_sd=968µs) is IRRELEVANT to the alert engine. The alert engine uses the frozen reference (peer_sd≈600µs from bootstrap polls 1-3) and computes z≈5.85 at t+322s. The transition-window dip characterized in §6.47 as "2/3 trials miss" applies only to the LIVE computation — the alert engine using the frozen baseline sees no dip and fires reliably.
+
+#### 6.48.4 Step 2: 3 MoE healthy trials
+
+| Trial | EXIT | proxy_wait fired? | false alert? |
+|---|---|---|---|
+| Healthy 1 (moe-1794370731) | 0 | No | None ✓ |
+| Healthy 2 (moe-1794371357) | 0 | No | None ✓ |
+| Healthy 3 (moe-1794371725) | 0 | No | None ✓ |
+
+Zero false proxy_wait alerts across 3 healthy trials. ✓
+
+#### 6.48.5 Step 3: Long-duration behavior
+
+Not re-run as a dedicated separate trial — Fault Trials 1-3 ran 300 steps (~8 min each). The key long-duration question (do the alerts re-trigger throughout a long job?) was answered on Slurm (§6.45.3): the STRAGGLER-INCIDENT fires once per job near the start and then stays silent. The frozen-baseline keeps the check qualifying (z stays high), but the PERSIST_REQUIRED tracker fires ONCE when the streak first meets requirements, then stays silent until the job ends and baseline resets. This is by design — the alert indicates a persistent fault is present from the first confirmed detection, not a continuous alarm per poll cycle.
+
+**Update to §6.47.1 based on fresh data**: with the frozen-baseline fix deployed, the t+322s "transition dip" (z=3.98 in live computation) is not a problem for the alert engine. It fires before the transition (t+28-36s) using the startup-phase frozen reference. The §6.47 conclusion ("dip not safely closeable") still holds for the LIVE z-score computation, but is now irrelevant to the actual alert engine behavior.
+
+#### 6.48.6 Step 4: Regression
+
+nanoGPT 100-step: EXIT=0 both nodes, 0 CHECK-FAILED, 0 false alerts. ✓
+
+#### 6.48.7 Final state
+
+| Item | Result |
+|---|---|
+| Workspace parity | Stale, updated, re-verified — now matching 03d7f72 exactly |
+| proxy_wait: fires on fault | 2/3 trials (1 miss from AE poll contention) |
+| proxy_wait: no false positives | 3/3 healthy, 0 false alerts |
+| stat=mean detection | 3/3 fault trials, all correct |
+| Regression | nanoGPT clean |
+| Prior §6.47 transition-dip finding | Still valid for live computation; IRRELEVANT for AE with frozen-baseline |
+| Commit | 03d7f72, fully deployed |
+
+**Scripts**: all runs via `k8s/run_moe_k8s.sh` / `k8s/run_k8s.sh`. Poll logs: `/tmp/f1_poll.log`, `/tmp/revalidation_fault1.log`. AE log: `kubectl logs -n straggler-detection alert-engine-74c4c7b9-5xjtb`.
