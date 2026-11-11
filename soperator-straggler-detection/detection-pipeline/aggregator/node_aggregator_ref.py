@@ -643,6 +643,20 @@ class NodeAggregator:
         self.file_offsets = self._load_offset_checkpoint()
         self.file_inodes = {}
         self._offset_checkpointed_at = 0.0
+        # Capstone round 5 (2026-11) -- poll_files() round-robin starting
+        # point. See poll_files()'s own comment for the real starvation
+        # bug this closes: without this, every call's `for fp in
+        # sorted(...)` restarts at the same (alphabetically-first) file,
+        # so if that one file's own backlog alone can consume the whole
+        # per-call deadline, every other file in the glob is skipped on
+        # EVERY call, forever -- not just delayed. Confirmed live during a
+        # real MoE healthy soak: 1 of 8 ranks on a node sat at 2.5% read
+        # lag while the other 7 sat at 96-99.9% lag, each poll cycle after
+        # cycle. None of this node's OTHER already-working consumers
+        # (handle_record, score_mean_window/score_cv_window, VM push)
+        # change at all -- this only changes which file poll_files()
+        # starts its sorted scan from on a given call.
+        self._poll_files_resume_after = None
         self.rate_logged = set()
         # Capstone gap-fix #1 (2026-11): (comm_id, phys_id, peer, direction)
         # -> unconsumed list of (mean_us, max_us, count, ts_us) raw records,
@@ -1246,7 +1260,25 @@ class NodeAggregator:
         # semantics any less honored than they already were.
         call_deadline = time.time() + self.POLL_FILES_MAX_SECONDS
         effective_deadline = min(deadline, call_deadline) if deadline is not None else call_deadline
-        for fp in sorted(glob.glob(f"{self.dump_dir}/*.log")):
+        # Capstone round 5 (2026-11) -- round-robin starting point (see
+        # __init__'s own comment on _poll_files_resume_after for the real
+        # starvation bug this closes). Rotate the sorted glob so this call
+        # starts right AFTER whichever file the previous call left off
+        # on, wrapping around -- a plain `for fp in sorted(...)` always
+        # restarted at the same first file every call, permanently
+        # starving every other file once the first one's own backlog
+        # alone could fill the whole per-call budget. Falls back to
+        # starting from the top if the resume-after file is no longer
+        # present (deleted/rotated/never set yet) -- same safe default
+        # as before this fix existed.
+        all_files = sorted(glob.glob(f"{self.dump_dir}/*.log"))
+        resume_after = self._poll_files_resume_after
+        if resume_after in all_files:
+            idx = all_files.index(resume_after) + 1
+            ordered_files = all_files[idx:] + all_files[:idx]
+        else:
+            ordered_files = all_files
+        for fp in ordered_files:
             # push_buf/heartbeat-blackout fix -- the ONLY deadline check
             # that existed before this fix lived inside the per-line loop
             # below, so a call already mid-way through file N's own huge
@@ -1258,6 +1290,7 @@ class NodeAggregator:
             # in progress when the budget ran out.
             if time.time() >= effective_deadline:
                 break
+            self._poll_files_resume_after = fp
             offset = self.file_offsets.get(fp, 0)
             try:
                 st = os.stat(fp)

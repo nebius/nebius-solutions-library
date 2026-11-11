@@ -7187,3 +7187,161 @@ a full job change and force a spurious reset. `classifier.py`/`_check_mean`/`_ch
 - Live reconfirmation: fault job 92093 (`var/round4_revalidation/fault4_postfix/`), healthy job 92094
   (`var/round4_revalidation/healthy2_postfix/`)
 - Regression: nanoGPT job 92095, `var/round4_revalidation/nanogpt_regression/`
+
+### 6.52 Dump-file disk growth under a sustained MoE job: two real fixes applied, one deeper limitation found and NOT fully solved (2026-11)
+
+#### 6.52.1 Background
+
+Retrying Step B's long-duration healthy soak (post §6.50's disk-exhaustion fix) hit a NEW, genuine problem:
+individual Inspector-plugin raw dump files reached 11-16GB within ~30 minutes of a real 48-GPU healthy run,
+consuming disk fast enough to threaten another exhaustion-driven crash. Two real, separate bugs were found and
+fixed in the course of investigating this; a third, deeper limitation was found and is NOT fixed.
+
+#### 6.52.2 Fix 1: `dump_files.logrotate`'s copytruncate cannot keep up at this write volume
+
+`logrotate --state ...` was found live holding its state-file lock for 3+ minutes (`error: state file ... is
+already locked` on every subsequent attempt) -- `copytruncate` must copy a file's full content before truncating
+it, and once a file is multi-GB and still growing faster than the copy can complete, the copy never finishes,
+permanently blocking every later rotation attempt against the same state file. A plain external `truncate(2)`
+was tried as an alternative and confirmed NOT to help either: the Inspector plugin holds one fd open for the
+file's entire lifetime and keeps writing from its own kernel-tracked offset, independent of an unrelated
+process's truncate call on the same path -- a file truncated to 0 was back to ~16GB of REAL allocated disk
+blocks (confirmed via `stat`/`du` block counts, not just apparent size) within under a minute.
+
+**Real fix**: `observability/dump_reclaim.py` (new), wired into `run_aggregator_supervised.sh` in place of the
+old `dump_files.logrotate` loop. Uses `fallocate(FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE)` to deallocate real
+disk blocks for the byte range `node_aggregator_ref.py` has ALREADY durably pushed to VictoriaMetrics (read
+directly from its own `.aggregator_offsets_checkpoint.json`, no new coordination needed) -- this does not change
+the file's apparent size or disturb the writer's append position at all, confirmed live: a 200M file written
+full of real data, punched over its first 100M, dropped to 100M real blocks via `du` while `ls -la` still
+reported the original 200M size unchanged throughout.
+
+#### 6.52.3 Fix 2: real starvation bug in `poll_files()`'s round-robin
+
+Found while investigating why the reclaim fix above wasn't helping evenly: `.aggregator_offsets_checkpoint.json`
+showed 7 of 8 ranks on one node at 96-99.9% read lag while the 8th sat at 2.5% -- `poll_files()`'s
+`for fp in sorted(glob.glob(...))` restarts at the same (alphabetically-first) file on EVERY call; if that one
+file's own backlog alone can consume the whole per-call time budget (`POLL_FILES_MAX_SECONDS`), the loop's
+`break` means every other file in the glob is skipped, every single call, forever -- not merely delayed.
+
+**Fix**: `aggregator/node_aggregator_ref.py`'s `poll_files()` now remembers the last file it started on
+(`self._poll_files_resume_after`) and rotates the sorted glob to resume right after it next call, wrapping
+around -- falls back to starting from the top if that file is no longer present (deleted/rotated/never set).
+Validated: an isolated test of the rotation logic confirms every file gets a fair turn in order, wrapping
+correctly across repeated calls where one file could otherwise monopolize every cycle. Live reconfirmation on a
+fresh soak (job 92110) confirmed the fix works as intended: read lag is now spread evenly across all 8 ranks
+(96-99.6%) instead of concentrated on 7 of them -- the starvation itself is genuinely closed.
+
+#### 6.52.4 NOT fixed: aggregate processing throughput ceiling
+
+Fixing the starvation bug revealed the real, deeper limit: `node_aggregator_ref.py` processes all 8 ranks'
+dump files in a single thread, and its TOTAL combined read/parse throughput across all 8 is still well below
+the combined write rate of 8 Inspector-plugin writers at full 48-GPU MoE scale over a sustained healthy run --
+confirmed live: with the starvation bug fixed, lag is now even across all 8 files, but still 96-99.6% and
+growing, and real disk usage still dropped ~200GB in the same 10-minute window as before the fix. Reclaiming
+already-consumed bytes (§6.52.2) cannot help when almost nothing has been consumed yet across the board.
+
+This is NOT fixed. A real fix would mean parallelizing `poll_files()` (e.g. one reader per file/thread) or
+making per-line JSON parsing in `handle_record()` substantially faster -- a genuinely larger, riskier change to
+the aggregator's core data path than is safe to attempt without its own dedicated validation round. Documented
+here as an open, confirmed-real limitation: **a sustained, healthy, full-scale MoE run can still exhaust disk
+over time even with both fixes above applied**, because the bottleneck is the aggregator's own total processing
+throughput, not file rotation or fairness. The multi-hour healthy soak (Step B) remains unachieved as a result
+-- blocked by this, not by anything in the detector's own alerting logic, which the §6.47/§6.51 fixes already
+validated correctly on every trial that COULD complete.
+
+#### 6.52.5 Scripts and paths
+
+- New reclaim mechanism: `observability/dump_reclaim.py`, wired in `observability/run_aggregator_supervised.sh`
+- Round-robin fix: `aggregator/node_aggregator_ref.py`, `poll_files()`, `_poll_files_resume_after`
+- Stuck-logrotate evidence: `logrotate --verbose` manual run, `error: state file ... is already locked`
+- Starvation evidence (pre-fix): job 92103, `var/dump/worker-0/.aggregator_offsets_checkpoint.json`
+- Round-robin fix confirmation (post-fix): job 92110, same checkpoint file, even lag across all 8 ranks
+- Throughput-ceiling evidence: `df -h /mnt/asabry-scratch` before/after each 10-minute window
+
+### 6.53 Aggregator throughput bottleneck root-cause: confirmed I/O-bound, specifically concurrent-read-vs-write filesystem overhead, NOT CPU/parsing (2026-11, diagnosis only, no fix applied)
+
+#### 6.53.1 Method
+
+Live process profiling against a real, reproducing MoE healthy trial (job 92112, full 48-GPU scale, both §6.52
+fixes active). `py-spy` (installed into an isolated venv on the shared filesystem, `/mnt/.../pyspy_venv` --
+removed after this investigation, never a project dependency) took 5 stack-trace snapshots of the live
+`node_aggregator_ref.py` process on worker-0 spread over ~15s. `strace -c -f -p <pid>` captured a 15-second
+syscall-time breakdown on the same process. Combined read-offset vs. file-size growth was measured directly
+from `.aggregator_offsets_checkpoint.json` and `os.path.getsize()`, 60s apart, summed across all 8 ranks on one
+node. A control measurement read a large (159MB) STATIC file (not concurrently written) on the identical
+filesystem for comparison.
+
+#### 6.53.2 Confirmed: I/O-bound, not CPU-bound
+
+- **py-spy**: 4 of 5 samples showed the thread `idle` (not holding the GIL -- blocked in a C-level call)
+  specifically at `poll_files()`'s `new_data = f.read()` (node_aggregator_ref.py, the single unchunked read of
+  everything new since the last offset). Only 1 of 5 samples showed `active+gil` CPU work, and that was JSON
+  parsing in the SEPARATE `poll_apptiming_files()` path, not the main dump-file read path.
+- **strace -c** (15s window): **90.12% of total syscall time was inside `read()`** (20 calls, ~136ms average
+  each -- unusually slow for a read syscall). `munmap` (Python's own buffer-churn from repeatedly allocating/
+  freeing large byte strings) was a distant second at 5.18%; `openat` at 3.60%. CPU-bound work (parsing,
+  Python-level loop overhead) does not show up as a meaningful fraction of wall-clock time at all.
+- **Neither recent fix contributes measurably**: no `fallocate` call (dump_reclaim.py) appears anywhere in the
+  strace trace; `openat`/`getdents64` overhead (plausibly touched by the round-robin fix's extra glob/index
+  work) is 3.6%/0.71% of total time, far from a meaningful contributor.
+
+#### 6.53.3 Quantified gap: ~993x, NOT a modest shortfall
+
+Measured directly (worker-0, 60s window, summed across all 8 ranks' dump files): combined read-offset growth
+4.1 MB/min vs. combined file-size growth 4071.2 MB/min -- a **993x** gap. This is not a "20-30% speedup would
+close it" situation; it is orders of magnitude.
+
+#### 6.53.4 The real root cause is narrower than "slow storage": concurrent read-while-write specifically
+
+The decisive isolation test: reading a static 159MB file (not being written to by anything) on the IDENTICAL
+filesystem achieved **907.4 MB/s**. The live aggregator's effective read throughput on the actively-growing
+dump files was 4.1 MB/min = **0.068 MB/s** -- a **~13,279x** slowdown specifically tied to one process reading
+a file while another process concurrently writes to it. This rules out "the shared filesystem is just slow" as
+the explanation (a static read on the same mount is fast) and points instead at concurrent-access overhead on
+this specific filesystem -- consistent with an NFS-like protocol needing cache-coherency round-trips (attribute
+revalidation, etc.) on every read against a file whose metadata is changing underneath it, something a local
+(non-networked) filesystem would not incur for genuinely co-located reader/writer processes.
+
+#### 6.53.5 MoE-specific or general?
+
+The MECHANISM (concurrent-read-vs-write overhead on this shared filesystem) is not MoE-specific at all -- it
+would apply to any workload's dump files. MoE is the only workload that currently produces enough combined raw
+write VOLUME (dense workloads' far lower collective-call rate keeps them comfortably under read capacity even
+with this same per-read overhead) to expose it. This is a general, latency-of-the-shared-filesystem property
+that would eventually matter for any sufficiently high-volume workload, not a MoE-only ceiling.
+
+#### 6.53.6 Recommendation (not implemented -- diagnosis only, per this task's own explicit instruction)
+
+Of the three originally-scoped directions:
+- **Speed up per-line parsing**: confirmed NOT the answer -- parsing is not where the time goes.
+- **Parallelize per-rank readers**: unlikely to help much and could worsen contention -- the cost is concurrent-
+  access overhead against the SAME filesystem, not insufficient reader parallelism; more concurrent readers
+  against the same NFS-like mount while writers continue plausibly increases contention rather than reducing it.
+- **Reduce MoE's write volume (sampling/windowing)**: directionally correct (less concurrently-changing data =
+  less revalidation overhead) but given a ~993x-13,279x gap, even a substantial volume reduction (e.g. 10x)
+  would not fully close it alone.
+
+A fourth option the evidence points to more directly, outside the original three: **write the raw per-rank dump
+files to node-LOCAL (non-shared) storage instead of the shared/network-mounted filesystem.** If the dominant
+cost is specifically the network-filesystem protocol's concurrent-read-vs-write overhead, a genuinely local
+disk/tmpfs path for the Inspector plugin's writer (same physical node as the aggregator that reads it) would
+very plausibly eliminate most of this cost, since local filesystems do not need network round-trips for cache
+coherency between two local processes. This is a change to the Inspector plugin's configured OUTPUT PATH, not
+its internal logic -- plausibly lower-risk than the parallelization or parsing options, but not yet confirmed:
+it has NOT been tested, and still touches the write side this task was told not to modify. **Risk level if
+pursued**: the dump-file write path itself is unchanged logic-wise, so this would not touch
+`poll_files()`/`handle_record()`'s core data-reading path at all (lower risk than parallelizing readers), but
+DOES touch where the Inspector plugin writes, which is launch/config-level, not core Inspector-plugin source --
+still requires its own dedicated validation (confirm local paths exist/are writable on every node, confirm no
+regression in orphan-cleanup/offset-checkpoint logic which assume a shared path reachable from this aggregator
+process, confirm disk headroom on each node's local storage) before trusting it. No fix applied in this round.
+
+#### 6.53.7 Commands and raw evidence (reproducible)
+
+- `python3 -m venv <path>/pyspy_venv && <path>/pyspy_venv/bin/pip install py-spy` (isolated venv, removed after)
+- `py-spy dump --pid <aggregator_pid>` x5, ~3s apart
+- `strace -c -f -p <aggregator_pid>` for 15s (via `timeout 15`)
+- Offset/size growth: `.aggregator_offsets_checkpoint.json` + `os.path.getsize()`, sampled 60s apart
+- Static-file control read: direct Python `open(...).read()` timing on a 159MB file on the same mount
+- Reproducing job: 92112 (`var/moe_profiling_round1/`), cancelled after measurement, dump data cleaned up after
