@@ -25,3 +25,8 @@ output "debug_size_resources" {
     worker_count = local.worker_count
   })
 }
+
+output "debug_flux_release_nodesets_rendered" {
+  description = "Rendered soperator-nodesets Helm values, for tests/inspection."
+  value       = local.flux_release_rendered_nodesets
+}
