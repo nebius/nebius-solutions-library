@@ -7119,3 +7119,74 @@ a full job change and force a spurious reset. `classifier.py`/`_check_mean`/`_ch
 - Live reconfirmation: fault job 92093 (`var/round4_revalidation/fault4_postfix/`), healthy job 92094
   (`var/round4_revalidation/healthy2_postfix/`)
 - Regression: nanoGPT job 92095, `var/round4_revalidation/nanogpt_regression/`
+
+### 6.52 Dump-file disk growth under a sustained MoE job: two real fixes applied, one deeper limitation found and NOT fully solved (2026-11)
+
+#### 6.52.1 Background
+
+Retrying Step B's long-duration healthy soak (post §6.50's disk-exhaustion fix) hit a NEW, genuine problem:
+individual Inspector-plugin raw dump files reached 11-16GB within ~30 minutes of a real 48-GPU healthy run,
+consuming disk fast enough to threaten another exhaustion-driven crash. Two real, separate bugs were found and
+fixed in the course of investigating this; a third, deeper limitation was found and is NOT fixed.
+
+#### 6.52.2 Fix 1: `dump_files.logrotate`'s copytruncate cannot keep up at this write volume
+
+`logrotate --state ...` was found live holding its state-file lock for 3+ minutes (`error: state file ... is
+already locked` on every subsequent attempt) -- `copytruncate` must copy a file's full content before truncating
+it, and once a file is multi-GB and still growing faster than the copy can complete, the copy never finishes,
+permanently blocking every later rotation attempt against the same state file. A plain external `truncate(2)`
+was tried as an alternative and confirmed NOT to help either: the Inspector plugin holds one fd open for the
+file's entire lifetime and keeps writing from its own kernel-tracked offset, independent of an unrelated
+process's truncate call on the same path -- a file truncated to 0 was back to ~16GB of REAL allocated disk
+blocks (confirmed via `stat`/`du` block counts, not just apparent size) within under a minute.
+
+**Real fix**: `observability/dump_reclaim.py` (new), wired into `run_aggregator_supervised.sh` in place of the
+old `dump_files.logrotate` loop. Uses `fallocate(FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE)` to deallocate real
+disk blocks for the byte range `node_aggregator_ref.py` has ALREADY durably pushed to VictoriaMetrics (read
+directly from its own `.aggregator_offsets_checkpoint.json`, no new coordination needed) -- this does not change
+the file's apparent size or disturb the writer's append position at all, confirmed live: a 200M file written
+full of real data, punched over its first 100M, dropped to 100M real blocks via `du` while `ls -la` still
+reported the original 200M size unchanged throughout.
+
+#### 6.52.3 Fix 2: real starvation bug in `poll_files()`'s round-robin
+
+Found while investigating why the reclaim fix above wasn't helping evenly: `.aggregator_offsets_checkpoint.json`
+showed 7 of 8 ranks on one node at 96-99.9% read lag while the 8th sat at 2.5% -- `poll_files()`'s
+`for fp in sorted(glob.glob(...))` restarts at the same (alphabetically-first) file on EVERY call; if that one
+file's own backlog alone can consume the whole per-call time budget (`POLL_FILES_MAX_SECONDS`), the loop's
+`break` means every other file in the glob is skipped, every single call, forever -- not merely delayed.
+
+**Fix**: `aggregator/node_aggregator_ref.py`'s `poll_files()` now remembers the last file it started on
+(`self._poll_files_resume_after`) and rotates the sorted glob to resume right after it next call, wrapping
+around -- falls back to starting from the top if that file is no longer present (deleted/rotated/never set).
+Validated: an isolated test of the rotation logic confirms every file gets a fair turn in order, wrapping
+correctly across repeated calls where one file could otherwise monopolize every cycle. Live reconfirmation on a
+fresh soak (job 92110) confirmed the fix works as intended: read lag is now spread evenly across all 8 ranks
+(96-99.6%) instead of concentrated on 7 of them -- the starvation itself is genuinely closed.
+
+#### 6.52.4 NOT fixed: aggregate processing throughput ceiling
+
+Fixing the starvation bug revealed the real, deeper limit: `node_aggregator_ref.py` processes all 8 ranks'
+dump files in a single thread, and its TOTAL combined read/parse throughput across all 8 is still well below
+the combined write rate of 8 Inspector-plugin writers at full 48-GPU MoE scale over a sustained healthy run --
+confirmed live: with the starvation bug fixed, lag is now even across all 8 files, but still 96-99.6% and
+growing, and real disk usage still dropped ~200GB in the same 10-minute window as before the fix. Reclaiming
+already-consumed bytes (§6.52.2) cannot help when almost nothing has been consumed yet across the board.
+
+This is NOT fixed. A real fix would mean parallelizing `poll_files()` (e.g. one reader per file/thread) or
+making per-line JSON parsing in `handle_record()` substantially faster -- a genuinely larger, riskier change to
+the aggregator's core data path than is safe to attempt without its own dedicated validation round. Documented
+here as an open, confirmed-real limitation: **a sustained, healthy, full-scale MoE run can still exhaust disk
+over time even with both fixes above applied**, because the bottleneck is the aggregator's own total processing
+throughput, not file rotation or fairness. The multi-hour healthy soak (Step B) remains unachieved as a result
+-- blocked by this, not by anything in the detector's own alerting logic, which the §6.47/§6.51 fixes already
+validated correctly on every trial that COULD complete.
+
+#### 6.52.5 Scripts and paths
+
+- New reclaim mechanism: `observability/dump_reclaim.py`, wired in `observability/run_aggregator_supervised.sh`
+- Round-robin fix: `aggregator/node_aggregator_ref.py`, `poll_files()`, `_poll_files_resume_after`
+- Stuck-logrotate evidence: `logrotate --verbose` manual run, `error: state file ... is already locked`
+- Starvation evidence (pre-fix): job 92103, `var/dump/worker-0/.aggregator_offsets_checkpoint.json`
+- Round-robin fix confirmation (post-fix): job 92110, same checkpoint file, even lag across all 8 ranks
+- Throughput-ceiling evidence: `df -h /mnt/asabry-scratch` before/after each 10-minute window

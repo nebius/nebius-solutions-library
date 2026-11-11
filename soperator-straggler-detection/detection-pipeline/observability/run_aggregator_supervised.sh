@@ -67,27 +67,38 @@ fi
 # depend on logrotate being installed.
 DUMP_DIR_ABS="$(cd "$DUMP_DIR" && pwd)"
 
-# S6.42-dump-disk-fix -- separate rotation for the Inspector plugin's own
-# raw dump files in $DUMP_DIR itself (previously never rotated at all --
-# see dump_files.logrotate's own comment for the real incident and the
-# real measured growth rate this is sized against). A SEPARATE, faster
-# loop than the aggregator-log rotation above: dump files grow roughly
-# 17x faster under real fault-trial load than the volume that justified
-# the 300s loop above, so reusing that same slower cadence here would
-# leave real, substantial overshoot before ever catching it.
-if command -v logrotate >/dev/null 2>&1; then
-  _GENERATED_DUMP_LOGROTATE="$_PKG_ROOT/var/dump_files_$HOSTNAME_ARG.logrotate.generated"
-  sed "s|^__DUMP_GLOB__ {|$DUMP_DIR_ABS/*.log {|" \
-    "$_HERE/dump_files.logrotate" > "$_GENERATED_DUMP_LOGROTATE"
+# S6.42-dump-disk-fix, then capstone round 5 real replacement (2026-11):
+# the logrotate+copytruncate approach above previously lived here. Found
+# live and confirmed real: it cannot keep up with a long-running MoE
+# job's actual per-rank dump-write rate -- individual files reached
+# 11-16GB within ~30 minutes of a genuine healthy soak test, at which
+# point copytruncate's own full-file copy (required before it can
+# truncate) can no longer finish faster than the file keeps growing, so
+# the logrotate invocation gets stuck holding its state-file lock
+# indefinitely -- confirmed directly ("state file is already locked" on
+# every subsequent attempt, logrotate refuses parallel runs against the
+# same state file on principle). A plain external truncate() was also
+# tried and confirmed NOT to help: the Inspector plugin holds one fd open
+# for the file's entire lifetime and keeps writing from ITS OWN
+# kernel-tracked offset, completely independent of an unrelated
+# truncate(2) call on the same path -- the file was back to the same
+# real (not sparse -- confirmed via stat/du block counts) size within
+# under a minute. dump_reclaim.py (same directory) uses
+# fallocate(FALLOC_FL_PUNCH_HOLE) instead -- reclaims real disk blocks
+# for the byte range the aggregator has ALREADY durably pushed to
+# VictoriaMetrics (read directly from node_aggregator_ref.py's own
+# .aggregator_offsets_checkpoint.json, no new coordination needed),
+# without touching the file's apparent size or the writer's append
+# position at all -- confirmed live: a 200M file written full of real
+# data, punched over its first 100M, dropped to 100M real blocks via
+# `du` while the file's own reported size stayed exactly 200M throughout.
+if command -v python3 >/dev/null 2>&1; then
   (
-    while true; do
-      logrotate --state "$_PKG_ROOT/var/.logrotate_state_dump_$HOSTNAME_ARG" "$_GENERATED_DUMP_LOGROTATE" 2>>"$_PKG_ROOT/var/logrotate_errors.log"
-      sleep 60
-    done
+    python3 "$_HERE/dump_reclaim.py" "$DUMP_DIR_ABS" 60 2>>"$_PKG_ROOT/var/dump_reclaim_errors.log"
   ) &
-  echo "[supervisor:$HOSTNAME_ARG] dump-file rotation loop started (pid $!) for $DUMP_DIR, checking every 60s" | tee -a "$LOG"
+  echo "[supervisor:$HOSTNAME_ARG] dump-file space-reclaim loop started (pid $!) for $DUMP_DIR, checking every 60s" | tee -a "$LOG"
 else
-  echo "[supervisor:$HOSTNAME_ARG] WARNING: logrotate not found -- $DUMP_DIR will grow unbounded" | tee -a "$LOG"
+  echo "[supervisor:$HOSTNAME_ARG] WARNING: python3 not found -- $DUMP_DIR will grow unbounded" | tee -a "$LOG"
 fi
 
 # Capstone gap-fix #2 (2026-11): the rotation above only bounds the SIZE
