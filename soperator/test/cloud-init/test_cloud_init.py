@@ -90,6 +90,10 @@ class CloudInitTest(unittest.TestCase):
                     subprocess.run(["/bin/sh"], input=script, env=env, text=True, check=True)
                 self.assertEqual(args.read_text().splitlines(), ["--replace", "--replace"])
                 self.assertIn("profile soperator-default flags=", loaded.read_text())
+                rules = {line.strip() for line in loaded.read_text().splitlines()}
+                for rule in ("mount,", "network,", "unix,", "userns,"):
+                    with self.subTest(explicit_permission=rule):
+                        self.assertIn(rule, rules)
 
             with self.subTest(scenario="parser unavailable"):
                 # An empty PATH makes parser discovery fail even on an AppArmor host.
