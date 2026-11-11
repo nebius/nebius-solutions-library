@@ -6900,9 +6900,25 @@ The t+333s dip confirms the signal is not perfectly continuous through the trans
 - Healthy validation: `k8s/run_moe_k8s.sh 300 29818 dump` → moe-1794331090; `/tmp/validation_healthy.log`
 - Threshold fix: `alerting/thresholds.py` commit 1009443
 
-### 6.47 Transition-window dip characterization, Slurm threshold re-evaluation, final cross-platform verdict (2026-11)
+### 6.49 Transition-window dip characterization, Slurm threshold re-evaluation, final cross-platform verdict (2026-11)
 
-#### 6.47.1 K8s transition-window dip: repeatable, root-caused, NOT safely closeable
+> **Addendum (capstone round 4, post-merge)**: this section was written against the commit at `3fa19102`
+> (branched before §6.47's frozen-baseline fix existed — confirmed via `git log --format=%P`: its parent
+> has no `PROXY_WAIT_BASELINE_BOOTSTRAP_N` / `_proxy_wait_baseline`). Everything below analyzes the OLD
+> mechanism — a live/current-window peer mean+stdev recomputed every poll — and correctly concludes that
+> no fixed threshold on THAT mechanism can cover Slurm's 60-minute plateau without false positives. That
+> conclusion stands and is not in dispute. What it does NOT capture: §6.47's frozen-baseline fix (merged
+> in afterward, parallel branch) replaces the live-recomputed peer mean/stdev with one frozen early in the
+> job, which keeps the denominator from growing as routing non-uniformity increases — validated there via
+> full-job historical replay (100% detection on the faulted host, 0% false positives on 5 healthy hosts)
+> and live reconfirmation on a fresh job. The "confirmed fundamental limitation... no threshold adjustment
+> can recover detection" verdict in §6.49.4 below is accurate for a THRESHOLD-only fix on the live-window
+> mechanism (which is also why the K8s team's simpler 5.0→4.0 threshold change doesn't transfer to Slurm,
+> as this section correctly shows) — it does not apply to the frozen-baseline mechanism, which is a
+> different fix at the scoring-formula level, not a threshold change. See §6.47 for the current Slurm
+> verdict.
+
+#### 6.49.1 K8s transition-window dip: repeatable, root-caused, NOT safely closeable
 
 **Three trials run** (moe-1794330545, moe-1794332021, moe-1794332582), all 300-step, 100ms, rank 4, threshold=4.0:
 
@@ -6924,7 +6940,7 @@ The t+333s dip confirms the signal is not perfectly continuous through the trans
 
 **Formally bounded gap**: one poll window (60-90 seconds) near t≈320-350s (the NCCL-init-to-training handover) where z briefly dips to 3.83-4.03 and may (2/3 probability) fall just below the 4.0 threshold. The fault resumes firing at z=4.39-4.44 in the NEXT poll window. This is documented as a known, small, bounded limitation, not "fully solved." The detector fires for the initial startup strong signal AND throughout active training, with one brief transition gap.
 
-#### 6.47.2 Slurm threshold re-evaluation
+#### 6.49.2 Slurm threshold re-evaluation
 
 Using the §6.45.3 windowed Slurm z-score trace (100ms fault, role_rank=4, 60+ minute job):
 
@@ -6941,7 +6957,7 @@ Using the §6.45.3 windowed Slurm z-score trace (100ms fault, role_rank=4, 60+ m
 
 **Slurm threshold stays at 5.0.** The K8s fix (5.0→4.0) was justified because K8s's training-phase signal (z≈4.4) was well above the K8s healthy ceiling (z≈1.91), providing 2.1+ z-units of safe margin. Slurm's plateau (z≈1.46) is below any threshold that would maintain healthy-band separation. Lowering Slurm's threshold to 4.0 extends detection by approximately 2 minutes (until ~11.8 min) but does NOT cover the 60-minute job duration, and provides no additional practical value.
 
-#### 6.47.3 K8s vs Slurm mechanism comparison — resolved
+#### 6.49.3 K8s vs Slurm mechanism comparison — resolved
 
 Both platforms confirm the same mechanism: peer_sd grows as routing non-uniformity increases, diluting z. The quantitative difference:
 
@@ -6958,7 +6974,7 @@ This IS one shared mechanism (peer_sd growth) with different severity:
 
 The SEVERITY difference (K8s: z recovers to 4.4; Slurm: z drops to 1.4) reflects model/topology differences: K8s uses the smaller nanoGPT-MoE with 16 GPUs; Slurm uses a larger Megatron-MoE with 48 GPUs and potentially more complex routing dynamics. Same root cause, different degree.
 
-#### 6.47.4 Final consolidated cross-platform MoE live detection verdict
+#### 6.49.4 Final consolidated cross-platform MoE live detection verdict
 
 | Platform | Threshold | Fires during? | Gap |
 |---|---|---|---|
@@ -6971,7 +6987,7 @@ The SEVERITY difference (K8s: z recovers to 4.4; Slurm: z drops to 1.4) reflects
 
 **Regression**: nanoGPT 100-step, EXIT=0 both nodes, 0 CHECK-FAILED, 0 false alerts.
 
-#### 6.47.5 Scripts and paths
+#### 6.49.5 Scripts and paths
 
 - K8s trials: `k8s/run_moe_k8s.sh 300 29820/29821 dump` → moe-1794332021, moe-1794332582
 - Healthy trial: `k8s/run_moe_k8s.sh 300 29822 dump` → moe-1794334578
@@ -7046,3 +7062,128 @@ nanoGPT 100-step: EXIT=0 both nodes, 0 CHECK-FAILED, 0 false alerts. ✓
 | Commit | 03d7f72, fully deployed |
 
 **Scripts**: all runs via `k8s/run_moe_k8s.sh` / `k8s/run_k8s.sh`. Poll logs: `/tmp/f1_poll.log`, `/tmp/revalidation_fault1.log`. AE log: `kubectl logs -n straggler-detection alert-engine-74c4c7b9-5xjtb`.
+
+### 6.50 Root-causing the two Step-B long-healthy-soak crashes: disk exhaustion from abandoned stale daemons, not two unrelated bugs (2026-11)
+
+#### 6.50.1 Background
+
+Two long-duration healthy MoE soak attempts (job 92016, job 92023 — see capstone round 4 conversation record)
+each died well short of the multi-hour target: 92016 at 32:52 elapsed, 92023 at 32:48 elapsed. Initially these
+looked like two unrelated failures — 92016 showed the documented `ProcessGroupNCCL` 480s-watchdog hang (5 of 6
+workers, confirmed directly in `train_worker-*.log`); 92023 showed a different signature: rank 20 (worker-2
+local_rank 4) exited with `exitcode: 1`, `ChildFailedError`, no traceback recoverable (`error_file: <N/A>`,
+"Error in sys.excepthook:" / "--- Logging error ---" both printed with zero body content — confirmed via a
+wide-window grep around the crash line that no scattered/interleaved traceback fragments exist anywhere nearby,
+ruling out log interleaving as the reason the trace is missing). The round before rank 20 died, its entire node
+(ranks 16-23) received `assigned_total=0` in the MoE router — every output_split zero. dmesg on worker-2 (read via
+`sudo -n dmesg -T`, confirmed readable and covering the right time window) showed no Xid, no OOM-kill, no segfault,
+no general-protection-fault anywhere near either crash — ruling out a GPU hardware/driver fault.
+
+#### 6.50.2 Real root cause found: the shared filesystem was at 99% capacity during both crashes
+
+`df -h` showed the `jail` filesystem (backing `/mnt/asabry-scratch`, 10T total) at 99% used, 199G free, at the
+start of this investigation. Cause: **5 separate, never-cleaned-up `node_aggregator_ref.py` instances running
+simultaneously on every one of the 6 worker nodes** (30 total across the cluster) plus 3 stale `alert_engine.py`
+instances on the login node, left running from 6 different abandoned past sessions, each independently writing
+its own `var/dump/` directory. Aggregate stale dump-file footprint: ~1.1TB (`capstone_final_20261110` 721G,
+`falcon_prod6node_20261106` 209G, `capstone_validation_20261109` 190G, others smaller).
+
+The correlation with both crashes is direct, not circumstantial: the active round4 aggregator's own log
+(`var/aggregator_logs/worker-2.log`) shows `OSError: [Errno 28] No space left on device` checkpoint-write
+failures starting at **18:56:30** — 28 seconds before job 92016's NCCL watchdog fired at 18:56:58 — continuing
+through **19:44:35**, spanning job 92023's crash window. At **19:39:49**, the exact same second rank 20 died
+with the unreadable exception, the supervisor log shows `[supervisor:worker-2] launching node_aggregator_ref.py`
+— i.e., the aggregator itself died/restarted at that identical timestamp. Both crashes happened while the shared
+disk was critically full and the correlating evidence lines up tightly with both; the two different proximate
+symptoms (an NCCL watchdog stall vs. a CUDA-context-corrupting crash with unreportable exception) are consistent
+with the same underlying trigger (an ENOSPC hit at a bad moment in two different code paths) rather than two
+independent, unrelated pre-existing bugs.
+
+**Not fully provable as the singular root cause** (the exact write operation that hit ENOSPC inside the training
+process itself was not directly captured — no "No space left on device" message appears in the training logs
+themselves, only in the aggregator's own log), but the timing correlation across two independent crash events,
+on two different mechanisms, both coinciding with confirmed ENOSPC conditions on the same shared filesystem the
+training job also writes to, is strong circumstantial evidence. This is NOT a bug in the straggler-detection
+pipeline's own detection logic (`_check_mean`, `_check_mean_tiered`, `_check_proxy_wait`, `classifier.py` —
+untouched), and NOT a bug in NCCL itself requiring a source change — it is an infrastructure/operational gap:
+nothing automatically cleans up an abandoned session's daemons or disk footprint (the per-file 300MB logrotate
+cap works correctly as designed, but has no scope beyond a single running session — see the colleague
+conversation in this round's own record for the diagnosis in plain terms).
+
+#### 6.50.3 Remediation applied
+
+- Killed all stale `alert_engine.py` (3) and `node_aggregator_ref.py` + their `run_aggregator_supervised.sh`
+  supervisors (30, across all 6 workers) from the 6 abandoned sessions. Verified via `ps aux`/`ssh <worker> ps
+  aux` that only the active `capstone_round4_fresh_20261110` instance remains everywhere.
+- Deleted the abandoned sessions' `var/dump/` directories (~1.1TB) and the active session's own already-rotated,
+  already-consumed `*.log.1*` copies (214G more — safe by the design invariant documented in the dump-file
+  logrotate config: rotated-out content is already pushed into VictoriaMetrics before rotation).
+- Disk state: 199G free (99% used) → 1.5TB free (86% used).
+
+#### 6.50.4 Scripts and paths
+
+- Crash logs: `var/moe_longhealthy_round4/train_worker-*.log` (job 92016), `var/moe_longhealthy_round4b/train_worker-*.log` (job 92023)
+- Aggregator log showing the ENOSPC correlation: `var/aggregator_logs/worker-2.log`
+- dmesg check: `ssh worker-2 "sudo -n dmesg -T"`
+- Disk check: `df -h /mnt/asabry-scratch`
+
+### 6.51 Real false positive found live on a healthy run: stale frozen baseline crossing a job boundary, root-caused and fixed (2026-11)
+
+#### 6.51.1 The finding
+
+During Step 4's fresh re-validation (3 fault + 3 healthy quick 300-step MoE trials on the current pushed code),
+a genuinely healthy run (job 92092, no fault env vars, TORCHRUN_EXIT=0 on all 6 workers, 145s total) produced
+a `[STRAGGLER-INCIDENT]` via `stat=proxy_wait`: `host=worker-4 role_rank=37 severity_ratio=88.08`. This is
+exactly the risk this whole capstone's Step B was built to stress-test (the frozen-baseline fix from §6.47) —
+found here instead, by accident, via fast back-to-back trials rather than a long single run.
+
+#### 6.51.2 Root cause
+
+The `[PROXY-WAIT-SCORING]` diagnostic line for this exact incident read `baseline_age=625s` — impossible,
+since the job it supposedly belonged to had only run 145s total. The frozen baseline being scored against was
+left over from an **earlier, unrelated job** and never got reset. Live data at that same moment was genuinely
+healthy (`live_z=2.54`, both thresholds unmet) — the false positive came entirely from the stale baseline, not
+from any real signal.
+
+Traced one level deeper into *why* the reset didn't fire: `_check_proxy_wait`'s reset condition was
+`slurm_job_id != base["job_id"]` — correct in principle, but `node_aggregator_ref.py`'s `self.slurm_job_id`
+(embedded in every pushed metric via `base_labels()`) can transiently go to `""`/`"unknown"` for one poll right
+as a new job starts, before its own squeue/sacct-based detection catches up. VictoriaMetrics drops empty-string
+labels on export (confirmed directly: `_query_export` returned no `slurm_job_id` key at all — not even an empty
+string — for several of this exact job's own early records), so the equality check silently never triggers for
+whichever host's records land in that one-poll gap. This is a genuine, understandable timing gap in the
+aggregator's job-id detection, not a deep structural flaw — but `_check_proxy_wait`'s reset logic had no fallback
+for it.
+
+#### 6.51.3 Fix
+
+Added a second, label-independent reset signal in `_check_proxy_wait`: each host's baseline now also tracks the
+OS-PID *member set* it was last built from. A newly-launched job's ranks get fresh PIDs, so if the current poll's
+member set shares **zero overlap** with the baseline's last-known set, that alone is treated as "different job"
+regardless of whether the `slurm_job_id` label made it through. Checked for zero overlap specifically (not mere
+inequality) so a same-job poll that transiently drops/regains one straggling member's export does not look like
+a full job change and force a spurious reset. `classifier.py`/`_check_mean`/`_check_mean_tiered` untouched.
+
+#### 6.51.4 Validation
+
+- **Static**: reviewed the diff directly; the added logic is a pure set-intersection check with no new blocking
+  calls, loops, or external dependencies — no hang-safety risk introduced.
+- **Offline replay**: re-ran the real historical VM data spanning fault3 through the false-positive healthy run
+  through the fixed logic. Confirms `RESET (members_changed=True, job='')` fires exactly at the healthy job's
+  start, discarding the stale baseline before any scoring happens, for the exact scenario that produced the
+  false positive.
+- **Live reconfirmation**: restarted the engine with the fix, ran a fresh fault trial (job 92093, fired
+  correctly, role_rank=4, z=18.45) immediately followed by a fresh healthy trial (job 92094, 150s) — the exact
+  back-to-back pattern that triggered the original bug. Zero incidents on the healthy run. Directly confirmed via
+  raw VM query: z=6.30 (stale, job 92093's own data) at t=04:39:30, dropping to a genuine z=1.72-1.84 once job
+  92094's own data took over at t=04:40:15+ — real, correctly-reset, true-negative behavior, not a lucky miss.
+- **Regression**: nanoGPT 100-step dense-workload trial re-run against the fixed code (job 92095) to confirm no
+  unrelated breakage.
+
+#### 6.51.5 Scripts and paths
+
+- Original false positive: job 92092, `var/round4_revalidation/healthy1/`
+- Fix location: `alerting/alert_engine.py`, `_check_proxy_wait`
+- Live reconfirmation: fault job 92093 (`var/round4_revalidation/fault4_postfix/`), healthy job 92094
+  (`var/round4_revalidation/healthy2_postfix/`)
+- Regression: nanoGPT job 92095, `var/round4_revalidation/nanogpt_regression/`
