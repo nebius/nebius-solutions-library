@@ -44,9 +44,11 @@ spec:
           persistentVolumeClaim:
             claimName: straggler-workspace
         - name: inspector-dumps
-          emptyDir: {}
+          emptyDir:
+            sizeLimit: "20Gi"
         - name: outdir
-          emptyDir: {}
+          emptyDir:
+            sizeLimit: "1Gi"
         - name: sys
           hostPath:
             path: /sys
@@ -63,8 +65,10 @@ spec:
             requests:
               cpu: "120"
               memory: 400Gi
+              ephemeral-storage: "10Gi"
             limits:
               nvidia.com/gpu: ${TRAIN_GPUS}
+              ephemeral-storage: "15Gi"
           volumeMounts:
             - name: workspace
               mountPath: /workspace
@@ -116,6 +120,9 @@ spec:
               value: "${MOE_FAULT_DELAY_US}"
             - name: NCCL_INSPECTOR_DUMP_VERBOSE
               value: "0"
+            # Dump interval: 500 (default, fine for short runs) or 10000 for long runs (10ms, 20x less data)
+            - name: NCCL_INSPECTOR_DUMP_THREAD_INTERVAL_MICROSECONDS
+              value: "${DUMP_INTERVAL_US}"
           command:
             - bash
             - -c
