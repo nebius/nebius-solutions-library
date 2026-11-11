@@ -1,7 +1,7 @@
-resource "local_file" "flux_release_rendered_nodesets" {
-  filename = "${path.root}/assets/render/flux_release_nodesets.yaml"
-
-  content = templatefile("${path.module}/templates/helm_values/flux_release_nodesets.yaml.tftpl", {
+locals {
+  # Rendered separately from the resource so the values can be asserted on at
+  # plan time (a resource attribute is only readable once the resource exists).
+  flux_release_rendered_nodesets = templatefile("${path.module}/templates/helm_values/flux_release_nodesets.yaml.tftpl", {
     version          = var.operator_version
     namespace        = "soperator"
     release_name     = "soperator-nodesets"
@@ -72,4 +72,9 @@ resource "local_file" "flux_release_rendered_nodesets" {
       resources                   = local.resources.sssd
     }
   })
+}
+
+resource "local_file" "flux_release_rendered_nodesets" {
+  filename = "${path.root}/assets/render/flux_release_nodesets.yaml"
+  content  = local.flux_release_rendered_nodesets
 }
