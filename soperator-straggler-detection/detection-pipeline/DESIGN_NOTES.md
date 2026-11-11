@@ -6900,9 +6900,25 @@ The t+333s dip confirms the signal is not perfectly continuous through the trans
 - Healthy validation: `k8s/run_moe_k8s.sh 300 29818 dump` → moe-1794331090; `/tmp/validation_healthy.log`
 - Threshold fix: `alerting/thresholds.py` commit 1009443
 
-### 6.47 Transition-window dip characterization, Slurm threshold re-evaluation, final cross-platform verdict (2026-11)
+### 6.49 Transition-window dip characterization, Slurm threshold re-evaluation, final cross-platform verdict (2026-11)
 
-#### 6.47.1 K8s transition-window dip: repeatable, root-caused, NOT safely closeable
+> **Addendum (capstone round 4, post-merge)**: this section was written against the commit at `3fa19102`
+> (branched before §6.47's frozen-baseline fix existed — confirmed via `git log --format=%P`: its parent
+> has no `PROXY_WAIT_BASELINE_BOOTSTRAP_N` / `_proxy_wait_baseline`). Everything below analyzes the OLD
+> mechanism — a live/current-window peer mean+stdev recomputed every poll — and correctly concludes that
+> no fixed threshold on THAT mechanism can cover Slurm's 60-minute plateau without false positives. That
+> conclusion stands and is not in dispute. What it does NOT capture: §6.47's frozen-baseline fix (merged
+> in afterward, parallel branch) replaces the live-recomputed peer mean/stdev with one frozen early in the
+> job, which keeps the denominator from growing as routing non-uniformity increases — validated there via
+> full-job historical replay (100% detection on the faulted host, 0% false positives on 5 healthy hosts)
+> and live reconfirmation on a fresh job. The "confirmed fundamental limitation... no threshold adjustment
+> can recover detection" verdict in §6.49.4 below is accurate for a THRESHOLD-only fix on the live-window
+> mechanism (which is also why the K8s team's simpler 5.0→4.0 threshold change doesn't transfer to Slurm,
+> as this section correctly shows) — it does not apply to the frozen-baseline mechanism, which is a
+> different fix at the scoring-formula level, not a threshold change. See §6.47 for the current Slurm
+> verdict.
+
+#### 6.49.1 K8s transition-window dip: repeatable, root-caused, NOT safely closeable
 
 **Three trials run** (moe-1794330545, moe-1794332021, moe-1794332582), all 300-step, 100ms, rank 4, threshold=4.0:
 
@@ -6924,7 +6940,7 @@ The t+333s dip confirms the signal is not perfectly continuous through the trans
 
 **Formally bounded gap**: one poll window (60-90 seconds) near t≈320-350s (the NCCL-init-to-training handover) where z briefly dips to 3.83-4.03 and may (2/3 probability) fall just below the 4.0 threshold. The fault resumes firing at z=4.39-4.44 in the NEXT poll window. This is documented as a known, small, bounded limitation, not "fully solved." The detector fires for the initial startup strong signal AND throughout active training, with one brief transition gap.
 
-#### 6.47.2 Slurm threshold re-evaluation
+#### 6.49.2 Slurm threshold re-evaluation
 
 Using the §6.45.3 windowed Slurm z-score trace (100ms fault, role_rank=4, 60+ minute job):
 
@@ -6941,7 +6957,7 @@ Using the §6.45.3 windowed Slurm z-score trace (100ms fault, role_rank=4, 60+ m
 
 **Slurm threshold stays at 5.0.** The K8s fix (5.0→4.0) was justified because K8s's training-phase signal (z≈4.4) was well above the K8s healthy ceiling (z≈1.91), providing 2.1+ z-units of safe margin. Slurm's plateau (z≈1.46) is below any threshold that would maintain healthy-band separation. Lowering Slurm's threshold to 4.0 extends detection by approximately 2 minutes (until ~11.8 min) but does NOT cover the 60-minute job duration, and provides no additional practical value.
 
-#### 6.47.3 K8s vs Slurm mechanism comparison — resolved
+#### 6.49.3 K8s vs Slurm mechanism comparison — resolved
 
 Both platforms confirm the same mechanism: peer_sd grows as routing non-uniformity increases, diluting z. The quantitative difference:
 
@@ -6958,7 +6974,7 @@ This IS one shared mechanism (peer_sd growth) with different severity:
 
 The SEVERITY difference (K8s: z recovers to 4.4; Slurm: z drops to 1.4) reflects model/topology differences: K8s uses the smaller nanoGPT-MoE with 16 GPUs; Slurm uses a larger Megatron-MoE with 48 GPUs and potentially more complex routing dynamics. Same root cause, different degree.
 
-#### 6.47.4 Final consolidated cross-platform MoE live detection verdict
+#### 6.49.4 Final consolidated cross-platform MoE live detection verdict
 
 | Platform | Threshold | Fires during? | Gap |
 |---|---|---|---|
@@ -6971,7 +6987,7 @@ The SEVERITY difference (K8s: z recovers to 4.4; Slurm: z drops to 1.4) reflects
 
 **Regression**: nanoGPT 100-step, EXIT=0 both nodes, 0 CHECK-FAILED, 0 false alerts.
 
-#### 6.47.5 Scripts and paths
+#### 6.49.5 Scripts and paths
 
 - K8s trials: `k8s/run_moe_k8s.sh 300 29820/29821 dump` → moe-1794332021, moe-1794332582
 - Healthy trial: `k8s/run_moe_k8s.sh 300 29822 dump` → moe-1794334578
