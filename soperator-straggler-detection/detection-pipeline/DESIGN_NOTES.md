@@ -6994,3 +6994,67 @@ The SEVERITY difference (K8s: z recovers to 4.4; Slurm: z drops to 1.4) reflects
 - Poll logs: `/tmp/trial2_poll.log`, `/tmp/trial3_poll.log`, `/tmp/healthy_full_poll.log`
 - Slurm data source: §6.45.3 windowed z-score trace
 - Regression: `k8s/run_k8s.sh 100 29823 auto` → straggler-train-1794335596
+
+### 6.50 Root-causing the two Step-B long-healthy-soak crashes: disk exhaustion from abandoned stale daemons, not two unrelated bugs (2026-11)
+
+#### 6.50.1 Background
+
+Two long-duration healthy MoE soak attempts (job 92016, job 92023 — see capstone round 4 conversation record)
+each died well short of the multi-hour target: 92016 at 32:52 elapsed, 92023 at 32:48 elapsed. Initially these
+looked like two unrelated failures — 92016 showed the documented `ProcessGroupNCCL` 480s-watchdog hang (5 of 6
+workers, confirmed directly in `train_worker-*.log`); 92023 showed a different signature: rank 20 (worker-2
+local_rank 4) exited with `exitcode: 1`, `ChildFailedError`, no traceback recoverable (`error_file: <N/A>`,
+"Error in sys.excepthook:" / "--- Logging error ---" both printed with zero body content — confirmed via a
+wide-window grep around the crash line that no scattered/interleaved traceback fragments exist anywhere nearby,
+ruling out log interleaving as the reason the trace is missing). The round before rank 20 died, its entire node
+(ranks 16-23) received `assigned_total=0` in the MoE router — every output_split zero. dmesg on worker-2 (read via
+`sudo -n dmesg -T`, confirmed readable and covering the right time window) showed no Xid, no OOM-kill, no segfault,
+no general-protection-fault anywhere near either crash — ruling out a GPU hardware/driver fault.
+
+#### 6.50.2 Real root cause found: the shared filesystem was at 99% capacity during both crashes
+
+`df -h` showed the `jail` filesystem (backing `/mnt/asabry-scratch`, 10T total) at 99% used, 199G free, at the
+start of this investigation. Cause: **5 separate, never-cleaned-up `node_aggregator_ref.py` instances running
+simultaneously on every one of the 6 worker nodes** (30 total across the cluster) plus 3 stale `alert_engine.py`
+instances on the login node, left running from 6 different abandoned past sessions, each independently writing
+its own `var/dump/` directory. Aggregate stale dump-file footprint: ~1.1TB (`capstone_final_20261110` 721G,
+`falcon_prod6node_20261106` 209G, `capstone_validation_20261109` 190G, others smaller).
+
+The correlation with both crashes is direct, not circumstantial: the active round4 aggregator's own log
+(`var/aggregator_logs/worker-2.log`) shows `OSError: [Errno 28] No space left on device` checkpoint-write
+failures starting at **18:56:30** — 28 seconds before job 92016's NCCL watchdog fired at 18:56:58 — continuing
+through **19:44:35**, spanning job 92023's crash window. At **19:39:49**, the exact same second rank 20 died
+with the unreadable exception, the supervisor log shows `[supervisor:worker-2] launching node_aggregator_ref.py`
+— i.e., the aggregator itself died/restarted at that identical timestamp. Both crashes happened while the shared
+disk was critically full and the correlating evidence lines up tightly with both; the two different proximate
+symptoms (an NCCL watchdog stall vs. a CUDA-context-corrupting crash with unreportable exception) are consistent
+with the same underlying trigger (an ENOSPC hit at a bad moment in two different code paths) rather than two
+independent, unrelated pre-existing bugs.
+
+**Not fully provable as the singular root cause** (the exact write operation that hit ENOSPC inside the training
+process itself was not directly captured — no "No space left on device" message appears in the training logs
+themselves, only in the aggregator's own log), but the timing correlation across two independent crash events,
+on two different mechanisms, both coinciding with confirmed ENOSPC conditions on the same shared filesystem the
+training job also writes to, is strong circumstantial evidence. This is NOT a bug in the straggler-detection
+pipeline's own detection logic (`_check_mean`, `_check_mean_tiered`, `_check_proxy_wait`, `classifier.py` —
+untouched), and NOT a bug in NCCL itself requiring a source change — it is an infrastructure/operational gap:
+nothing automatically cleans up an abandoned session's daemons or disk footprint (the per-file 300MB logrotate
+cap works correctly as designed, but has no scope beyond a single running session — see the colleague
+conversation in this round's own record for the diagnosis in plain terms).
+
+#### 6.50.3 Remediation applied
+
+- Killed all stale `alert_engine.py` (3) and `node_aggregator_ref.py` + their `run_aggregator_supervised.sh`
+  supervisors (30, across all 6 workers) from the 6 abandoned sessions. Verified via `ps aux`/`ssh <worker> ps
+  aux` that only the active `capstone_round4_fresh_20261110` instance remains everywhere.
+- Deleted the abandoned sessions' `var/dump/` directories (~1.1TB) and the active session's own already-rotated,
+  already-consumed `*.log.1*` copies (214G more — safe by the design invariant documented in the dump-file
+  logrotate config: rotated-out content is already pushed into VictoriaMetrics before rotation).
+- Disk state: 199G free (99% used) → 1.5TB free (86% used).
+
+#### 6.50.4 Scripts and paths
+
+- Crash logs: `var/moe_longhealthy_round4/train_worker-*.log` (job 92016), `var/moe_longhealthy_round4b/train_worker-*.log` (job 92023)
+- Aggregator log showing the ENOSPC correlation: `var/aggregator_logs/worker-2.log`
+- dmesg check: `ssh worker-2 "sudo -n dmesg -T"`
+- Disk check: `df -h /mnt/asabry-scratch`
