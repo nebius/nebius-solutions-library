@@ -7058,3 +7058,64 @@ conversation in this round's own record for the diagnosis in plain terms).
 - Aggregator log showing the ENOSPC correlation: `var/aggregator_logs/worker-2.log`
 - dmesg check: `ssh worker-2 "sudo -n dmesg -T"`
 - Disk check: `df -h /mnt/asabry-scratch`
+
+### 6.51 Real false positive found live on a healthy run: stale frozen baseline crossing a job boundary, root-caused and fixed (2026-11)
+
+#### 6.51.1 The finding
+
+During Step 4's fresh re-validation (3 fault + 3 healthy quick 300-step MoE trials on the current pushed code),
+a genuinely healthy run (job 92092, no fault env vars, TORCHRUN_EXIT=0 on all 6 workers, 145s total) produced
+a `[STRAGGLER-INCIDENT]` via `stat=proxy_wait`: `host=worker-4 role_rank=37 severity_ratio=88.08`. This is
+exactly the risk this whole capstone's Step B was built to stress-test (the frozen-baseline fix from §6.47) —
+found here instead, by accident, via fast back-to-back trials rather than a long single run.
+
+#### 6.51.2 Root cause
+
+The `[PROXY-WAIT-SCORING]` diagnostic line for this exact incident read `baseline_age=625s` — impossible,
+since the job it supposedly belonged to had only run 145s total. The frozen baseline being scored against was
+left over from an **earlier, unrelated job** and never got reset. Live data at that same moment was genuinely
+healthy (`live_z=2.54`, both thresholds unmet) — the false positive came entirely from the stale baseline, not
+from any real signal.
+
+Traced one level deeper into *why* the reset didn't fire: `_check_proxy_wait`'s reset condition was
+`slurm_job_id != base["job_id"]` — correct in principle, but `node_aggregator_ref.py`'s `self.slurm_job_id`
+(embedded in every pushed metric via `base_labels()`) can transiently go to `""`/`"unknown"` for one poll right
+as a new job starts, before its own squeue/sacct-based detection catches up. VictoriaMetrics drops empty-string
+labels on export (confirmed directly: `_query_export` returned no `slurm_job_id` key at all — not even an empty
+string — for several of this exact job's own early records), so the equality check silently never triggers for
+whichever host's records land in that one-poll gap. This is a genuine, understandable timing gap in the
+aggregator's job-id detection, not a deep structural flaw — but `_check_proxy_wait`'s reset logic had no fallback
+for it.
+
+#### 6.51.3 Fix
+
+Added a second, label-independent reset signal in `_check_proxy_wait`: each host's baseline now also tracks the
+OS-PID *member set* it was last built from. A newly-launched job's ranks get fresh PIDs, so if the current poll's
+member set shares **zero overlap** with the baseline's last-known set, that alone is treated as "different job"
+regardless of whether the `slurm_job_id` label made it through. Checked for zero overlap specifically (not mere
+inequality) so a same-job poll that transiently drops/regains one straggling member's export does not look like
+a full job change and force a spurious reset. `classifier.py`/`_check_mean`/`_check_mean_tiered` untouched.
+
+#### 6.51.4 Validation
+
+- **Static**: reviewed the diff directly; the added logic is a pure set-intersection check with no new blocking
+  calls, loops, or external dependencies — no hang-safety risk introduced.
+- **Offline replay**: re-ran the real historical VM data spanning fault3 through the false-positive healthy run
+  through the fixed logic. Confirms `RESET (members_changed=True, job='')` fires exactly at the healthy job's
+  start, discarding the stale baseline before any scoring happens, for the exact scenario that produced the
+  false positive.
+- **Live reconfirmation**: restarted the engine with the fix, ran a fresh fault trial (job 92093, fired
+  correctly, role_rank=4, z=18.45) immediately followed by a fresh healthy trial (job 92094, 150s) — the exact
+  back-to-back pattern that triggered the original bug. Zero incidents on the healthy run. Directly confirmed via
+  raw VM query: z=6.30 (stale, job 92093's own data) at t=04:39:30, dropping to a genuine z=1.72-1.84 once job
+  92094's own data took over at t=04:40:15+ — real, correctly-reset, true-negative behavior, not a lucky miss.
+- **Regression**: nanoGPT 100-step dense-workload trial re-run against the fixed code (job 92095) to confirm no
+  unrelated breakage.
+
+#### 6.51.5 Scripts and paths
+
+- Original false positive: job 92092, `var/round4_revalidation/healthy1/`
+- Fix location: `alerting/alert_engine.py`, `_check_proxy_wait`
+- Live reconfirmation: fault job 92093 (`var/round4_revalidation/fault4_postfix/`), healthy job 92094
+  (`var/round4_revalidation/healthy2_postfix/`)
+- Regression: nanoGPT job 92095, `var/round4_revalidation/nanogpt_regression/`

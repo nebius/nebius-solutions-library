@@ -6779,15 +6779,50 @@ class AlertEngine:
             live_mm = peer_median / worst_val if worst_val > 0 else float("inf")
 
             role_rank, role_n, slurm_job_id = role_info.get((hostname, worst), ("na", "na", ""))
+            current_members = frozenset(members.keys())
 
             # Capstone round 2 (2026-11) -- frozen-baseline bootstrap/
             # freeze/reset. See thresholds.py's PROXY_WAIT_BASELINE_
             # BOOTSTRAP_N and this function's own docstring for the real
             # investigation this closes.
+            #
+            # Capstone round 4 (2026-11) -- real false positive found live
+            # during back-to-back quick-trial re-validation: a healthy
+            # 145s job (92092) fired severity_ratio=88.08 on worker-4,
+            # role_rank=37. Root-caused via the [PROXY-WAIT-SCORING] line
+            # itself: baseline_age=625s, far exceeding that job's own
+            # 145s total lifetime -- the frozen reference was never reset
+            # and belonged to an EARLIER, unrelated job, while live_z for
+            # the same moment was a perfectly healthy 2.54. Traced one
+            # level deeper (node_aggregator_ref.py's base_labels(),
+            # self.slurm_job_id): right as a new job starts, this
+            # aggregator's own squeue/sacct-based job-id detection can
+            # lag by one poll, during which self.slurm_job_id is
+            # transiently "" or "unknown" -- VM drops empty-string labels
+            # on export (confirmed live: some of this exact job's own
+            # records came back with no slurm_job_id key at all via
+            # _query_export, not merely an empty string), so the
+            # slurm_job_id-equality reset condition below can silently
+            # never fire for the one host unlucky enough to have its
+            # early records land in that gap. Fix: a second, label-
+            # independent reset signal -- a genuinely new job's ranks get
+            # fresh OS PIDs, so if this poll's member set shares NO
+            # overlap at all with the set the baseline was last built
+            # from, that is an unambiguous "different job" signal
+            # regardless of whether the job-id label made it through.
+            # Checked for zero overlap (not just inequality) deliberately:
+            # a same-job poll that merely drops/regains a straggling
+            # member (e.g. one rank's export lagging one window) must
+            # not look like a full job change and force a spurious reset.
             base = self._proxy_wait_baseline.get(hostname)
-            if base is None or (slurm_job_id and base.get("job_id") and slurm_job_id != base["job_id"]):
-                base = {"job_id": slurm_job_id, "samples": [], "frozen": None, "frozen_at": None}
+            members_changed = bool(
+                base is not None and base.get("members") and current_members
+                and not (current_members & base["members"])
+            )
+            if base is None or members_changed or (slurm_job_id and base.get("job_id") and slurm_job_id != base["job_id"]):
+                base = {"job_id": slurm_job_id, "samples": [], "frozen": None, "frozen_at": None, "members": current_members}
                 self._proxy_wait_baseline[hostname] = base
+            base["members"] = current_members
             if base["frozen"] is None:
                 base["samples"].append((peer_mean, peer_median, peer_sd))
                 if slurm_job_id:
