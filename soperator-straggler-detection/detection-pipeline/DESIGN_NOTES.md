@@ -7258,3 +7258,90 @@ validated correctly on every trial that COULD complete.
 - Starvation evidence (pre-fix): job 92103, `var/dump/worker-0/.aggregator_offsets_checkpoint.json`
 - Round-robin fix confirmation (post-fix): job 92110, same checkpoint file, even lag across all 8 ranks
 - Throughput-ceiling evidence: `df -h /mnt/asabry-scratch` before/after each 10-minute window
+
+### 6.53 Aggregator throughput bottleneck root-cause: confirmed I/O-bound, specifically concurrent-read-vs-write filesystem overhead, NOT CPU/parsing (2026-11, diagnosis only, no fix applied)
+
+#### 6.53.1 Method
+
+Live process profiling against a real, reproducing MoE healthy trial (job 92112, full 48-GPU scale, both §6.52
+fixes active). `py-spy` (installed into an isolated venv on the shared filesystem, `/mnt/.../pyspy_venv` --
+removed after this investigation, never a project dependency) took 5 stack-trace snapshots of the live
+`node_aggregator_ref.py` process on worker-0 spread over ~15s. `strace -c -f -p <pid>` captured a 15-second
+syscall-time breakdown on the same process. Combined read-offset vs. file-size growth was measured directly
+from `.aggregator_offsets_checkpoint.json` and `os.path.getsize()`, 60s apart, summed across all 8 ranks on one
+node. A control measurement read a large (159MB) STATIC file (not concurrently written) on the identical
+filesystem for comparison.
+
+#### 6.53.2 Confirmed: I/O-bound, not CPU-bound
+
+- **py-spy**: 4 of 5 samples showed the thread `idle` (not holding the GIL -- blocked in a C-level call)
+  specifically at `poll_files()`'s `new_data = f.read()` (node_aggregator_ref.py, the single unchunked read of
+  everything new since the last offset). Only 1 of 5 samples showed `active+gil` CPU work, and that was JSON
+  parsing in the SEPARATE `poll_apptiming_files()` path, not the main dump-file read path.
+- **strace -c** (15s window): **90.12% of total syscall time was inside `read()`** (20 calls, ~136ms average
+  each -- unusually slow for a read syscall). `munmap` (Python's own buffer-churn from repeatedly allocating/
+  freeing large byte strings) was a distant second at 5.18%; `openat` at 3.60%. CPU-bound work (parsing,
+  Python-level loop overhead) does not show up as a meaningful fraction of wall-clock time at all.
+- **Neither recent fix contributes measurably**: no `fallocate` call (dump_reclaim.py) appears anywhere in the
+  strace trace; `openat`/`getdents64` overhead (plausibly touched by the round-robin fix's extra glob/index
+  work) is 3.6%/0.71% of total time, far from a meaningful contributor.
+
+#### 6.53.3 Quantified gap: ~993x, NOT a modest shortfall
+
+Measured directly (worker-0, 60s window, summed across all 8 ranks' dump files): combined read-offset growth
+4.1 MB/min vs. combined file-size growth 4071.2 MB/min -- a **993x** gap. This is not a "20-30% speedup would
+close it" situation; it is orders of magnitude.
+
+#### 6.53.4 The real root cause is narrower than "slow storage": concurrent read-while-write specifically
+
+The decisive isolation test: reading a static 159MB file (not being written to by anything) on the IDENTICAL
+filesystem achieved **907.4 MB/s**. The live aggregator's effective read throughput on the actively-growing
+dump files was 4.1 MB/min = **0.068 MB/s** -- a **~13,279x** slowdown specifically tied to one process reading
+a file while another process concurrently writes to it. This rules out "the shared filesystem is just slow" as
+the explanation (a static read on the same mount is fast) and points instead at concurrent-access overhead on
+this specific filesystem -- consistent with an NFS-like protocol needing cache-coherency round-trips (attribute
+revalidation, etc.) on every read against a file whose metadata is changing underneath it, something a local
+(non-networked) filesystem would not incur for genuinely co-located reader/writer processes.
+
+#### 6.53.5 MoE-specific or general?
+
+The MECHANISM (concurrent-read-vs-write overhead on this shared filesystem) is not MoE-specific at all -- it
+would apply to any workload's dump files. MoE is the only workload that currently produces enough combined raw
+write VOLUME (dense workloads' far lower collective-call rate keeps them comfortably under read capacity even
+with this same per-read overhead) to expose it. This is a general, latency-of-the-shared-filesystem property
+that would eventually matter for any sufficiently high-volume workload, not a MoE-only ceiling.
+
+#### 6.53.6 Recommendation (not implemented -- diagnosis only, per this task's own explicit instruction)
+
+Of the three originally-scoped directions:
+- **Speed up per-line parsing**: confirmed NOT the answer -- parsing is not where the time goes.
+- **Parallelize per-rank readers**: unlikely to help much and could worsen contention -- the cost is concurrent-
+  access overhead against the SAME filesystem, not insufficient reader parallelism; more concurrent readers
+  against the same NFS-like mount while writers continue plausibly increases contention rather than reducing it.
+- **Reduce MoE's write volume (sampling/windowing)**: directionally correct (less concurrently-changing data =
+  less revalidation overhead) but given a ~993x-13,279x gap, even a substantial volume reduction (e.g. 10x)
+  would not fully close it alone.
+
+A fourth option the evidence points to more directly, outside the original three: **write the raw per-rank dump
+files to node-LOCAL (non-shared) storage instead of the shared/network-mounted filesystem.** If the dominant
+cost is specifically the network-filesystem protocol's concurrent-read-vs-write overhead, a genuinely local
+disk/tmpfs path for the Inspector plugin's writer (same physical node as the aggregator that reads it) would
+very plausibly eliminate most of this cost, since local filesystems do not need network round-trips for cache
+coherency between two local processes. This is a change to the Inspector plugin's configured OUTPUT PATH, not
+its internal logic -- plausibly lower-risk than the parallelization or parsing options, but not yet confirmed:
+it has NOT been tested, and still touches the write side this task was told not to modify. **Risk level if
+pursued**: the dump-file write path itself is unchanged logic-wise, so this would not touch
+`poll_files()`/`handle_record()`'s core data-reading path at all (lower risk than parallelizing readers), but
+DOES touch where the Inspector plugin writes, which is launch/config-level, not core Inspector-plugin source --
+still requires its own dedicated validation (confirm local paths exist/are writable on every node, confirm no
+regression in orphan-cleanup/offset-checkpoint logic which assume a shared path reachable from this aggregator
+process, confirm disk headroom on each node's local storage) before trusting it. No fix applied in this round.
+
+#### 6.53.7 Commands and raw evidence (reproducible)
+
+- `python3 -m venv <path>/pyspy_venv && <path>/pyspy_venv/bin/pip install py-spy` (isolated venv, removed after)
+- `py-spy dump --pid <aggregator_pid>` x5, ~3s apart
+- `strace -c -f -p <aggregator_pid>` for 15s (via `timeout 15`)
+- Offset/size growth: `.aggregator_offsets_checkpoint.json` + `os.path.getsize()`, sampled 60s apart
+- Static-file control read: direct Python `open(...).read()` timing on a 159MB file on the same mount
+- Reproducing job: 92112 (`var/moe_profiling_round1/`), cancelled after measurement, dump data cleaned up after
