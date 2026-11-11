@@ -44,9 +44,11 @@ spec:
           persistentVolumeClaim:
             claimName: straggler-workspace
         - name: inspector-dumps
-          emptyDir: {}
+          emptyDir:
+            sizeLimit: "10Gi"
         - name: outdir
-          emptyDir: {}
+          emptyDir:
+            sizeLimit: "1Gi"
         - name: sys
           hostPath:
             path: /sys
@@ -63,8 +65,10 @@ spec:
             requests:
               cpu: "120"
               memory: 400Gi
+              ephemeral-storage: "10Gi"
             limits:
               nvidia.com/gpu: ${TRAIN_GPUS}
+              ephemeral-storage: "15Gi"
           volumeMounts:
             - name: workspace
               mountPath: /workspace
