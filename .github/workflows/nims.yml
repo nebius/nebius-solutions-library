@@ -1,0 +1,38 @@
+name: NIM Catalog
+
+on:
+  pull_request:
+    paths:
+      - 'modules/nims/**'
+      - '.github/workflows/nims.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'modules/nims/**'
+      - '.github/workflows/nims.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: NIM catalog validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: modules/nims
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: '1.11.4'
+          terraform_wrapper: false
+      - name: Check formatting
+        run: terraform fmt -check -recursive
+      - name: Initialize providers
+        run: terraform init -backend=false -input=false
+      - name: Validate module
+        run: terraform validate
+      - name: Test catalog with a mocked Kubernetes provider
+        run: terraform test
