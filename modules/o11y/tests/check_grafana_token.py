@@ -4,7 +4,7 @@
 The temporary fixture uses the real grafana.tf and a fake Nebius CLI. A clean
 apply proves that terraform_data creates the token file before the ephemeral
 local_command reads it and passes it to the application's write-only fields.
-Subsequent applies exercise explicit generation-based rotation and idempotency.
+Subsequent applies exercise one-shot replacement and idempotency.
 Requires Terraform >= 1.11.4 on PATH (or set TERRAFORM_BIN).
 """
 
@@ -42,23 +42,15 @@ terraform {
   required_version = ">= 1.11.4"
 }
 
-variable "generation" {
-  type    = number
-  default = 1
-}
-
 resource "terraform_data" "grafana_access_token" {
   input = {
     token_path = "${path.root}/token.txt"
-    generation = var.generation
   }
 
-  triggers_replace = merge({
+  triggers_replace = {
     access_key_id      = "access-key"
     service_account_id = "service-account"
-    }, var.generation > 1 ? {
-    rotation_generation = var.generation
-  } : {})
+  }
 
   lifecycle {
     create_before_destroy = true
@@ -81,8 +73,7 @@ def check_production_wiring():
     versions = (MODULE / "versions.tf").read_text()
 
     required = (
-        "generation             = var.grafana_observability_key_generation",
-        "rotation_generation = var.grafana_observability_key_generation",
+        "triggers_replace = {",
         "create_before_destroy = true",
         "grafana_access_token.previous.txt",
         'ephemeral "local_command" "grafana_access_token"',
@@ -100,6 +91,8 @@ def check_production_wiring():
     forbidden = (
         "try(trimspace(file(",
         "access_token      = local.grafana_access_token",
+        "grafana_observability_key_generation",
+        "rotation_generation",
     )
     combined = grafana + output
     for expression in forbidden:
@@ -107,8 +100,8 @@ def check_production_wiring():
             raise RuntimeError(f"Obsolete Grafana token wiring remains: {expression}")
 
 
-def check_generation_one_upgrade(terraform):
-    """Prove that adopting generation 1 does not replace a legacy generator."""
+def check_apply_time_reader_upgrade(terraform):
+    """Prove that adding the apply-time output does not replace a legacy generator."""
 
     with tempfile.TemporaryDirectory(prefix="o11y-grafana-upgrade-") as directory:
         fixture = Path(directory)
@@ -151,7 +144,7 @@ def check_generation_one_upgrade(terraform):
         )
         if generator["change"]["actions"] != ["update"]:
             raise RuntimeError(
-                "Adopting generation 1 must update the legacy generator in place; "
+                "Adding the apply-time output must update the legacy generator in place; "
                 f"got {generator['change']['actions']}"
             )
 
@@ -162,13 +155,13 @@ def check_generation_one_upgrade(terraform):
             stdout=subprocess.DEVNULL,
         )
         if (fixture / "issue.log").read_text().splitlines() != ["issued"]:
-            raise RuntimeError("Generation 1 unexpectedly reissued the legacy token")
+            raise RuntimeError("The apply-time output unexpectedly reissued the legacy token")
 
 
 def main():
     check_production_wiring()
     terraform = os.environ.get("TERRAFORM_BIN", "terraform")
-    check_generation_one_upgrade(terraform)
+    check_apply_time_reader_upgrade(terraform)
 
     with tempfile.TemporaryDirectory(prefix="o11y-grafana-token-") as directory:
         fixture = Path(directory)
@@ -200,15 +193,24 @@ def main():
             "    *) shift ;;\n"
             "  esac\n"
             "done\n"
-            "generation=$(printf '%s' \"$name\" | sed -n "
-            "'s/.*-g\\([0-9][0-9]*\\)-.*/\\1/p')\n"
             "case \"$operation\" in\n"
+            "  *\"static-key list\"*)\n"
+            "    if [ -n \"$FAKE_ACTIVE_KEY_SERVICE_ACCOUNT_ID\" ]; then\n"
+            "      printf '{\"items\":[{\"metadata\":{\"id\":\"static-key-existing\"},\"spec\":{\"service\":\"OBSERVABILITY\",\"account\":{\"service_account\":{\"id\":\"%s\"}}},\"status\":{\"active\":true}}]}\\n' \"$FAKE_ACTIVE_KEY_SERVICE_ACCOUNT_ID\"\n"
+            "    else\n"
+            "      printf '{\"items\":[]}\\n'\n"
+            "    fi\n"
+            "    ;;\n"
             "  *\"static-key issue\"*)\n"
-            "    printf 'issue:%s\\n' \"$generation\" >> \"$FAKE_NEBIUS_LOG\"\n"
-            "    printf '{\"token\":\"fixture-observability-token-g%s\"}\\n' \"$generation\"\n"
+            "    issue_number=$(grep -c '^issue:' \"$FAKE_NEBIUS_LOG\" 2>/dev/null || true)\n"
+            "    issue_number=$((issue_number + 1))\n"
+            "    printf 'issue:%s:%s\\n' \"$issue_number\" \"$name\" >> \"$FAKE_NEBIUS_LOG\"\n"
+            "    printf '{\"token\":\"fixture-observability-token-%s\"}\\n' \"$issue_number\"\n"
             "    ;;\n"
             "  *\"static-key get-by-name\"*)\n"
-            "    printf '{\"metadata\":{\"id\":\"static-key-g%s\"}}\\n' \"$generation\"\n"
+            "    issue_number=$(awk -F: -v key_name=\"$name\" '$1 == \"issue\" && $3 == key_name {print $2}' \"$FAKE_NEBIUS_LOG\" | tail -1)\n"
+            "    test -n \"$issue_number\"\n"
+            "    printf '{\"metadata\":{\"id\":\"static-key-%s\"}}\\n' \"$issue_number\"\n"
             "    ;;\n"
             "  *\"static-key delete\"*)\n"
             "    if [ -n \"$FAKE_DELETE_FAIL_ONCE_ID\" ] && "
@@ -244,6 +246,7 @@ def main():
         environment["FAKE_DELETE_FAIL_ONCE_ID"] = ""
         environment["FAKE_DELETE_FAIL_MARKER"] = str(fixture / "unused-marker")
         environment["FAKE_DELETED_IDS_ARE_NOT_FOUND"] = "false"
+        environment["FAKE_ACTIVE_KEY_SERVICE_ACCOUNT_ID"] = ""
 
         subprocess.run(
             [terraform, "init", "-backend=false", "-input=false", "-no-color"],
@@ -266,14 +269,15 @@ def main():
 
         calls = nebius_log.read_text().splitlines()
         issue_calls = [call for call in calls if call.startswith("issue:")]
-        if issue_calls != ["issue:1", "issue:2"]:
+        issue_numbers = [call.split(":", 2)[1] for call in issue_calls]
+        if issue_numbers != ["1", "2"]:
             raise RuntimeError(
                 "Expected one initial issuance and one requested rotation; "
                 f"got {issue_calls}"
             )
 
         delete_calls = [call for call in calls if call.startswith("delete:")]
-        if delete_calls != ["delete:static-key-g2", "delete:static-key-g1"]:
+        if delete_calls != ["delete:static-key-2", "delete:static-key-1"]:
             raise RuntimeError(
                 "Expected destroy to delete the current and previous keys; "
                 f"got {delete_calls}"
@@ -281,8 +285,8 @@ def main():
 
         helper = fixture / "scripts/grafana-observability-key.sh"
 
-        # A requested rotation on a fresh runner must fail before issuing a key;
-        # otherwise the active remote key would be left untracked.
+        # A replacement on a fresh runner must fail before issuing a key when an
+        # active remote key already exists; otherwise that key would be orphaned.
         missing_current = fixture / "missing-current"
         missing_current.mkdir()
         missing_log = missing_current / "nebius-calls.log"
@@ -299,10 +303,10 @@ def main():
                 "PREVIOUS_METADATA_FILE": str(
                     missing_current / "grafana_access_token.previous.metadata.json"
                 ),
-                "GENERATION": "2",
                 "PARENT_ID": "project-test",
                 "SERVICE_ACCOUNT_ID": "service-account-test",
                 "FAKE_NEBIUS_LOG": str(missing_log),
+                "FAKE_ACTIVE_KEY_SERVICE_ACCOUNT_ID": "service-account-test",
             }
         )
         missing_result = subprocess.run(
@@ -327,10 +331,10 @@ def main():
         previous_metadata = (
             cleanup_retry / "grafana_access_token.previous.metadata.json"
         )
-        current_token.write_text("fixture-observability-token-g2\n")
-        current_metadata.write_text('{"id":"static-key-g2"}\n')
-        previous_token.write_text("fixture-observability-token-g1\n")
-        previous_metadata.write_text('{"id":"static-key-g1"}\n')
+        current_token.write_text("fixture-observability-token-2\n")
+        current_metadata.write_text('{"id":"static-key-2"}\n')
+        previous_token.write_text("fixture-observability-token-1\n")
+        previous_metadata.write_text('{"id":"static-key-1"}\n')
         for credential_file in (
             current_token,
             current_metadata,
@@ -349,7 +353,7 @@ def main():
                 "PREVIOUS_TOKEN_FILE": str(previous_token),
                 "PREVIOUS_METADATA_FILE": str(previous_metadata),
                 "FAKE_NEBIUS_LOG": str(retry_log),
-                "FAKE_DELETE_FAIL_ONCE_ID": "static-key-g1",
+                "FAKE_DELETE_FAIL_ONCE_ID": "static-key-1",
                 "FAKE_DELETE_FAIL_MARKER": str(retry_marker),
                 "FAKE_DELETED_IDS_ARE_NOT_FOUND": "true",
             }

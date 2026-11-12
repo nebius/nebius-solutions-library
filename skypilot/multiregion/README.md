@@ -46,7 +46,17 @@ Review deployment settings:
 Important flags:
 - `enable_secondary_region = false` (primary-only) or `true` (two regions)
 - `gpu_nodes_*` and `cpu_nodes_*` sizing
-- `grafana_observability_key_generation = 1` during normal applies; increment it by one only to request an intentional Grafana Observability key rotation
+
+Normal applies do not rotate the Grafana Observability key. For an intentional
+rotation, use Terraform's one-shot replacement workflow:
+
+```bash
+terraform plan \
+  -replace='module.o11y.terraform_data.grafana_access_token[0]' \
+  -out=grafana-rotation.tfplan
+terraform show grafana-rotation.tfplan
+terraform apply grafana-rotation.tfplan
+```
 
 Compatibility note: the sensitive `grafana_service_account` output no longer
 contains `access_token`. The token is delivered ephemerally to Grafana and is

@@ -44,10 +44,8 @@ module "o11y" {
   cluster_id = nebius_mk8s_v1_cluster.k8s-cluster[local.primary-cluster-key].id
   #cpu_nodes_count           = var.cpu_nodes_count
   #gpu_nodes_count           = var.gpu_nodes_count_per_group * var.gpu_node_groups
-  k8s_node_group_sa_id                 = var.enable_k8s_node_group_sa ? nebius_iam_v1_service_account.k8s_node_group_sa[local.primary-cluster-key].id : null
-  k8s_node_group_sa_enabled            = var.enable_k8s_node_group_sa
-  grafana_observability_key_generation = var.grafana_observability_key_generation
-
+  k8s_node_group_sa_id      = var.enable_k8s_node_group_sa ? nebius_iam_v1_service_account.k8s_node_group_sa[local.primary-cluster-key].id : null
+  k8s_node_group_sa_enabled = var.enable_k8s_node_group_sa
   o11y = {
     nebius_o11y_agent = {
       enabled                  = var.enable_nebius_o11y_agent

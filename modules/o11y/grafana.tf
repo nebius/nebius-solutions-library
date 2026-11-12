@@ -40,18 +40,14 @@ resource "terraform_data" "grafana_access_token" {
     metadata_path          = local.grafana_access_token_metadata_path
     previous_token_path    = local.grafana_previous_access_token_path
     previous_metadata_path = local.grafana_previous_access_token_metadata_path
-    generation             = var.grafana_observability_key_generation
   }
 
-  # Generation 1 deliberately preserves the historical trigger map so adding
-  # rotation support does not replace keys on upgrade. Incrementing to 2 or
-  # higher explicitly requests replacement; subsequent increments rotate again.
-  triggers_replace = merge({
+  # Intentional rotation uses Terraform's one-shot -replace option. Keeping the
+  # stable dependency map here prevents normal applies from rotating the key.
+  triggers_replace = {
     access_key_id      = nebius_iam_v2_access_key.grafana_key[0].id
     service_account_id = var.k8s_node_group_sa_id
-    }, var.grafana_observability_key_generation > 1 ? {
-    rotation_generation = var.grafana_observability_key_generation
-  } : {})
+  }
 
   lifecycle {
     create_before_destroy = true
@@ -66,7 +62,6 @@ resource "terraform_data" "grafana_access_token" {
       CURRENT_METADATA_FILE  = self.input.metadata_path
       PREVIOUS_TOKEN_FILE    = self.input.previous_token_path
       PREVIOUS_METADATA_FILE = self.input.previous_metadata_path
-      GENERATION             = tostring(self.input.generation)
       PARENT_ID              = var.parent_id
       SCRIPT_PATH            = "${path.module}/scripts/grafana-observability-key.sh"
       SERVICE_ACCOUNT_ID     = self.triggers_replace.service_account_id

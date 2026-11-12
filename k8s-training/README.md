@@ -358,7 +358,6 @@ See [NVIDIA documentation for different MIG strategies](https://docs.nvidia.com/
 # Observability
 enable_nebius_o11y_agent = true  # Enable or disable Nebius Observability Agent deployment for metrics and logs from user workloads.
 enable_grafana           = true  # Enable or disable Grafana® solution by Nebius used together with Nebius Observability Agent
-grafana_observability_key_generation = 1 # Increment only to request an intentional Grafana Observability key rotation.
 enable_prometheus        = false # Enable or disable Prometheus and Grafana deployment for local metric storage (not using Nebius observability stack)
 enable_loki              = false # Enable or disable Loki deployment for local logs storage (not using Nebius observability stack)
 
@@ -540,21 +539,25 @@ state. Existing consumers that reference
 
 ### Rotating the Grafana Observability key
 
-`grafana_observability_key_generation` is a non-secret, monotonically
-increasing rotation marker. Leave it at `1` during normal applies. To request an
-intentional rotation, increment the value by one in `terraform.tfvars`, then use
-the normal reviewed workflow:
+Normal Terraform plans do not rotate the key. To request one intentional
+rotation, create and review a saved plan that explicitly replaces only the
+Grafana token generator:
 
 ```bash
-terraform plan
-terraform apply
+terraform plan \
+  -replace='module.o11y.terraform_data.grafana_access_token[0]' \
+  -out=grafana-rotation.tfplan
+
+terraform show grafana-rotation.tfplan
+terraform apply grafana-rotation.tfplan
 ```
 
 The plan must show replacement of only the Grafana token-generation
-`terraform_data` resource and an update of the Grafana application. The
-rotation creates the replacement before retiring the old Terraform instance,
-preserves the previous credential locally and restarts Grafana with the new
-token. Reapplying with an unchanged generation does not issue another key.
+`terraform_data` resource and an update of the Grafana application; it must not
+replace the cluster or node groups. The rotation creates the replacement before
+retiring the old Terraform instance, preserves the previous credential locally
+and restarts Grafana with the new token. A subsequent normal plan does not issue
+another key.
 
 The following Git-ignored files are created with owner-only permissions:
 
@@ -569,9 +572,14 @@ After apply, validate all four provisioned datasources in Grafana: **Nebius
 Services**, **Nebius Monitoring**, **Nebius Logging** and **Nebius Tracing**.
 Do not rotate again while the `previous` files exist. If validation fails,
 stop and retain both credentials for diagnosis; do not revoke either key or
-change the generation again. This workflow does not automatically roll Grafana
+request another replacement. This workflow does not automatically roll Grafana
 back to the previous credential. Resolve the failed datasource update through
 an explicit, reviewed recovery before retrying or finalizing the rotation.
+
+Rotation must run from the machine or persistent runner that holds the current
+local credential files. Before issuing a key, the helper checks for an active
+Observability key for the Grafana service account and refuses to continue if
+that remote key exists while the local credential files are missing.
 
 After validation succeeds, invalidate the previous key and remove its local
 backup:

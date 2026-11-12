@@ -43,16 +43,13 @@ run "clean_first_apply_reads_generated_token" {
   }
 
   assert {
-    condition     = trimspace(file(terraform_data.grafana_access_token[0].output.token_path)) == "fixture-observability-token-g1"
+    condition     = trimspace(file(terraform_data.grafana_access_token[0].output.token_path)) == "fixture-observability-token-1"
     error_message = "The first apply must generate the token before the ephemeral reader runs."
   }
 
   assert {
-    condition = (
-      jsondecode(file(terraform_data.grafana_access_token[0].output.metadata_path)).id == "static-key-g1" &&
-      jsondecode(file(terraform_data.grafana_access_token[0].output.metadata_path)).generation == 1
-    )
-    error_message = "The initial credential metadata must retain its key ID and generation."
+    condition     = jsondecode(file(terraform_data.grafana_access_token[0].output.metadata_path)).id == "static-key-1"
+    error_message = "The initial credential metadata must retain its key ID."
   }
 
   assert {
@@ -83,36 +80,32 @@ run "clean_first_apply_reads_generated_token" {
   }
 }
 
-run "generation_increment_rotates_and_preserves_previous" {
+run "forced_replace_rotates_and_preserves_previous" {
   command = apply
 
-  variables {
-    grafana_observability_key_generation = 2
+  plan_options {
+    replace = [
+      terraform_data.grafana_access_token[0],
+    ]
   }
 
   assert {
-    condition     = trimspace(file(terraform_data.grafana_access_token[0].output.token_path)) == "fixture-observability-token-g2"
-    error_message = "Incrementing the generation must install the replacement token."
+    condition     = trimspace(file(terraform_data.grafana_access_token[0].output.token_path)) == "fixture-observability-token-2"
+    error_message = "A forced replacement must install the replacement token."
   }
 
   assert {
-    condition     = trimspace(file(terraform_data.grafana_access_token[0].output.previous_token_path)) == "fixture-observability-token-g1"
+    condition     = trimspace(file(terraform_data.grafana_access_token[0].output.previous_token_path)) == "fixture-observability-token-1"
     error_message = "Rotation must preserve the previous token until validation succeeds."
   }
 
   assert {
-    condition = (
-      jsondecode(file(terraform_data.grafana_access_token[0].output.metadata_path)).id == "static-key-g2" &&
-      jsondecode(file(terraform_data.grafana_access_token[0].output.metadata_path)).generation == 2
-    )
-    error_message = "The replacement metadata must contain the new key ID and generation."
+    condition     = jsondecode(file(terraform_data.grafana_access_token[0].output.metadata_path)).id == "static-key-2"
+    error_message = "The replacement metadata must contain the new key ID."
   }
 
   assert {
-    condition = (
-      jsondecode(file(terraform_data.grafana_access_token[0].output.previous_metadata_path)).id == "static-key-g1" &&
-      jsondecode(file(terraform_data.grafana_access_token[0].output.previous_metadata_path)).generation == 1
-    )
+    condition     = jsondecode(file(terraform_data.grafana_access_token[0].output.previous_metadata_path)).id == "static-key-1"
     error_message = "Rotation must preserve the previous key metadata."
   }
 
@@ -122,20 +115,16 @@ run "generation_increment_rotates_and_preserves_previous" {
   }
 }
 
-run "unchanged_generation_is_idempotent" {
+run "normal_apply_after_rotation_is_idempotent" {
   command = apply
 
-  variables {
-    grafana_observability_key_generation = 2
+  assert {
+    condition     = trimspace(file(terraform_data.grafana_access_token[0].output.token_path)) == "fixture-observability-token-2"
+    error_message = "A normal apply after rotation must reuse the active token."
   }
 
   assert {
-    condition     = trimspace(file(terraform_data.grafana_access_token[0].output.token_path)) == "fixture-observability-token-g2"
-    error_message = "An unchanged generation must reuse the active token."
-  }
-
-  assert {
-    condition     = trimspace(file(terraform_data.grafana_access_token[0].output.previous_token_path)) == "fixture-observability-token-g1"
-    error_message = "An unchanged generation must retain the pending previous credential."
+    condition     = trimspace(file(terraform_data.grafana_access_token[0].output.previous_token_path)) == "fixture-observability-token-1"
+    error_message = "A normal apply must retain the pending previous credential."
   }
 }

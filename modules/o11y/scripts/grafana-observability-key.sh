@@ -74,13 +74,33 @@ case "${1:-}" in
       fi
     fi
 
-    # An intentional rotation must start from the machine that holds the active
-    # credential. Otherwise the old remote key cannot be preserved or identified
-    # for later revocation and would be left active but untracked.
-    if [ "$GENERATION" -gt 1 ] && [ ! -e "$CURRENT_TOKEN_FILE" ] && [ ! -e "$CURRENT_METADATA_FILE" ]; then
-      echo "Cannot rotate Grafana Observability key generation $GENERATION: the current local credential files are missing" >&2
-      echo "Run the rotation from the original machine/runner or recover the current credential files first" >&2
-      exit 1
+    # A clean first apply has neither local credentials nor an active
+    # Observability key for this service account. If an active remote key exists,
+    # missing local files mean this is another machine/runner and replacing the
+    # generator would orphan the credential that Grafana currently uses.
+    if [ ! -e "$CURRENT_TOKEN_FILE" ] && [ ! -e "$CURRENT_METADATA_FILE" ]; then
+      if ! EXISTING_KEYS_JSON=$(nebius iam static-key list \
+        --parent-id "$PARENT_ID" \
+        --all \
+        --format json); then
+        echo "Failed to check for an existing Grafana Observability key" >&2
+        exit 1
+      fi
+
+      EXISTING_KEY_ID=$(printf '%s' "$EXISTING_KEYS_JSON" | jq -r --arg SA "$SERVICE_ACCOUNT_ID" '
+        def items: if type == "array" then . else (.items // []) end;
+        [items[]
+          | select(.spec.service == "OBSERVABILITY")
+          | select(.spec.account.service_account.id == $SA)
+          | select(.status.active == true)]
+        | first
+        | .metadata.id // empty')
+
+      if [ -n "$EXISTING_KEY_ID" ]; then
+        echo "Cannot replace Grafana Observability key: active key $EXISTING_KEY_ID exists but the local credential files are missing" >&2
+        echo "Run the rotation from the original machine/runner or recover the current credential files first" >&2
+        exit 1
+      fi
     fi
 
     # Preserve the active credential before issuing its replacement. Deployments
@@ -101,7 +121,7 @@ case "${1:-}" in
         HAD_CURRENT_METADATA=true
         cp -- "$CURRENT_METADATA_FILE" "$PREVIOUS_METADATA_TMP"
       else
-        jq -n '{id: null, name: null, generation: null, legacy: true}' > "$PREVIOUS_METADATA_TMP"
+        jq -n '{id: null, name: null, legacy: true}' > "$PREVIOUS_METADATA_TMP"
       fi
 
       chmod 600 "$PREVIOUS_TOKEN_TMP" "$PREVIOUS_METADATA_TMP"
@@ -114,7 +134,7 @@ case "${1:-}" in
 
     # Generate access token using the static key
     echo "Generating Observability access token for service account: $SERVICE_ACCOUNT_ID"
-    KEY_NAME="grafana-token-g$GENERATION-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+    KEY_NAME="grafana-observability-$(date -u +%Y%m%dT%H%M%SZ)-$$"
     ISSUE_RESPONSE=$(nebius iam static-key issue \
       --parent-id "$PARENT_ID" \
       --account-service-account-id "$SERVICE_ACCOUNT_ID" \
@@ -151,9 +171,8 @@ case "${1:-}" in
     jq -n \
       --arg id "$NEW_KEY_ID" \
       --arg name "$KEY_NAME" \
-      --argjson generation "$GENERATION" \
       --arg issued_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-      '{id: $id, name: $name, generation: $generation, issued_at: $issued_at}' > "$METADATA_TMP"
+      '{id: $id, name: $name, issued_at: $issued_at}' > "$METADATA_TMP"
     chmod 600 "$TOKEN_TMP" "$METADATA_TMP"
     mv -f "$METADATA_TMP" "$CURRENT_METADATA_FILE"
     METADATA_TMP=""
@@ -163,7 +182,7 @@ case "${1:-}" in
     COMMITTED=true
     trap - EXIT
     echo "Access token generated successfully"
-    echo "Current key ID: $NEW_KEY_ID (generation $GENERATION)"
+    echo "Current key ID: $NEW_KEY_ID"
     if [ "$HAD_CURRENT" = true ]; then
       echo "After validating all Grafana datasources, delete the previous key and its local backup as documented"
     fi
