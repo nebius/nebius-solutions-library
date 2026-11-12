@@ -87,7 +87,7 @@ run "valid_two_rack_production_configuration" {
 
   assert {
     condition     = length(helm_release.nvidia_dra) == 0 && length(module.device-plugin) == 1
-    error_message = "DRA disabled must retain the device plugin and omit the NVIDIA DRA release."
+    error_message = "DRA disabled must retain the Device Plugin Marketplace application and omit the NVIDIA DRA release."
   }
 
   assert {
@@ -139,7 +139,7 @@ run "valid_one_rack_production_configuration" {
 
   assert {
     condition     = length(helm_release.nvidia_dra) == 0 && length(module.device-plugin) == 1
-    error_message = "DRA disabled must retain the device plugin and omit the NVIDIA DRA release."
+    error_message = "DRA disabled must retain the Device Plugin Marketplace application and omit the NVIDIA DRA release."
   }
 
   assert {
@@ -262,9 +262,9 @@ run "dra_scales_to_three_racks" {
       length(nebius_mk8s_v1_node_group.gb300) == 3 &&
       length(nebius_compute_v1_nvl_instance_group.gb300) == 3 &&
       contains(keys(nebius_mk8s_v1_node_group.gb300), "rack-003") &&
-      length(helm_release.nvidia_dra) == 1 && length(module.device-plugin) == 0
+      length(helm_release.nvidia_dra) == 1 && length(module.device-plugin) == 1
     )
-    error_message = "Multiple DRA racks must share one NVIDIA DRA release and omit the device plugin."
+    error_message = "Multiple DRA racks must share one NVIDIA DRA release and one Device Plugin Marketplace application."
   }
 
   assert {
@@ -310,12 +310,12 @@ run "dra_single_rack_without_fabric" {
 
   assert {
     condition = (
-      length(helm_release.nvidia_dra) == 1 && length(module.device-plugin) == 0 &&
+      length(helm_release.nvidia_dra) == 1 && length(module.device-plugin) == 1 &&
       length(nebius_mk8s_v1_node_group.gb300) == 1 &&
       nebius_mk8s_v1_node_group.gb300["rack-001"].template.gpu_settings.dra == true &&
       nebius_mk8s_v1_node_group.gb300["rack-001"].template.gpu_cluster == null
     )
-    error_message = "A fabricless single rack must support GPU DRA without requiring an InfiniBand GPU cluster."
+    error_message = "A fabricless single rack must retain the Device Plugin Marketplace application alongside GPU DRA without requiring an InfiniBand GPU cluster."
   }
 }
 
@@ -412,5 +412,25 @@ run "zero_racks_preserves_generic_gpu_path" {
       length(helm_release.nvidia_dra) == 0 && length(module.device-plugin) == 1
     )
     error_message = "The GB300 DRA option must not change the generic driverfull GPU allocation path."
+  }
+}
+
+run "driverless_omits_device_plugin_marketplace_application" {
+  command = plan
+
+  variables {
+    gpu_nodes_driverfull_image = false
+    gb300 = {
+      rack_count = 0
+    }
+  }
+
+  plan_options {
+    target = [module.device-plugin]
+  }
+
+  assert {
+    condition     = length(module.device-plugin) == 0
+    error_message = "Driverless nodes must use GPU Operator without installing the Device Plugin Marketplace application."
   }
 }
