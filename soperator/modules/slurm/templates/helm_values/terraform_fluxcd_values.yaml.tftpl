@@ -704,8 +704,8 @@ resources:
                   "nebius.com/load-balancer-type": "internal"
                   %{~ endif ~}
                 %{~ endif ~}
-                %{~ if length(slurm_cluster.nodes.login.root_public_keys) > 0 ~}
                 sshdConfigMapRefName: "${slurm_cluster.nodes.login.sshd_config_map_ref_name}"
+                %{~ if length(slurm_cluster.nodes.login.root_public_keys) > 0 ~}
                 sshRootPublicKeys:
                   %{~ for key in slurm_cluster.nodes.login.root_public_keys ~}
                   - ${key}
