@@ -147,7 +147,7 @@ locals {
   }
 
   # Slurm Extra attached to every worker node.
-  slurm_node_extra = "{ \"ib_pod\": \"$TOPO_SWITCH_TIER2\", \"ib_su\": \"$TOPO_SWITCH_TIER1\" }"
+  slurm_node_extra = "\"{ \\\"ib_pod\\\": \\\"$TOPO_SWITCH_TIER2\\\", \\\"ib_su\\\": \\\"$TOPO_SWITCH_TIER1\\\" }\""
 
   worker_nodeset_range_by_first_name = {
     for nodeset_range in var.worker_nodeset_ranges :
