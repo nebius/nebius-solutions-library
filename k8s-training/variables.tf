@@ -433,6 +433,17 @@ variable "enable_grafana" {
   default     = true
 }
 
+variable "grafana_observability_key_generation" {
+  description = "Monotonically increasing generation used to request an intentional Grafana Observability key rotation."
+  type        = number
+  default     = 1
+
+  validation {
+    condition     = var.grafana_observability_key_generation >= 1 && floor(var.grafana_observability_key_generation) == var.grafana_observability_key_generation
+    error_message = "grafana_observability_key_generation must be a whole number greater than or equal to 1."
+  }
+}
+
 variable "loki" {
   type = object({
     enabled            = optional(bool, false)

@@ -46,9 +46,10 @@ mk8s_cluster_public_endpoint = true # Set it to FALSE only in case if you've dep
 # mig_parted_config =   # If set, value will be checked against allowed for the selected 'gpu_nodes_platform'
 
 # Observability by Nebius
-enable_nebius_o11y_agent = true # Enable or disable Nebius Observability Agent deployment with true or false
-enable_grafana           = true # Enable or disable Grafana® solution by Nebius with true or false
-enable_mlflow_cluster    = true # Enable or disable Managed Service for MLflow in primary region
+enable_nebius_o11y_agent             = true # Enable or disable Nebius Observability Agent deployment with true or false
+enable_grafana                       = true # Enable or disable Grafana® solution by Nebius with true or false
+grafana_observability_key_generation = 1    # Increment by one only when intentionally rotating the Grafana Observability key
+enable_mlflow_cluster                = true # Enable or disable Managed Service for MLflow in primary region
 
 # Local Observability installation
 enable_prometheus = false # Enable or disable Prometheus and Grafana deployment with true or false

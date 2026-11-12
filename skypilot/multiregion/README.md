@@ -46,6 +46,12 @@ Review deployment settings:
 Important flags:
 - `enable_secondary_region = false` (primary-only) or `true` (two regions)
 - `gpu_nodes_*` and `cpu_nodes_*` sizing
+- `grafana_observability_key_generation = 1` during normal applies; increment it by one only to request an intentional Grafana Observability key rotation
+
+Compatibility note: the sensitive `grafana_service_account` output no longer
+contains `access_token`. The token is delivered ephemerally to Grafana and is
+not stored in Terraform state. Consumers referencing that field must remove the
+reference; the other fields are unchanged.
 
 Deploy:
 
