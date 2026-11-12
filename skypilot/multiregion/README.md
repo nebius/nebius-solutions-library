@@ -48,7 +48,9 @@ Important flags:
 - `gpu_nodes_*` and `cpu_nodes_*` sizing
 
 Normal applies do not rotate the Grafana Observability key. For an intentional
-rotation, use Terraform's one-shot replacement workflow:
+rotation, run from the same machine or persistent runner that holds the current
+local Grafana credential files, then use Terraform's one-shot replacement
+workflow:
 
 ```bash
 terraform plan \
@@ -57,6 +59,18 @@ terraform plan \
 terraform show grafana-rotation.tfplan
 terraform apply grafana-rotation.tfplan
 ```
+
+Before applying, confirm that the plan replaces only
+`module.o11y.terraform_data.grafana_access_token[0]`, updates the existing
+Grafana application in place, and does not replace clusters or node groups.
+
+After apply, validate all four provisioned datasources: **Nebius Services**,
+**Nebius Monitoring**, **Nebius Logging** and **Nebius Tracing**. If validation
+fails, retain both the current and previous credential files; do not revoke a
+key or request another rotation. After validation succeeds, follow the
+[canonical finalization steps](../../k8s-training/README.md#rotating-the-grafana-observability-key)
+to invalidate the previous key and remove its local backup. A subsequent normal
+`terraform plan` must report no changes.
 
 Compatibility note: the sensitive `grafana_service_account` output no longer
 contains `access_token`. The token is delivered ephemerally to Grafana and is
