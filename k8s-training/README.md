@@ -548,6 +548,87 @@ Nebius Web GUI > Main menu > Applications > grafana-solution-by-nebius > Endpoin
 ```
 Open browser to newly created URL with username “admin” and password from output of “terraform output grafana_password”
 
+### Output compatibility
+
+The sensitive `grafana_service_account` output no longer contains an
+`access_token` field. The Observability token is now read ephemerally and
+passed directly to the Grafana application without being stored in Terraform
+state. Existing consumers that reference
+`grafana_service_account.access_token` must remove that reference; the
+`id`, `access_key_id` and `secret_access_key` fields remain unchanged.
+
+### Rotating the Grafana Observability key
+
+Normal Terraform plans do not rotate the key. To request one intentional
+rotation, create and review a saved plan that explicitly replaces only the
+Grafana token generator:
+
+```bash
+terraform plan \
+  -replace='module.o11y.terraform_data.grafana_access_token[0]' \
+  -out=grafana-rotation.tfplan
+
+terraform show grafana-rotation.tfplan
+terraform apply grafana-rotation.tfplan
+```
+
+The plan must show replacement of only the Grafana token-generation
+`terraform_data` resource and an update of the Grafana application; it must not
+replace the cluster or node groups. The rotation creates the replacement before
+retiring the old Terraform instance, preserves the previous credential locally
+and restarts Grafana with the new token. A subsequent normal plan does not issue
+another key.
+
+The following Git-ignored files are created with owner-only permissions:
+
+```text
+grafana_access_token.txt
+grafana_access_token.metadata.json
+grafana_access_token.previous.txt
+grafana_access_token.previous.metadata.json
+```
+
+After apply, validate all four provisioned datasources in Grafana: **Nebius
+Services**, **Nebius Monitoring**, **Nebius Logging** and **Nebius Tracing**.
+Do not rotate again while the `previous` files exist. If validation fails,
+stop and retain both credentials for diagnosis; do not revoke either key or
+request another replacement. This workflow does not automatically roll Grafana
+back to the previous credential. Resolve the failed datasource update through
+an explicit, reviewed recovery before retrying or finalizing the rotation.
+
+Rotation must run from the machine or persistent runner that holds the current
+local credential files. Before issuing a key, the helper checks for an active
+Observability key for the Grafana service account and refuses to continue if
+that remote key exists while the local credential files are missing.
+
+After validation succeeds, invalidate the previous key and remove its local
+backup:
+
+```bash
+set -euo pipefail
+
+PREVIOUS_METADATA="grafana_access_token.previous.metadata.json"
+PREVIOUS_TOKEN="grafana_access_token.previous.txt"
+test -s "$PREVIOUS_METADATA"
+PREVIOUS_KEY_ID="$(jq -r '.id // empty' "$PREVIOUS_METADATA")"
+
+if [[ -n "$PREVIOUS_KEY_ID" ]]; then
+  nebius iam static-key delete --id "$PREVIOUS_KEY_ID"
+else
+  # Compatibility path for credentials created before key metadata was recorded.
+  test -s "$PREVIOUS_TOKEN"
+  nebius iam static-key revoke --token "$(cat "$PREVIOUS_TOKEN")"
+fi
+
+# This line is reached only after the remote delete or revoke succeeds.
+rm -f -- "$PREVIOUS_TOKEN" "$PREVIOUS_METADATA"
+```
+
+`terraform destroy` invalidates any current or pending previous Grafana
+Observability keys before removing their local credential files. It stops with
+an error rather than silently orphaning a key if neither the current metadata
+nor token file is available on the machine running the destroy.
+
 ## Accessing storage
 
 ### Using mounted StorageClass
