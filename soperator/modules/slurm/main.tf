@@ -78,16 +78,10 @@ resource "helm_release" "soperator_fluxcd_cm" {
 
     dcgm_exporter_enabled          = var.dcgm_exporter_enabled
     enroot_direct_squashfs_enabled = var.enroot_direct_squashfs_enabled
-    # Cluster-wide toggle for the [program:dockerd] block in the shared jail
-    # supervisord config (customConfigmaps), which is one configmap for the whole
-    # cluster and cannot be made per-nodeset. It is NOT the per-nodeset Docker
-    # switch: each nodeset's Docker is gated separately by its own
-    # node_local_image_storage.enabled in the nodesets values (docker-proxy sidecar
-    # + masking docker/dockerd binaries in the jail). Here we only decide whether to
-    # keep dockerd in the shared supervisord at all: keep it if any nodeset has
-    # image-storage disks (Docker requires them for OCI data), drop it entirely only
-    # when no nodeset does, so disk-less clusters don't restart-loop a stub dockerd.
-    docker_enabled = anytrue([for nodeset in var.worker_nodesets : nodeset.node_local_image_storage.enabled])
+    # The shared jail must retain dockerd when either login or workers use Docker.
+    docker_enabled       = var.login_docker_enabled || anytrue([for nodeset in var.worker_nodesets : nodeset.node_local_image_storage.enabled])
+    login_docker_enabled = var.login_docker_enabled
+    pam_slurm_adopt      = var.pam_slurm_adopt
 
     tailscale_enabled       = var.tailscale_enabled
     apparmor_profile        = local.apparmor_profile

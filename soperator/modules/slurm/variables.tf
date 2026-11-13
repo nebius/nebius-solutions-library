@@ -37,6 +37,23 @@ variable "k8s_cluster_id" {
 
 # region Configuration
 
+variable "login_docker_enabled" {
+  description = "Enable Docker for login SSH sessions with pod-local image storage."
+  type        = bool
+  default     = false
+}
+
+variable "pam_slurm_adopt" {
+  description = "Require worker SSH sessions to join a running Slurm job, except for exempt users and groups."
+  type = object({
+    enabled       = optional(bool, false)
+    exempt_users  = optional(list(string), [])
+    exempt_groups = optional(list(string), [])
+  })
+  default  = {}
+  nullable = false
+}
+
 variable "slurm_custom_config_override" {
   description = "Custom Slurm settings to append or override the auto-generated ones. One setting per element."
   type        = list(string)
