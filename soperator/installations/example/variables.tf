@@ -104,6 +104,23 @@ variable "slurm_login_public_ip" {
   default     = true
 }
 
+variable "slurm_login_docker_enabled" {
+  description = "Enable Docker for login SSH sessions with pod-local image storage."
+  type        = bool
+  default     = false
+}
+
+variable "pam_slurm_adopt" {
+  description = "Require worker SSH sessions to join a running Slurm job, except for exempt users and groups."
+  type = object({
+    enabled       = optional(bool, false)
+    exempt_users  = optional(list(string), [])
+    exempt_groups = optional(list(string), [])
+  })
+  default  = {}
+  nullable = false
+}
+
 variable "tailscale_enabled" {
   description = "Whether to enable tailscale init container on login pod"
   type        = bool

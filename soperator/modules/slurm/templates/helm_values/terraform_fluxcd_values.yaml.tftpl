@@ -328,6 +328,12 @@ resources:
             podNamePrefix: disabled
             cudaVersion: ${slurm_cluster.cuda_version}
             maintenance: ${slurm_cluster.maintenance}
+            %{~ if pam_slurm_adopt.enabled ~}
+            pamSlurmAdopt:
+              enabled: true
+              exemptUsers: ${jsonencode(pam_slurm_adopt.exempt_users)}
+              exemptGroups: ${jsonencode(pam_slurm_adopt.exempt_groups)}
+            %{~ endif ~}
             %{~ if length(slurm_cluster.custom_slurm_config) > 0 ~}
             customSlurmConfig: |
               %{~ for line in slurm_cluster.custom_slurm_config ~}
@@ -518,6 +524,12 @@ resources:
                 emptyDir:
                   sizeLimit: ${slurm_cluster.nodes.worker.resources.ephemeral_storage}Gi
 
+              %{~ if login_docker_enabled ~}
+              - name: login-image-storage
+                emptyDir:
+                  sizeLimit: 20Gi
+              %{~ endif ~}
+
               %{~ if slurm_cluster.nfs.enabled ~}
               - name: nfs
                 nfs:
@@ -688,6 +700,12 @@ resources:
                     %{~ endif ~}
               login:
                 size: ${slurm_cluster.nodes.login.size}
+                %{~ if login_docker_enabled ~}
+                docker:
+                  enabled: true
+                userIsolation:
+                  enabled: true
+                %{~ endif ~}
                 %{~ if slurm_cluster.nodes.login.autoscaling != null ~}
                 autoscaling:
                   enabled: ${slurm_cluster.nodes.login.autoscaling.enabled}
@@ -768,6 +786,11 @@ resources:
                   %{~ endfor ~}
                 volumes:
                   jailSubMounts:
+                    %{~ if login_docker_enabled ~}
+                    - name: login-image-storage
+                      mountPath: /mnt/image-storage
+                      volumeSourceName: login-image-storage
+                    %{~ endif ~}
                     %{~ if slurm_cluster.nfs.enabled ~}
                     - mountPath: ${slurm_cluster.nfs.mount_path}
                       name: nfs

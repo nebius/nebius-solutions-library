@@ -608,6 +608,9 @@ module "slurm" {
   }
   login_autoscaling = var.slurm_nodeset_login.autoscaling
 
+  login_docker_enabled = var.slurm_login_docker_enabled
+  pam_slurm_adopt      = var.pam_slurm_adopt
+
   # Resolved tier (auto-derived from the worker count unless var.sizing_tier_override forces it).
   sizing_tier_override = module.sizing.sizing_tier
   # Per-component overrides on top of the tier (merged inside the module's size dispatch).
