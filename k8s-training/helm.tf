@@ -7,6 +7,7 @@ module "network-operator" {
   source     = "../modules/network-operator"
   parent_id  = var.parent_id
   cluster_id = nebius_mk8s_v1_cluster.k8s-cluster.id
+  values     = var.network_operator_values
 }
 
 module "gpu-operator" {
@@ -15,11 +16,13 @@ module "gpu-operator" {
   depends_on = [
     module.network-operator
   ]
-  source       = "../modules/gpu-operator"
-  parent_id    = var.parent_id
-  cluster_id   = nebius_mk8s_v1_cluster.k8s-cluster.id
-  mig_strategy = var.mig_strategy
-  cdi_enabled  = local.gpu_operator_cdi_enabled
+  source               = "../modules/gpu-operator"
+  parent_id            = var.parent_id
+  cluster_id           = nebius_mk8s_v1_cluster.k8s-cluster.id
+  values               = var.gpu_operator_values
+  mig_strategy         = var.mig_strategy
+  cdi_enabled          = local.gpu_operator_cdi_enabled
+  enable_dcgm_exporter = local.runai_worker && !local.use_driverfull_gpu
 }
 
 module "gpu-operator-custom" {
@@ -80,4 +83,112 @@ module "nccl-test" {
   source          = "../modules/nccl-test"
   number_of_hosts = nebius_mk8s_v1_node_group.gpu[0].fixed_node_count
   image           = var.nccl_test_image
+}
+
+# Optional upstream controllers. Application workloads and APIs are separate.
+locals {
+  runai_worker     = var.enable_runai && try(var.runai.role, "worker") == "worker"
+  runai_control    = var.enable_runai && !local.runai_worker
+  runai_registered = local.runai_worker && try(trimspace(var.runai.cluster_uid) != "", false)
+  runai_tunnel     = var.enable_runai && coalesce(try(var.runai.public_endpoint, null), local.runai_control)
+}
+
+data "nebius_vpc_v1_subnet" "runai" {
+  count = local.runai_control ? 1 : 0
+  id    = var.subnet_id
+}
+
+module "runai" {
+  count                  = var.enable_runai ? 1 : 0
+  source                 = "../modules/runai"
+  parent_id              = var.parent_id
+  cluster_id             = nebius_mk8s_v1_cluster.k8s-cluster.id
+  region                 = var.region
+  network_id             = local.runai_control ? data.nebius_vpc_v1_subnet.runai[0].network_id : null
+  config                 = var.runai
+  bootstrap_token        = local.runai_registered ? sensitive(file(var.runai.bootstrap_token_file)) : null
+  admin_password         = local.runai_control ? sensitive(file(var.runai.admin_password_file)) : null
+  database_password      = local.runai_control ? sensitive(file(var.runai.database_password_file)) : null
+  tunnel_private_key_pem = local.runai_tunnel ? sensitive(file(var.runai.tunnel_private_key_file)) : null
+  depends_on             = [module.network-operator, module.gpu-operator, module.gpu-operator-custom, kubernetes_namespace_v1.platform, kubernetes_secret_v1.platform]
+}
+
+module "dynamo" {
+  count      = var.enable_dynamo ? 1 : 0
+  source     = "../modules/dynamo"
+  parent_id  = var.parent_id
+  cluster_id = nebius_mk8s_v1_cluster.k8s-cluster.id
+  config = merge(var.dynamo, {
+    scheduler_mode = local.runai_worker ? "runai" : try(var.dynamo.scheduler_mode, "standalone")
+  })
+  depends_on = [module.runai, module.gpu-operator, module.gpu-operator-custom]
+}
+
+module "mpi_operator" {
+  count  = var.enable_mpi_operator ? 1 : 0
+  source = "../modules/mpi-operator"
+  config = var.mpi_operator
+}
+
+module "opencost" {
+  count          = var.enable_opencost ? 1 : 0
+  source         = "../modules/opencost"
+  prometheus_url = var.opencost.prometheus_url
+  namespace      = var.opencost.namespace
+  chart_version  = var.opencost.chart_version
+  chart_path     = var.opencost.chart_path
+  values         = [for filename in var.opencost.values_files : file(filename)]
+  depends_on     = [module.o11y, module.runai]
+}
+
+module "nim_operator" {
+  count      = var.enable_nim_operator ? 1 : 0
+  source     = "../modules/nim-operator"
+  config     = var.nim_operator
+  depends_on = [module.runai, module.gpu-operator, module.gpu-operator-custom]
+}
+
+# Platform prerequisites; Run:ai owns workload project namespaces.
+resource "kubernetes_namespace_v1" "platform" {
+  for_each = setunion(
+    var.platform_namespaces,
+    local.runai_control ? toset(["runai-backend"]) : toset([]),
+    local.runai_worker ? toset(["runai"]) : toset([]),
+    local.runai_worker && try(var.runai.serving, null) != null ? toset(["knative-serving"]) : toset([])
+  )
+  metadata { name = each.value }
+  lifecycle {
+    # Native operators own namespace metadata; this resource owns its existence.
+    ignore_changes = [metadata[0].labels, metadata[0].annotations]
+  }
+  depends_on = [nebius_mk8s_v1_node_group.cpu-only]
+}
+
+resource "kubernetes_secret_v1" "platform" {
+  for_each = var.platform_secrets
+  metadata {
+    name      = each.value.name
+    namespace = each.value.namespace
+    labels    = each.value.labels
+  }
+  type             = each.value.type
+  data_wo          = { for key, filename in each.value.data_files : key => file(filename) }
+  data_wo_revision = each.value.revision
+  depends_on       = [kubernetes_namespace_v1.platform]
+}
+
+# Optional shared infrastructure charts; model releases belong to the external application.
+resource "helm_release" "platform" {
+  for_each         = var.platform_releases
+  name             = each.key
+  namespace        = each.value.namespace
+  repository       = each.value.repository
+  chart            = each.value.chart
+  version          = each.value.version
+  create_namespace = false
+  values           = [for filename in each.value.values_files : file(filename)]
+  atomic           = true
+  wait_for_jobs    = true
+  timeout          = each.value.timeout
+  depends_on       = [module.runai, module.dynamo, module.nim_operator, kubernetes_secret_v1.platform]
 }
