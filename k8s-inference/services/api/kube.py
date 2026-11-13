@@ -1,7 +1,9 @@
 """Kubernetes clients per region (in-cluster for this region, rotated kubeconfigs for the others)
 and the KServe read helpers the catalog uses."""
 
+import logging
 import os
+import re
 import time
 
 from fastapi import HTTPException
@@ -10,7 +12,9 @@ from kubernetes import config as kconfig
 from kubernetes.client.rest import ApiException
 
 from config import FLEET_CONFIGMAP, HUB_REGION, KUEUE_JOB_UID_LABEL, KUEUE_NAMESPACE, LABEL, REGION, REGION_KUBECONFIGS
-from resilience import retry
+from resilience import cached, retry
+
+log = logging.getLogger("api.kube")
 
 _clients: dict[str, client.ApiClient] = {}
 _kubeconfig_mtime: dict[str, float] = {}  # region -> mtime of the kubeconfig the client was built from
@@ -61,26 +65,159 @@ def batch(region: str = REGION) -> client.BatchV1Api:
     return client.BatchV1Api(_client(region))
 
 
-_fleet_cache: dict = {"until": 0.0, "pools": {}, "clusters": {}}
+# the fleet document's files (charts/fleet): pools, tenants, clusters, restricted assets (docs/JOBS.md), per-node fit
+# (docs/SCHEDULING.md), the GPU-free pools per cluster id and the fleet policy (docs/FLEET.md "Customer CPU pools")
+_FLEET_FILES = ("pools", "tenants", "clusters", "assets", "fit", "cpu_pools", "policy")
+_fleet: dict = {k: {} for k in _FLEET_FILES}
+_fleet_cache: dict = {}
 
 
 def fleet() -> dict:
     """The fleet's pools from the fleet-prices ConfigMap charts/fleet renders in kueue-system (every region on
     the control cluster, this region's on a worker): {"pools": {<name>: {region, pool, gpu_class, ...}}}.
-    Empty when unreadable (then no class affinity)."""
-    if _fleet_cache["until"] > time.time():
-        return _fleet_cache
-    try:
-        import yaml
+    Empty when unreadable (then no class affinity); read once a minute."""
 
-        data = retry(core().read_namespaced_config_map, FLEET_CONFIGMAP, KUEUE_NAMESPACE).data or {}
-        _fleet_cache["pools"] = yaml.safe_load(data.get("pools.yaml") or "") or {}
-        _fleet_cache["tenants"] = yaml.safe_load(data.get("tenants.yaml") or "") or {}
-        _fleet_cache["clusters"] = yaml.safe_load(data.get("clusters.yaml") or "") or {}
-    except Exception:  # noqa: BLE001 - unreadable fleet data is not fatal for a submission
-        pass
-    _fleet_cache["until"] = time.time() + 60
-    return _fleet_cache
+    def load() -> dict:
+        try:
+            import yaml
+
+            data = retry(core().read_namespaced_config_map, FLEET_CONFIGMAP, KUEUE_NAMESPACE).data or {}
+            _fleet.update({k: yaml.safe_load(data.get(f"{k}.yaml") or "") or {} for k in _FLEET_FILES})
+        except Exception:  # noqa: BLE001 - unreadable fleet data is not fatal for a submission
+            pass
+        return _fleet
+
+    return cached(_fleet_cache, "fleet", 60, load)
+
+
+def tenant_system_allowed() -> bool:
+    """Whether tenant work may take the `system` flavor (the region's platform CPU nodes). The fleet policy
+    `tenant_system_flavor` (charts/fleet policy.yaml, terraform.tfvars; default true); false = customer work never
+    lands on a system node: a GPU-free workload takes the region's customer CPU pool (docs/FLEET.md "Customer CPU
+    pools")."""
+    v = (fleet().get("policy") or {}).get("tenant_system_flavor", True)
+    return v not in (False, "false", "False", 0)
+
+
+def preset_vcpus(preset: str | None) -> int:
+    """The vCPU count of a `<n>vcpu-<n>gb` preset (0 when unparsable): the size GPU-free pools are ordered by."""
+    m = re.match(r"^(\d+)vcpu", str(preset or ""))
+    return int(m.group(1)) if m else 0
+
+
+def cpu_pool_order(pools: dict) -> list[str]:
+    """GPU-free pools smallest first (preset vCPUs), then the warm ones (min_nodes > 0) before the ones that boot from
+    zero, then by name: the order the chart lists the flavors in and the pool a GPU-free definition is pinned to. A
+    one-CPU caller must never wake a 32-vCPU batch node while an 8-vCPU pool is there."""
+    return sorted(
+        (n for n, p in (pools or {}).items() if (p or {}).get("kind") == "cpu"),
+        key=lambda n: (preset_vcpus(pools[n].get("preset")), -int(pools[n].get("min_nodes") or 0), n),
+    )
+
+
+def cpu_pool_of(cluster: str | None) -> str | None:
+    """The customer CPU pool of a cluster id (`regions.<r>.cpu_pools`, the first in cpu_pool_order; the fleet document's
+    cpu_pools.yaml), None when the cluster has none."""
+    names = cpu_pool_order((fleet().get("cpu_pools") or {}).get(cluster or "") or {})
+    return names[0] if names else None
+
+
+def tenant_pool(cluster: str | None, pool: str | None) -> str | None:
+    """The pool a tenant's GPU-free workload is pinned to: `system` becomes the cluster's customer CPU pool when the
+    policy keeps tenants off the system nodes (a cluster without a CPU pool keeps `system` and logs it: the policy is
+    the operator's, the fleet must give it a pool). Any other pool is returned as it is."""
+    if pool != "system" or tenant_system_allowed():
+        return pool
+    cpu = cpu_pool_of(cluster)
+    if not cpu:
+        log.warning("tenant_system_flavor is off but %s has no cpu_pools: keeping the system pool", cluster)
+        return pool
+    return cpu
+
+
+CPU_POOL_TOLERATION = {"key": f"{LABEL}/cpu-pool", "operator": "Exists", "effect": "NoSchedule"}
+
+
+def is_cpu_pool(cluster: str | None, pool: str | None) -> bool:
+    """A pool the cloud stage tainted `serverless2.nebius/cpu-pool` (a cpu_pools entry; never `system`)."""
+    entry = ((fleet().get("cpu_pools") or {}).get(cluster or "") or {}).get(pool or "") or {}
+    return entry.get("kind") == "cpu"
+
+
+_node_cache: dict = {}  # region -> (built_at, {node name: placement}): one node listing per region, not one read per node
+NODE_CACHE_S = 600
+NODE_MISS_REFRESH_S = (
+    60  # a node absent from an index older than this is looked up again once (a node that just joined)
+)
+
+
+def _placement_of(labels: dict) -> dict:
+    return {
+        "instance_type": labels.get("node.kubernetes.io/instance-type")
+        or labels.get("beta.kubernetes.io/instance-type"),
+        "preset": labels.get("nebius.com/resource-preset"),
+        "node_group": labels.get("nebius.com/node-group-id"),
+        "pool": labels.get(f"{LABEL}/pool"),
+    }
+
+
+def _node_index(region: str, max_age: float) -> dict | None:
+    hit = _node_cache.get(region)
+    if hit and hit[0] + max_age > time.time():
+        return hit[1]
+    try:
+        items = retry(core(region).list_node).items
+    except Exception:  # noqa: BLE001 - an unreadable region: the old index if any, else nothing
+        return hit[1] if hit else None
+    index = {n.metadata.name: _placement_of(n.metadata.labels or {}) for n in items}
+    _node_cache[region] = (time.time(), index)
+    return index
+
+
+def node_placement(region: str | None, node: str | None) -> dict | None:
+    """What the node's labels say about the instance: {instance_type, preset, node_group, pool} (Nebius labels
+    `node.kubernetes.io/instance-type`, `nebius.com/resource-preset`, `nebius.com/node-group-id`), None when the node
+    is gone (a reclaimed spot node) or the region unreadable. From one node listing per region cached ten minutes (a
+    page of 100 attempts used to be 19 node reads, api 0.11.124); a node missing from an index older than a minute
+    is looked for once more (it may have joined since)."""
+    if not region or not node:
+        return None
+    index = _node_index(region, NODE_CACHE_S)
+    if index is None:
+        return None
+    if node not in index:
+        index = _node_index(region, NODE_MISS_REFRESH_S) or index
+    return index.get(node)
+
+
+def pool_entry(cluster: str | None, pool: str | None) -> dict:
+    """The fleet document's record of a pool on a cluster: a GPU pool (pools.yaml: platform, preset, node_group_id,
+    project) or a GPU-free one (cpu_pools.yaml); {} when unknown."""
+    if not pool:
+        return {}
+    for p in (fleet().get("pools") or {}).values():
+        if p.get("pool") == pool and (p.get("region") == cluster or cluster is None):
+            return p
+    return ((fleet().get("cpu_pools") or {}).get(cluster or "") or {}).get(pool) or {}
+
+
+def cluster_entry(cluster: str | None) -> dict:
+    """clusters.yaml: {region, project, cluster_id?, control?} for a cluster id ({} when unknown)."""
+    return (fleet().get("clusters") or {}).get(cluster or "") or {}
+
+
+CONSOLE_URL = "https://console.nebius.com"
+
+
+def console_node_url(cluster: str | None, node_group: str | None, node: str | None) -> str | None:
+    """The Nebius console page of a node (project / mk8s cluster / node group / compute instance), None unless every
+    id is known. The node group alone (no node) links the node group's page."""
+    c = cluster_entry(cluster)
+    project, cid = c.get("project"), c.get("cluster_id")
+    if not (project and cid and node_group):
+        return None
+    url = f"{CONSOLE_URL}/{project}/mk8s/{cid}/node-groups/{node_group}"
+    return f"{url}/nodes/{node}" if node else url
 
 
 def class_pools(classes: list[str], gpus_per_node: int | None = None, interconnect: str | None = None) -> list[str]:
@@ -149,6 +286,76 @@ def cluster_id_or_none(region: str | None) -> str | None:
         return None
 
 
+def _workloads_of(ns: str, job_uid: str, region: str = REGION) -> list:
+    """The Kueue Workloads of a Job (label kueue.x-k8s.io/job-uid) in a namespace, on one cluster."""
+    return retry(
+        api(region).list_namespaced_custom_object,
+        "kueue.x-k8s.io",
+        "v1beta2",
+        ns,
+        "workloads",
+        label_selector=f"{KUEUE_JOB_UID_LABEL}={job_uid}",
+    ).get("items", [])
+
+
+def workload_admission(ns: str, job_uid: str, region: str = REGION) -> dict | None:
+    """The authoritative admission state of a Job's own Workload, for a proof that a run never ran: None unless
+    exactly one Workload carries the job-uid label AND an ownerReference with that UID (an absence, a stray or a
+    duplicate proves nothing); else {admitted, cluster, active, not_admitted_since}: admitted when Admitted or
+    QuotaReserved is True or an admission is recorded, cluster from status.clusterName or the admitted-cluster
+    annotation, not_admitted_since the lastTransitionTime of an explicit Admitted=False condition (None without
+    one). Read errors raise: an unreadable answer is never evidence (contrast workload_clusters, which answers
+    empty on failure)."""
+    items = _workloads_of(ns, job_uid, region)
+    owned = [
+        w
+        for w in items
+        if any(o.get("uid") == job_uid for o in ((w.get("metadata") or {}).get("ownerReferences") or []))
+    ]
+    if len(owned) != 1:
+        return None
+    w = owned[0]
+    st = w.get("status") or {}
+    conds = {c.get("type"): c for c in (st.get("conditions") or [])}
+    admitted = (
+        (conds.get("Admitted") or {}).get("status") == "True"
+        or (conds.get("QuotaReserved") or {}).get("status") == "True"
+        or bool(st.get("admission"))
+    )
+    cluster = st.get("clusterName") or ((w.get("metadata") or {}).get("annotations") or {}).get(
+        f"{LABEL}/admitted-cluster"
+    )
+    not_admitted = conds.get("Admitted") or {}
+    return {
+        "admitted": admitted,
+        "cluster": cluster,
+        "active": (w.get("spec") or {}).get("active"),
+        "not_admitted_since": not_admitted.get("lastTransitionTime") if not_admitted.get("status") == "False" else None,
+    }
+
+
+def workload_inactive(ns: str, job_uid: str, region: str = REGION) -> bool:
+    """Whether nothing of a run can run any more as far as Kueue is concerned: its Workload (label job-uid) is gone,
+    deactivated (`spec.active = false`, deactivate_workload) or finished (condition Finished=True). An unreadable
+    answer is not an absence (False)."""
+    try:
+        items = _workloads_of(ns, job_uid, region)
+    except ApiException:
+        return False
+    if not items:
+        return True
+    for w in items:
+        if (w.get("spec") or {}).get("active") is False:
+            continue
+        if any(
+            c.get("type") == "Finished" and c.get("status") == "True"
+            for c in ((w.get("status") or {}).get("conditions") or [])
+        ):
+            continue
+        return False
+    return True
+
+
 def deactivate_workload(ns: str, job_uid: str, region: str = REGION) -> int:
     """Kueue `spec.active = false` on the manager Workload of a run (label kueue.x-k8s.io/job-uid): Kueue evicts the
     run everywhere (the worker's copy goes, its pods with it) and never admits it again. A `suspend` patched onto
@@ -157,15 +364,18 @@ def deactivate_workload(ns: str, job_uid: str, region: str = REGION) -> int:
     `region` is the cluster that holds the Workload: the manager for a dispatched run, the worker for a run pinned
     to a region (its Kueue admits the JobSet directly and would undo a suspend the same way).
     Returns the number of Workloads patched (0: none found, the run never reached the queue)."""
+    return _set_workloads_active(ns, job_uid, region, False)
+
+
+def activate_workload(ns: str, job_uid: str, region: str = REGION) -> int:
+    """Undo deactivate_workload: Kueue `spec.active = true` on the run's manager Workload (a fallback whose successor could
+    not be created lets the original queue on). Returns the number of Workloads patched."""
+    return _set_workloads_active(ns, job_uid, region, True)
+
+
+def _set_workloads_active(ns: str, job_uid: str, region: str, active: bool) -> int:
     try:
-        items = retry(
-            api(region).list_namespaced_custom_object,
-            "kueue.x-k8s.io",
-            "v1beta2",
-            ns,
-            "workloads",
-            label_selector=f"{KUEUE_JOB_UID_LABEL}={job_uid}",
-        ).get("items", [])
+        items = _workloads_of(ns, job_uid, region)
     except ApiException:
         return 0
     for w in items:
@@ -176,18 +386,36 @@ def deactivate_workload(ns: str, job_uid: str, region: str = REGION) -> int:
             ns,
             "workloads",
             w["metadata"]["name"],
-            {"spec": {"active": False}},
+            {"spec": {"active": active}},
         )
     return len(items)
+
+
+# The Workloads of a tenant namespace, one list per WORKLOADS_CACHE_S (2 s). One owner read of a run with many members (a
+# graph with its stages, a run with finalizers; `jobs.list_ops`) asked for the same list once per manager Job (32 reads of
+# ~0.2 s on a 7-stage graph: 6.7 s of a 14 s read, api 0.11.110); a 2 s view is as fresh as the reads it serves, and
+# every consumer (the handle, the finalizer and retry counters, billing's and the reconciler's passes) re-reads on its next
+# pass anyway. 0 disables it (the tests).
+WORKLOADS_CACHE_S = float(os.environ.get("WORKLOADS_CACHE_S", "2"))
+_workloads_cache: dict[str, tuple[float, list]] = {}
+
+
+def _workloads(ns: str) -> list:
+    return cached(
+        _workloads_cache,
+        ns,
+        WORKLOADS_CACHE_S,
+        lambda: retry(api().list_namespaced_custom_object, "kueue.x-k8s.io", "v1beta2", ns, "workloads").get(
+            "items", []
+        ),
+    )
 
 
 def workload_reasons(ns: str) -> dict[str, str]:
     """Job uid -> why its Workload is not admitted (the condition messages Kueue writes): what a QUEUED operation
     reports as `reason`."""
     try:
-        items = retry(api().list_namespaced_custom_object, "kueue.x-k8s.io", "v1beta2", ns, "workloads").get(
-            "items", []
-        )
+        items = _workloads(ns)
     except ApiException:
         return {}
     out = {}
@@ -209,9 +437,7 @@ def workload_clusters(ns: str) -> dict[str, str]:
     status.clusterName while the worker's copy exists, afterwards the record the dispatcher wrote on the Workload
     (`serverless2.nebius/admitted-cluster`); absent while the run is only nominated (it may still move)."""
     try:
-        items = retry(api().list_namespaced_custom_object, "kueue.x-k8s.io", "v1beta2", ns, "workloads").get(
-            "items", []
-        )
+        items = _workloads(ns)
     except ApiException:
         return {}
     out = {}
@@ -229,15 +455,24 @@ def workload_clusters(ns: str) -> dict[str, str]:
 _isvc_cache: dict[str, tuple[float, dict]] = {}
 
 
-def isvc(name: str, ns: str, region: str = REGION) -> dict | None:
+def _isvc_get(region: str, ns: str, name: str) -> dict:
+    return retry(
+        api(region).get_namespaced_custom_object, "serving.kserve.io", "v1beta1", ns, "inferenceservices", name
+    )
+
+
+def _or_none(read, what: str) -> dict | None:
+    """`read()`; None when the object is absent (404), 502 naming `what` for any other API error."""
     try:
-        return retry(
-            api(region).get_namespaced_custom_object, "serving.kserve.io", "v1beta1", ns, "inferenceservices", name
-        )
+        return read()
     except ApiException as e:
         if e.status == 404:
             return None
-        raise HTTPException(502, f"kserve: {e.reason}")
+        raise HTTPException(502, f"{what}: {e.reason}")
+
+
+def isvc(name: str, ns: str, region: str = REGION) -> dict | None:
+    return _or_none(lambda: _isvc_get(region, ns, name), "kserve")
 
 
 LWS = ("leaderworkerset.x-k8s.io", "v1", "leaderworkersets")
@@ -251,12 +486,13 @@ def _lws_get(region: str, ns: str, name: str) -> dict:
 
 def lws(name: str, ns: str, region: str = REGION) -> dict | None:
     """The LeaderWorkerSet of a multi-node endpoint (services/api/models.py `nodes`), None when absent."""
-    try:
-        return _lws_get(region, ns, name)
-    except ApiException as e:
-        if e.status == 404:
-            return None
-        raise HTTPException(502, f"leaderworkerset: {e.reason}")
+    return _or_none(lambda: _lws_get(region, ns, name), "leaderworkerset")
+
+
+def _pod_ready(p) -> bool:
+    """A Running pod whose every container is ready."""
+    st = getattr(p, "status", None)
+    return bool(st) and st.phase == "Running" and all(c.ready for c in (st.container_statuses or []))
 
 
 def _startup(pods: list) -> dict:
@@ -274,54 +510,186 @@ def _startup(pods: list) -> dict:
     return out
 
 
+def _rollout(isvc: dict, pods: list, region: str = REGION, ns: str = "models", name: str | None = None) -> dict:
+    """The revision state of a KServe endpoint (docs/API.md "Execution identity and rollout state"). Knative routes
+    to the latest *ready* revision, so after a spec change the previous revision serves until the new one is ready.
+    `converged` holds only when every one of these is observed, never from revision names alone: the controller has
+    reconciled the current spec (`status.observedGeneration == metadata.generation`: the pre-reconcile window after a
+    catalog change still shows the old revisions as one); the created, ready and rolled-out revisions are one; the
+    latest ready Revision object's container image equals the InferenceService's desired image (stored template
+    evidence: valid for a scaled-to-zero immutable revision with no pod); and every ready pod runs that image (by
+    reference, or by the Revision's resolved digest). `serving_images`: what the ready pods run."""
+    md, st = isvc.get("metadata") or {}, isvc.get("status") or {}
+    pred = (st.get("components") or {}).get("predictor") or {}
+    created, ready_rev, rolled = (
+        pred.get("latestCreatedRevision"),
+        pred.get("latestReadyRevision"),
+        pred.get("latestRolledoutRevision"),
+    )
+    generation, observed = md.get("generation"), st.get("observedGeneration")
+    desired = _desired_image(isvc)
+    # KServe (0.20) writes the predictor Knative Service's observedGeneration onto the InferenceService status, so
+    # `status.observedGeneration == metadata.generation` is not the controller's witness for the ISVC spec (a never
+    # edited ISVC shows generation 1 / observed 2 for good once KServe mutated its own Service). The witness is the
+    # predictor Service itself: Knative reconciled its current spec (its generation == its observedGeneration) AND
+    # that spec carries the ISVC's desired image (KServe propagated the current ISVC spec into it). Without a
+    # predictor Service (RawDeployment) the ISVC's own generations decide, as before.
+    service_generation = service_observed = service_image = None
+    service_seen = False
+    mode = str(st.get("deploymentMode") or (md.get("annotations") or {}).get("serving.kserve.io/deploymentMode") or "")
+    raw_deployment = mode.lower() == "rawdeployment"  # proven: no Knative Service is expected for this endpoint
+    svc_name = f"{name or md.get('name') or ''}-predictor" if (name or md.get("name")) else None
+    service_error = None
+    if svc_name and not raw_deployment:
+        try:
+            ksvc = _knative(region, ns, "services", svc_name)
+            service_seen = True
+            service_generation = (ksvc.get("metadata") or {}).get("generation")
+            service_observed = (ksvc.get("status") or {}).get("observedGeneration")
+            tmpl = ((ksvc.get("spec") or {}).get("template") or {}).get("spec") or {}
+            service_image = ((tmpl.get("containers") or [{}])[0]).get("image")
+        except ApiException as e:
+            service_error = f"predictor Service {svc_name} not readable ({e.status})"
+    revision_image, revision_digest = None, None
+    if ready_rev:
+        try:
+            rev = _knative(region, ns, "revisions", ready_rev)
+            containers = (rev.get("spec") or {}).get("containers") or [{}]
+            revision_image = containers[0].get("image")
+            statuses = (rev.get("status") or {}).get("containerStatuses") or [{}]
+            revision_digest = statuses[0].get("imageDigest")
+        except ApiException:
+            pass
+    images: list[str] = []
+    for p in pods:
+        if not _pod_ready(p):
+            continue
+        pst = p.status
+        for c in pst.container_statuses or []:
+            if getattr(c, "name", None) in ("kserve-container", "main") or len(pst.container_statuses) == 1:
+                ref = getattr(c, "image_id", None) or getattr(c, "image", None)
+                if ref and ref not in images:
+                    images.append(ref)
+    # all three must be present and one: KServe omits latestRolledoutRevision until the first rollout completed, and
+    # "absent" is then "not converged", never "the other two agree"
+    revisions_one = bool(created) and bool(ready_rev) and bool(rolled) and created == ready_rev == rolled
+    if service_seen:
+        service_reconciled = service_generation is not None and service_observed == service_generation
+        propagated = bool(desired) and service_image == desired
+        reconciled = service_reconciled and propagated
+    elif raw_deployment or not svc_name:
+        # no Knative Service is expected (RawDeployment, proven by the ISVC's own mode): its generations decide
+        service_reconciled = propagated = True
+        reconciled = generation is not None and observed == generation
+    else:
+        # Knative mode and the predictor Service could not be read: no witness, never a guess
+        service_reconciled = propagated = False
+        reconciled = False
+    image_matches = bool(desired) and revision_image == desired
+    pods_match = all(_same_image(i, revision_image, revision_digest) for i in images)
+    reasons = []
+    if not reconciled:
+        if service_error:
+            reasons.append(service_error)
+        elif service_seen and not service_reconciled:
+            reasons.append(
+                f"predictor Service generation {service_generation} not reconciled (observed {service_observed})"
+            )
+        elif service_seen:
+            reasons.append(
+                f"predictor Service image {service_image} is not the desired {desired} (spec not propagated)"
+            )
+        else:
+            reasons.append(f"spec generation {generation} not reconciled (observed {observed})")
+    if not revisions_one:
+        reasons.append(f"revisions differ (created {created}, ready {ready_rev}, rolled out {rolled})")
+    if not image_matches:
+        reasons.append(f"ready revision image {revision_image} is not the desired {desired}")
+    if not pods_match:
+        reasons.append("a ready pod runs another image than the ready revision")
+    return {
+        "latest_created": created,
+        "latest_ready": ready_rev,
+        "latest_rolled_out": rolled,
+        "generation": generation,
+        "observed_generation": observed,
+        "service_generation": service_generation,
+        "service_observed_generation": service_observed,
+        "service_image": service_image,
+        "desired_image": desired,
+        "revision_image": revision_image,
+        "revision_image_digest": revision_digest,
+        "serving_images": images,
+        "converged": reconciled and revisions_one and image_matches and pods_match,
+        "reason": "; ".join(reasons) or None,
+    }
+
+
+def _knative(region: str, ns: str, plural: str, name: str) -> dict:
+    """One Knative Serving object (a predictor Service, a Revision) by name."""
+    return retry(api(region).get_namespaced_custom_object, "serving.knative.dev", "v1", ns, plural, name)
+
+
+def _desired_image(isvc: dict) -> str | None:
+    """The image the InferenceService's spec asks for: the predictor's first container (as the API renders it)."""
+    pred = (isvc.get("spec") or {}).get("predictor") or {}
+    containers = pred.get("containers") or []
+    if containers and containers[0].get("image"):
+        return containers[0]["image"]
+    model = pred.get("model") or {}
+    return model.get("image") or None
+
+
+def _same_image(ref: str, image: str | None, digest: str | None) -> bool:
+    """A ready pod's image reference (`image_id` with the registry's digest, or the tag reference) against the
+    Revision's image and resolved digest: equal by digest when either side carries one, else by reference."""
+    if not ref or not (image or digest):
+        return False
+    tails = {x.split("@", 1)[1] for x in (ref, image or "", digest or "") if "@" in x}
+    if "@" in ref and (
+        digest and digest.split("@", 1)[-1] in ref or (image and "@" in image and tails and len(tails) == 1)
+    ):
+        return True
+    if digest and ref.endswith(digest.split("@", 1)[-1]):
+        return True
+    return ref == image
+
+
 def endpoint_status(name: str, ns: str, region: str = REGION, nodes: int = 1) -> dict:
     """Live state for the catalog: ready / scaled-to-zero / deploying / unavailable, the ready replicas and the
     start-up timing of the newest pod. KServe InferenceService (one pod per replica) or, for `nodes` > 1, the
-    LeaderWorkerSet whose leader pods serve (a replica is ready when its leader is)."""
-    hit = _isvc_cache.get(f"{region}/{ns}/{name}")
-    if hit and hit[0] > time.time():
-        return hit[1]
+    LeaderWorkerSet whose leader pods serve (a replica is ready when its leader is). Cached ten seconds."""
+    return cached(_isvc_cache, f"{region}/{ns}/{name}", 10, lambda: _endpoint_status(name, ns, region, nodes))
+
+
+def _pod_selector(name: str, nodes: int) -> str:
+    return f"leaderworkerset.sigs.k8s.io/name={name}" if nodes > 1 else f"serving.kserve.io/inferenceservice={name}"
+
+
+def _endpoint_status(name: str, ns: str, region: str, nodes: int) -> dict:
     out = {"status": "unavailable", "replicas_ready": None}
     try:
         if nodes > 1:
             i = _lws_get(region, ns, name)
-            pods = retry(
-                core(region).list_namespaced_pod, ns, label_selector=f"leaderworkerset.sigs.k8s.io/name={name}"
-            ).items
+            pods = retry(core(region).list_namespaced_pod, ns, label_selector=_pod_selector(name, nodes)).items
             leaders = [p for p in pods if p.metadata.labels.get("leaderworkerset.sigs.k8s.io/worker-index") == "0"]
-            n = sum(
-                1
-                for p in leaders
-                if p.status.phase == "Running" and all(c.ready for c in (p.status.container_statuses or []))
-            )
+            n = sum(1 for p in leaders if _pod_ready(p))
             stopped = int(i.get("spec", {}).get("replicas", 0)) == 0
             out = {
                 "status": "ready" if n else ("scaled-to-zero" if stopped and not pods else "deploying"),
                 "replicas_ready": n,
                 "nodes": nodes,
-                "pods_ready": sum(
-                    1
-                    for p in pods
-                    if p.status.phase == "Running" and all(c.ready for c in (p.status.container_statuses or []))
-                ),
+                "pods_ready": sum(1 for p in pods if _pod_ready(p)),
                 **_startup(leaders),
             }
             if last := (i.get("metadata", {}).get("annotations") or {}).get(LAST_REQUEST_ANNOTATION):
                 out["last_request_at"] = last
         else:
-            i = retry(
-                api(region).get_namespaced_custom_object, "serving.kserve.io", "v1beta1", ns, "inferenceservices", name
-            )
+            i = _isvc_get(region, ns, name)
             conds = i.get("status", {}).get("conditions", [])
             ready = any(c.get("type") == "Ready" and c.get("status") == "True" for c in conds)
-            pods = retry(
-                core(region).list_namespaced_pod, ns, label_selector=f"serving.kserve.io/inferenceservice={name}"
-            ).items
-            n = sum(
-                1
-                for p in pods
-                if p.status.phase == "Running" and all(c.ready for c in (p.status.container_statuses or []))
-            )
+            pods = retry(core(region).list_namespaced_pod, ns, label_selector=_pod_selector(name, nodes)).items
+            n = sum(1 for p in pods if _pod_ready(p))
             # Knative gave up on the newest revision (ProgressDeadlineExceeded -> RevisionFailed): nothing is starting any
             # more, so this is an error with Knative's message, not "deploying" (a Boltz-2 NIM whose Secret was gone sat in
             # "deploying" for two days with no pod, no logs and no metrics)
@@ -339,32 +707,53 @@ def endpoint_status(name: str, ns: str, region: str = REGION, nodes: int = 1) ->
                 status = "error"
             else:
                 status = "scaled-to-zero" if ready and not pods else "deploying"
-            out = {"status": status, "replicas_ready": n, **_startup(pods)}
+            out = {
+                "status": status,
+                "replicas_ready": n,
+                **_startup(pods),
+                "rollout": _rollout(i, pods, region, ns, name=name),
+            }
             if status == "error":
                 out["reason"] = f"{failed.get('reason')}: {(failed.get('message') or '').strip()}"[:300]
     except ApiException:
         pass
-    _isvc_cache[f"{region}/{ns}/{name}"] = (time.time() + 10, out)
     return out
 
 
-_last_stamp: dict[str, float] = {}
+_pods_cache: dict = {}  # f"{region}/{ns}/{name}" -> (until, pods): the endpoint page reads this per endpoint
+
+
+def endpoint_pods(name: str, ns: str, region: str = REGION, nodes: int = 1) -> list:
+    """The pods of an endpoint (every replica of a KServe InferenceService; every pod of a LeaderWorkerSet), as the
+    client objects, for the replicas' placement (instances.replicas). Cached ten seconds like endpoint_status; []
+    when the region cannot be read."""
+
+    def load() -> list:
+        try:
+            return retry(core(region).list_namespaced_pod, ns, label_selector=_pod_selector(name, nodes)).items
+        except Exception:  # noqa: BLE001 - an unreadable region shows no replicas, never fails the page
+            return []
+
+    return cached(_pods_cache, f"{region}/{ns}/{name}", 10, load)
+
+
+_last_stamp: dict = {}  # f"{region}/{name}" -> (until, None): the next stamp of an endpoint is due after `until`
 
 
 def stamp_last_request(name: str, ns: str = "models", region: str = REGION, min_interval_s: int = 60) -> None:
     """Record on a multi-node endpoint's LeaderWorkerSet that it was called now (annotation, at most once a minute):
     the control API's idle shutdown reads it (services/api/app.py idle_shutdown). Cheap and best-effort."""
-    now = time.time()
-    if _last_stamp.get(f"{region}/{name}", 0) + min_interval_s > now:
-        return
-    _last_stamp[f"{region}/{name}"] = now
-    body = {
-        "metadata": {"annotations": {LAST_REQUEST_ANNOTATION: time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now))}}
-    }
-    try:
-        api(region).patch_namespaced_custom_object(LWS[0], LWS[1], ns, LWS[2], name, body)
-    except Exception:  # noqa: BLE001 - a missed stamp delays an idle shutdown by a minute; never a failed request
-        pass
+
+    def stamp() -> None:
+        body = {
+            "metadata": {"annotations": {LAST_REQUEST_ANNOTATION: time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}}
+        }
+        try:
+            api(region).patch_namespaced_custom_object(LWS[0], LWS[1], ns, LWS[2], name, body)
+        except Exception:  # noqa: BLE001 - a missed stamp delays an idle shutdown by a minute; never a failed request
+            pass
+
+    cached(_last_stamp, f"{region}/{name}", min_interval_s, stamp)
 
 
 def pool_usage(cluster: str, pool: str) -> dict:
@@ -372,25 +761,63 @@ def pool_usage(cluster: str, pool: str) -> dict:
     the running pods on them (every namespace this identity may list; a tenant's pods are its runs, `models` the
     endpoints and the warm-spare placeholders). Unreachable: {"nodes_ready": None}."""
     region = cluster_region(cluster)
-    try:
-        nodes = retry(core(region).list_node, label_selector=f"{LABEL}/pool={pool}").items
-    except Exception:  # noqa: BLE001 - a region that cannot be reached shows as unknown, never fails the page
+    # one node listing and one running-pod listing per region, shared by every pool of the fleet page (eight pools
+    # used to mean eight listings of every pod in the cluster: 12 s for GET /v1/fleet?live=true, api 0.11.124)
+    all_nodes = nodes_of(region)
+    if all_nodes is None:
         return {"nodes_ready": None, "gpus_total": None, "gpus_used": None}
+    nodes = [n for n in all_nodes if (n.metadata.labels or {}).get(f"{LABEL}/pool") == pool]
     names = {n.metadata.name for n in nodes}
-    ready = sum(1 for n in nodes if any(c.type == "Ready" and c.status == "True" for c in (n.status.conditions or [])))
+    ready = sum(1 for n in nodes if _node_ready(n))
     total = sum(int((n.status.allocatable or {}).get("nvidia.com/gpu", 0)) for n in nodes)
-    used = 0
-    try:
-        for pod in retry(core(region).list_pod_for_all_namespaces, field_selector="status.phase=Running").items:
+    pods = running_pods_of(region)
+    if pods is None:
+        used = None  # without cluster-wide pod read the use stays unknown
+    else:
+        used = 0
+        for pod in pods:
             if pod.spec.node_name in names:
                 used += sum(
                     int((c.resources.requests or {}).get("nvidia.com/gpu", 0))
                     for c in pod.spec.containers
                     if c.resources
                 )
-    except Exception:  # noqa: BLE001 - without cluster-wide pod read the use stays unknown
-        used = None
     return {"nodes_ready": ready, "gpus_total": total, "gpus_used": used}
+
+
+def _node_ready(n) -> bool:
+    return any(c.type == "Ready" and c.status == "True" for c in (n.status.conditions or []))
+
+
+LIVE_CACHE_S = 10  # the fleet page's node and pod listings per region: one read serves every pool and poll in it
+_live_cache: dict = {}  # f"{kind}/{region}" -> (until, items | None)
+
+
+def _live_list(kind: str, region: str, call) -> list | None:
+    key = f"{kind}/{region}"
+    hit = _live_cache.get(key)
+    if hit and hit[0] > time.time():
+        return hit[1]
+    try:
+        items = call()
+    except Exception:  # noqa: BLE001 - a region that cannot be reached shows as unknown, never fails the page
+        items = None
+    _live_cache[key] = (time.time() + (LIVE_CACHE_S if items is not None else 2), items)
+    return items
+
+
+def nodes_of(region: str) -> list | None:
+    """Every node of a region (client objects), cached LIVE_CACHE_S; None when the region cannot be read."""
+    return _live_list("nodes", region, lambda: retry(core(region).list_node).items)
+
+
+def running_pods_of(region: str) -> list | None:
+    """Every running pod of a region (client objects), cached LIVE_CACHE_S; None when the pods cannot be listed."""
+    return _live_list(
+        "pods",
+        region,
+        lambda: retry(core(region).list_pod_for_all_namespaces, field_selector="status.phase=Running").items,
+    )
 
 
 def tenant_usage(tenant: str, region: str = REGION) -> dict:
@@ -420,15 +847,10 @@ def tenant_usage(tenant: str, region: str = REGION) -> dict:
 
 def cluster_summary(region: str) -> dict:
     """One cluster of the fleet for the fleet page: Kubernetes version, ready nodes (system and GPU), reachability."""
-    try:
-        nodes = retry(core(region).list_node).items
-    except Exception:  # noqa: BLE001 - an unreachable cluster shows as such
+    nodes = nodes_of(region)
+    if nodes is None:  # an unreachable cluster shows as such
         return {"reachable": False, "nodes_ready": None, "gpu_nodes_ready": None, "kubernetes_version": None}
-    ready = [n for n in nodes if any(c.type == "Ready" and c.status == "True" for c in (n.status.conditions or []))]
-    gpu = [
-        n
-        for n in ready
-        if (n.metadata.labels or {}).get(f"{LABEL}/pool") and (n.metadata.labels or {}).get(f"{LABEL}/pool") != "system"
-    ]
+    ready = [n for n in nodes if _node_ready(n)]
+    gpu = [n for n in ready if (n.metadata.labels or {}).get(f"{LABEL}/pool") not in (None, "", "system")]
     version = next((n.status.node_info.kubelet_version for n in nodes if n.status and n.status.node_info), None)
     return {"reachable": True, "nodes_ready": len(ready), "gpu_nodes_ready": len(gpu), "kubernetes_version": version}

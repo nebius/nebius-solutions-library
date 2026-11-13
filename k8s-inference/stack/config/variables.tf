@@ -20,6 +20,12 @@ variable "fleet" {
     node_reserve = optional(object({
       cpu        = optional(number, 2)
       memory_gib = optional(number, 20)
+      # Ephemeral storage (the kubelet's node-local scratch on the boot disk) a pool flavor may admit per node: the
+      # boot disk x `ephemeral_fraction` minus `ephemeral_gib`, under what the kubelet reports allocatable (measured:
+      # a 128 GiB boot disk reports ~109.6 Gi, a 512 GiB one ~444.4 Gi; 0.85 x disk - 4 gives 104 / 431 Gi): the
+      # system's reservation, the image cache and the writable layers keep their headroom. Nothing is provisioned.
+      ephemeral_fraction = optional(number, 0.85)
+      ephemeral_gib      = optional(number, 4)
     }), {})
     # Order of capacity types inside a GPU class in every preference queue (reservations first).
     capacity_order = optional(list(string), ["reserved", "on_demand", "spot"])
@@ -162,12 +168,13 @@ variable "fleet" {
       # Optional CPU-only pools (batch pre/post-processing without a GPU): label serverless2.nebius/pool,
       # taint serverless2.nebius/cpu-pool=present:NoSchedule, Kueue flavor like a GPU pool with 0 GPUs.
       cpu_pools = optional(map(object({
-        platform      = string
-        preset        = string
-        min_nodes     = optional(number, 0)
-        max_nodes     = number
-        boot_disk_gib = optional(number, 128)
-        labels        = optional(map(string), {})
+        platform          = string
+        preset            = string # <n>vcpu-<n>gb: the Kueue quota of the pool's flavor is max_nodes x preset minus the per-node reserve
+        min_nodes         = optional(number, 0)
+        max_nodes         = number
+        boot_disk_gib     = optional(number, 128)
+        labels            = optional(map(string), {})
+        shared_filesystem = optional(bool, true) # attach and mount the region's weights filesystem (weights/data/assets on the node)
       })), {})
     }))
 
@@ -198,9 +205,9 @@ variable "fleet" {
       })
       # Tags of the platform images under <source>/serverless2/<component>:<tag> (tools/images.sh).
       versions = optional(object({
-        api        = optional(string, "0.11.39")
-        dispatcher = optional(string, "0.2.12")
-        jobs       = optional(string, "0.1.15")
+        api        = optional(string, "0.11.131")
+        dispatcher = optional(string, "0.2.13")
+        jobs       = optional(string, "0.1.28")
         ops        = optional(string, "0.1.12")
       }), {})
     }), {})
@@ -245,12 +252,33 @@ variable "fleet" {
       # the gateway, so port 80 of every regional gateway must answer the internet). The control cluster's
       # public hostnames always use ACME in `public` mode.
       regional_certificates = optional(string, "fleet-ca")
+      # Further public hostnames on the control cluster's certificate, under the gateway host (<ip>.sslip.io or the
+      # domain): what else answers behind the gateway, e.g. a console deployed next to the API as app.<gateway host>.
+      extra_hostnames = optional(list(string), [])
       acme = optional(object({
         email   = optional(string, "")
         staging = optional(bool, false)
       }), {})
       api_rate_limit_per_minute = optional(number, 600)
       grafana_public            = optional(bool, true)
+    }), {})
+
+    # Knative Serving on every cluster (charts/platform knative-serving): the longest request/revision timeout an
+    # endpoint may declare (`timeout_s`, seconds). The SAME value reaches Knative's config-defaults
+    # (max-revision-timeout-seconds) and the API (KNATIVE_MAX_REVISION_TIMEOUT_S), which refuses a definition above it
+    # at registration (400) instead of storing an endpoint that never reconciles. Raise it for long inferences (a
+    # medical pipeline at 7500 s); never lower it below a registered endpoint's timeout_s.
+    knative = optional(object({
+      max_revision_timeout_s = optional(number, 3600)
+    }), {})
+
+    # Live sessions (docs/API.md "Sessions"): admitted streams to endpoints, bound to one connection and one worker pod.
+    # Off by default; the workers of a model must implement the attach/release protocol before it is switched on.
+    sessions = optional(object({
+      enabled        = optional(bool, false)
+      claim_ttl_s    = optional(number, 120)           # the connection must present its claim within this
+      attach_wait_s  = optional(number, 60)            # from the first Ready replica observed (never from admission; capped by the session deadline): a bound session no worker attached within it ends with usage unknown
+      token_audience = optional(string, "serverless2") # TokenReview audience of the workers' projected tokens (the lease clients' projection uses it)
     }), {})
 
     observability = optional(object({
@@ -269,6 +297,7 @@ variable "fleet" {
       ngc_api_key_env               = optional(string, "NGC_API_KEY")          # NVIDIA NGC key (NIM images through the cache); "" = off
       hf_token_env                  = optional(string, "HF_TOKEN")             # Hugging Face token for gated weights (seed-weights, runtimes); "" = off
       registry_credentials_env      = optional(string, "REGISTRY_CREDENTIALS") # JSON {"<host>": {"username": "...", "password": "..."}} for other private upstreams; "" = off
+      registry_key_env              = optional(string, "REGISTRY_STATIC_KEY")  # the image cache's static Container Registry key of the hub ops SA (issued once by stack/scripts/registry-static-key.sh); required with images.cache.enabled, ignored without
       mysterybox_credentials_secret = optional(string)                         # pre-provisioned subject-credentials.json, per cluster
       workload_secrets = optional(map(object({
         namespace        = string
@@ -285,6 +314,25 @@ variable "fleet" {
     # dedicated_pools: pool names (as in regions.*.pools) only this tenant may use (its queues carry only those
     # flavors; the shared queues exclude them). allowed_images: image prefixes a tenant's container-run may
     # use (empty = any image through the cache).
+    # Restricted assets (docs/JOBS.md "Restricted assets"): operator-registered files or pinned trees on the weights
+    # filesystem (host paths on the nodes that mount it), mounted read-only on a run's main container only, by run
+    # classes that name the alias, for tenants granted it (tenants.<name>.assets). kind: file | tree; gid: the group
+    # the files are readable by (added to the pod's supplemental groups; no ownership change ever); sha256: the file's
+    # digest, or a tree's inventory digest (identity recorded on every run); size: bytes, informational.
+    assets = optional(map(object({
+      kind      = string
+      host_path = string
+      gid       = optional(number, 65532)
+      sha256    = optional(string)
+      size      = optional(number)
+    })), {})
+    # Fleet operators manage tenant/key metadata, not customer inference. Their keys use the existing
+    # bootstrap under tenant `platform`, remain separate from tenant admins, and are sensitive outputs.
+    fleet_operator_keys = optional(set(string), [])
+    # tenant work on the platform's CPU system nodes (docs/FLEET.md "Customer CPU pools"): false removes the `system`
+    # flavor from every tenant queue and pins GPU-free tenant work (CPU classes, async callers, export retries) to the
+    # region's customer CPU pool (`regions.<r>.cpu_pools`, the smallest preset first, then a warm one); every region then needs one
+    tenant_system_flavor = optional(bool, true)
     tenants = optional(map(object({
       regions           = optional(list(string)) # default: all regions
       lifecycle_days    = optional(number, 90)   # run outputs under operations/ expire after N days (0 = keep)
@@ -292,6 +340,7 @@ variable "fleet" {
       fair_share_weight = optional(number, 1)        # Kueue weighted fair sharing between the tenants' queues (docs/FLEET.md "Tenants")
       dedicated_pools   = optional(list(string), []) # pools only this tenant's runs use: their quota is the tenant's alone, no endpoint lands there
       allowed_images    = optional(list(string), [])
+      assets            = optional(list(string), []) # restricted assets (fleet `assets`) this tenant's run classes may mount
       # Execution options of this tenant's runs (docs/JOBS.md "Execution options").
       storage = optional(string, "managed") # managed: a bucket and S3 key per region for the runs' inputs and outputs; external: none
       #                                       (runs use application-managed I/O only; identity, queues and keys as usual)
@@ -332,6 +381,25 @@ variable "fleet" {
   })
 
   validation {
+    condition = alltrue([for name in var.fleet.fleet_operator_keys :
+      can(regex("^[a-z0-9]([-a-z0-9]{0,38}[a-z0-9])?$", name)) &&
+      !contains(flatten([for tn, t in var.fleet.tenants : [for kn in keys(t.keys) : "${tn}-${kn}"]]), "platform-operator-${name}")
+    ])
+    error_message = "fleet_operator_keys: names are DNS labels of at most 40 characters; platform-operator-<name> must not collide with a tenant key alias."
+  }
+
+  validation {
+    condition = alltrue([for an, a in var.fleet.assets : contains(["file", "tree"], a.kind) && startswith(a.host_path, "/") && can(regex("^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$", an))
+    && (a.sha256 == null || can(regex("^[0-9a-f]{64}$", a.sha256)))]) && alltrue([for tn, t in var.fleet.tenants : alltrue([for an in t.assets : contains(keys(var.fleet.assets), an)])])
+    error_message = "assets: alias is a DNS label, kind is file or tree, host_path is absolute, sha256 is 64 hex digits; a tenant's assets name registered aliases."
+  }
+
+  validation {
+    condition     = alltrue([for rn, r in var.fleet.regions : alltrue([for pn, p in r.cpu_pools : can(regex("^[0-9]+vcpu-[0-9]+gb$", p.preset)) && p.max_nodes >= 1])])
+    error_message = "cpu_pools: preset is <n>vcpu-<n>gb (the pool's Kueue quota is derived from it) and max_nodes is at least 1."
+  }
+
+  validation {
     condition = alltrue([for tn, t in var.fleet.tenants : contains(["managed", "external"], t.storage)
     && alltrue([for n in concat(keys(t.identities), keys(t.execution_profiles)) : can(regex("^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$", n))])])
     error_message = "tenants: storage is managed or external; identity and execution profile names are DNS labels."
@@ -347,6 +415,10 @@ variable "fleet" {
   validation {
     condition     = contains(["open", "proprietary", "auto"], var.fleet.gpu_operator.kernel_module) && (!var.fleet.gpu_operator.gds || var.fleet.gpu_operator.kernel_module != "proprietary")
     error_message = "gpu_operator.kernel_module is open, proprietary or auto; GPUDirect Storage (gds) needs the open kernel modules."
+  }
+  validation {
+    condition     = var.fleet.node_reserve.ephemeral_fraction > 0 && var.fleet.node_reserve.ephemeral_fraction <= 1 && var.fleet.node_reserve.ephemeral_gib >= 0
+    error_message = "node_reserve.ephemeral_fraction is in (0, 1] and node_reserve.ephemeral_gib is 0 or more (a reserve larger than the disk's share budgets zero scratch, which is allowed)."
   }
   validation {
     condition     = can(regex("^[a-z][a-z0-9-]{1,22}$", var.fleet.name))

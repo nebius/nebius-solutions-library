@@ -80,6 +80,12 @@ rules:
   - apiGroups: [gateway.envoyproxy.io]
     resources: [securitypolicies]
     verbs: [get, list, create, patch, delete]
+  - apiGroups: [cilium.io]   # opt-in declared-port ingress isolation of an endpoint's pods (docs/API.md "Ingress isolation")
+    resources: [ciliumnetworkpolicies]
+    verbs: [get, list, create, patch, delete]
+  - apiGroups: [""]          # the trust bundle file of a lease-enabled endpoint (docs/API.md "Lease clients"): one ConfigMap
+    resources: [configmaps]  # per endpoint object, public CA material only, applied and removed with the endpoint
+    verbs: [get, list, create, patch, delete]
   - apiGroups: [serving.kserve.io]
     resources: [inferenceservices, localmodelcaches]
     verbs: [get, list, patch, create, delete]       # runtime models (services/api/models.py) render and remove endpoints
@@ -98,6 +104,9 @@ rules:
   - apiGroups: [""]
     resources: [pods]
     verbs: [get, list]
+  - apiGroups: [serving.knative.dev]              # the endpoint's rollout state (services/api/kube.py _rollout): the latest
+    resources: [revisions, services]               # ready Revision's stored image, and the predictor Service's generations and
+    verbs: [get, list]                             # template image (0.11.109 witness; unreadable = not converged = 409)
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -112,28 +121,39 @@ metadata: { name: api, namespace: api }
 spec:
   replicas: 2
   selector: { matchLabels: { app: api } }
+  # a roll keeps every in-flight request: no replica goes before its replacement is ready, and a stopping pod finishes
+  # the synchronous calls it proxies (up to SYNC_TIMEOUT_S plus the time its endpoint takes to drain) before it exits
+  strategy: { type: RollingUpdate, rollingUpdate: { maxUnavailable: 0, maxSurge: 1 } }
   template:
     metadata: { labels: { app: api } }
     spec:
       serviceAccountName: api
       securityContext: { runAsNonRoot: true, runAsUser: 10001, seccompProfile: { type: RuntimeDefault } }
+      terminationGracePeriodSeconds: {{ .Values.api.terminationGracePeriodSeconds }}
       containers:
         - name: api
           image: {{ .Values.images.api }}
           securityContext: { allowPrivilegeEscalation: false, capabilities: { drop: [ALL] } }
           ports: [{ containerPort: 8080 }]
+          # the endpoints controller needs a moment to take a stopping pod out of the Service before uvicorn stops
+          # accepting; then uvicorn serves what it holds until the graceful timeout (services/api/Dockerfile)
+          lifecycle: { preStop: { exec: { command: [sleep, "5"] } } }
           # the whole environment is a value (services/api/config.py lists the variables): REGION (`control` on a
           # dedicated control cluster, the region's name in single-cluster mode), the public hostnames (the API refuses
           # to start while a value still carries example.invalid), LITELLM_URL, REGION_KUBECONFIGS, the fleet database
           env:
+            # the SAME value Knative's config-defaults got (max-revision-timeout-seconds): registration refuses an
+            # endpoint timeout_s above it instead of storing a definition that never reconciles
+            - { name: KNATIVE_MAX_REVISION_TIMEOUT_S, value: {{ .Values.knative.maxRevisionTimeoutSeconds | quote }} }
             {{- toYaml .Values.api.env | nindent 12 }}
           volumeMounts:
             - { name: kubeconfigs, mountPath: /etc/kubeconfigs, readOnly: true }
             - { name: catalog, mountPath: /etc/catalog, readOnly: true }        # the built-in classes (ConfigMap api/catalog)
             {{- toYaml .Values.trust.mounts | nindent 12 }}
           resources:
-            requests: { cpu: 100m, memory: 256Mi }
-            limits: { cpu: "1", memory: 512Mi }
+            # Concurrent status/graph queries exceeded 512Mi on a populated fleet.
+            requests: { cpu: 100m, memory: 512Mi }
+            limits: { cpu: "1", memory: 2Gi }
           readinessProbe: { httpGet: { path: /healthz, port: 8080 }, periodSeconds: 5 }
           livenessProbe: { httpGet: { path: /livez, port: 8080 }, periodSeconds: 20 }     # process-only: a database outage never restarts the API
       volumes:
@@ -162,10 +182,16 @@ spec:
       backendRefs: [{ name: api, port: 80 }]
     - matches: [{ path: { type: PathPrefix, value: /internal/authorize } }]  # the regions' gateways authorize endpoint calls here (ext-auth: a key check, nothing else)
       backendRefs: [{ name: api, port: 80 }]
+    - matches: [{ path: { type: PathPrefix, value: /internal/executions } }] # native execution leases (docs/API.md): a worker pod of any region attaches, polls and
+      backendRefs: [{ name: api, port: 80 }]                                  # releases through S2_API_URL with its projected pod-bound token (TokenReview; nothing from headers)
+    - matches: [{ path: { type: PathPrefix, value: /internal/sessions } }]   # live sessions (docs/API.md "Sessions"): the same worker pod-token routes
+      backendRefs: [{ name: api, port: 80 }]
+    - matches: [{ path: { type: PathPrefix, value: /internal/operations } }] # endpoint children (docs/JOBS.md): a run's live attempt, with its
+      backendRefs: [{ name: api, port: 80 }]                                  # projected pod token, asks for a bounded child and reads it back
     - matches: [{ path: { type: PathPrefix, value: /internal } }]   # everything else under /internal is this cluster's own gateway's (the Service directly)
       filters: [{ type: ExtensionRef, extensionRef: { group: gateway.envoyproxy.io, kind: HTTPRouteFilter, name: api-not-found } }]
     - backendRefs: [{ name: api, port: 80 }]
-      timeouts: { request: 630s, backendRequest: 630s }   # sync calls wait for a cold start (S2: ~140 s warm node, ~7 min from zero)
+      timeouts: { request: {{ .Values.api.syncRequestTimeoutSeconds }}s, backendRequest: {{ .Values.api.syncRequestTimeoutSeconds }}s }   # a sync call up to api.syncRequestTimeoutSeconds (cold start and a long inference included)
 ---
 # Port 80 of the API hostname only redirects to HTTPS: a bearer key never travels in clear. cert-manager's ACME
 # challenge route on the same listener matches a longer path (/.well-known/acme-challenge/<token>) and takes

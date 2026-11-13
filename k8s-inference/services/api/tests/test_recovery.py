@@ -208,6 +208,5 @@ def test_model_env_secret_references_render_without_values(client, admin_keys, k
     c, _ = client
     spec = {**SPEC, "kind": kind, "env_secrets": ["app-credentials"]}
     assert c.post("/v1/models", json=spec, headers=ADMIN).status_code == 201
-    entry = admin_keys.rows[SPEC["id"]]["entry"]
-    assert entry["runtime" if kind == "endpoint" else "job"]["envFrom"] == [{"secretRef": {"name": "app-credentials"}}]
+    assert admin_keys.rows[SPEC["id"]]["spec"]["env_secrets"] == ["app-credentials"]
     assert c.put("/v1/models/" + SPEC["id"], json={**spec, "env_secrets": "invalid"}, headers=ADMIN).status_code == 400

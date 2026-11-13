@@ -35,21 +35,11 @@ def normalise(value: dict | None) -> dict:
             if not isinstance(key, str) or not isinstance(text, str):
                 raise HTTPException(400, f"pod_metadata.{field}: string keys and values required")
             parts = key.split("/")
-            name = parts[-1]
-            prefix = parts[0] if len(parts) == 2 else ""
-            if (
-                len(parts) > 2
-                or len(name) > 63
-                or not NAME.fullmatch(name)
-                or (
-                    len(parts) == 2
-                    and (
-                        len(prefix) > 253
-                        or not prefix
-                        or any(len(label) > 63 or not DNS.fullmatch(label) for label in prefix.split("."))
-                    )
-                )
-            ):
+            name, prefix = parts[-1], parts[0] if len(parts) == 2 else ""
+            bad_prefix = len(parts) == 2 and (
+                len(prefix) > 253 or not prefix or any(len(x) > 63 or not DNS.fullmatch(x) for x in prefix.split("."))
+            )
+            if len(parts) > 2 or len(name) > 63 or not NAME.fullmatch(name) or bad_prefix:
                 raise HTTPException(400, f"pod_metadata.{field}: invalid Kubernetes metadata key")
             if prefix in RESERVED or any(prefix.endswith("." + domain) for domain in ("k8s.io", "kubernetes.io")):
                 raise HTTPException(400, "pod_metadata: platform, scheduler and serving metadata are reserved")

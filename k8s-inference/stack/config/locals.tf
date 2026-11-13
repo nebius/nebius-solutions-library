@@ -56,10 +56,16 @@ locals {
   # the chart's own shape. `images.source` is the registry the cloud stage created (`cloud_facts` below: the cloud
   # state in the platform stage, a placeholder in tools/check.sh, which renders the charts without any cloud access).
   chart_fleet = {
-    name           = local.f.name
-    labels         = local.f.labels
-    node_reserve   = { cpu = local.f.node_reserve.cpu, memory_gib = local.f.node_reserve.memory_gib }
-    capacity_order = local.f.capacity_order
+    name   = local.f.name
+    labels = local.f.labels
+    node_reserve = {
+      cpu                = local.f.node_reserve.cpu
+      memory_gib         = local.f.node_reserve.memory_gib
+      ephemeral_fraction = local.f.node_reserve.ephemeral_fraction
+      ephemeral_gib      = local.f.node_reserve.ephemeral_gib
+    }
+    system_boot_disk_gib = 128 # stack/modules/cluster main.tf: the system nodes' boot disk is fixed
+    capacity_order       = local.f.capacity_order
     images = {
       host      = local.images_host
       source    = local.images_source
@@ -78,13 +84,17 @@ locals {
       system_pool          = r.system_pool # the CPU nodes the `system` Kueue flavor budgets (charts/fleet)
       image_cache_size_gib = coalesce(r.image_cache_size_gib, local.f.images.cache.size_gib)
       # charts/tenant multinode.yaml renders the shared scratch claim (`checkpoints: shared`) only where the region has it
-      weights_filesystem = { enabled = r.weights_filesystem.enabled, size_gib = r.weights_filesystem.size_gib }
+      weights_filesystem = { enabled = r.weights_filesystem.enabled, size_gib = r.weights_filesystem.size_gib, mount_on_system = r.weights_filesystem.mount_on_system }
       pools              = { for pn, p in r.pools : pn => merge(p, { capacity = { type = p.capacity.type, max_price = p.capacity.max_price } }) }
+      # CPU-only pools (charts/fleet: one flavor each after `system`, quota from max_nodes x preset; docs/FLEET.md "CPU pools")
+      cpu_pools = { for pn, p in r.cpu_pools : pn => { platform = p.platform, preset = p.preset, min_nodes = p.min_nodes, max_nodes = p.max_nodes, boot_disk_gib = p.boot_disk_gib, shared_filesystem = p.shared_filesystem } }
     } }
     prices = local.chart_prices
     # Kueue queues per tenant (charts/fleet): the fair-share weight, the per-pool GPU cap and the pools only this tenant
     # may use (docs/FLEET.md "Tenants")
-    tenants = { for tn, t in local.f.tenants : tn => { gpu_quota = t.gpu_quota, fair_share_weight = t.fair_share_weight, dedicated_pools = t.dedicated_pools } }
+    tenants              = { for tn, t in local.f.tenants : tn => { gpu_quota = t.gpu_quota, fair_share_weight = t.fair_share_weight, dedicated_pools = t.dedicated_pools, assets = t.assets } }
+    assets               = local.f.assets
+    tenant_system_flavor = local.f.tenant_system_flavor # docs/FLEET.md "Customer CPU pools"
   }
 
   # GPU classes of the fleet -> scheduling profiles prefer-<class> (plus default).
@@ -104,7 +114,14 @@ locals {
     order = concat([for id in local.cluster_ids : id if !local.roles[id].control], [for id in local.cluster_ids : id if local.roles[id].control])
     state = { bucket = local.state_bucket, region = local.state_region, endpoint = local.state_endpoint }
     # the environment variables that carry secret inputs (terraform.tfvars `secrets`), by platform-stage variable name
-    secrets = { ngc_api_key = local.f.secrets.ngc_api_key_env, hf_token = local.f.secrets.hf_token_env, registry_credentials = local.f.secrets.registry_credentials_env }
+    secrets = {
+      ngc_api_key          = local.f.secrets.ngc_api_key_env
+      hf_token             = local.f.secrets.hf_token_env
+      registry_credentials = local.f.secrets.registry_credentials_env
+      # the image cache's static key: a required input of every cluster's platform stage while the cache is on (the
+      # same key everywhere: one Secret value per fleet, never issued by a plan); nothing without the cache
+      registry_key = local.images_cache ? local.f.secrets.registry_key_env : ""
+    }
   }
 }
 
@@ -232,6 +249,11 @@ locals {
     { name = "ROUTER_KEY", valueFrom = { secretKeyRef = { name = "router-key", key = "key" } } }, # the model groups' key (router-key.tf)
     { name = "IMAGES_HOST", value = local.images_cache ? local.images_host : "" },                # empty: the API leaves image references as written
     { name = "IMAGES_SOURCE", value = local.images_source },
+    # live sessions (docs/API.md "Sessions"): off unless `sessions.enabled`
+    { name = "SESSIONS_ENABLED", value = local.f.sessions.enabled ? "true" : "false" },
+    { name = "SESSION_CLAIM_TTL_S", value = tostring(local.f.sessions.claim_ttl_s) },
+    { name = "SESSION_ATTACH_WAIT_S", value = tostring(local.f.sessions.attach_wait_s) },
+    { name = "SESSION_TOKEN_AUDIENCE", value = local.f.sessions.token_audience },
     # the gateway domain of every GPU region: the endpoints' hostnames (LiteLLM, sync calls for another region, async calls)
     { name = "ENDPOINT_DOMAINS", value = join(",", [for cid in local.cluster_ids : "${local.clusters[cid].region}=${local.host_of[cid]}" if local.roles[cid].worker]) },
     { name = "ACME_ISSUER", value = local.certificate_issuer[id] },
@@ -277,11 +299,14 @@ locals {
     components = merge({ for n, a in local.apps_by_cluster[id] : n => true if a.kind == "manifests" }, { for n in local.identity_components[id] : n => true })
     host       = local.host_of[id]
     hostnames  = local.hostnames_of[id]
-    images     = { host = local.images_host, api = local.image.api, dispatcher = local.image.dispatcher, ops = local.image.ops }
+    images     = { host = local.images_host, api = local.image.api, dispatcher = local.image.dispatcher, ops = local.image.ops, cacheNodePort = local.f.images.cache.node_port }
     # the logical host resolves only on the nodes (containerd), not in the cluster network: Knative keeps such a
     # reference as written; nvcr.io needs credentials Knative does not have
-    knative = { skipTagResolving = local.images_cache ? [local.images_host, "nvcr.io"] : ["nvcr.io"] }
-    api     = { rateLimitPerMinute = local.f.edge.api_rate_limit_per_minute, env = local.api_env[id] }
+    knative = {
+      skipTagResolving          = local.images_cache ? [local.images_host, "nvcr.io"] : ["nvcr.io"]
+      maxRevisionTimeoutSeconds = local.f.knative.max_revision_timeout_s # one value for Knative AND the API's registration check
+    }
+    api = { rateLimitPerMinute = local.f.edge.api_rate_limit_per_minute, env = local.api_env[id] }
     # a GPU region's gateway authorizes endpoint calls against the fleet's API by its public hostname (templates/edge):
     # validated against the system roots (ACME) in public mode, the trust bundle (`trust`, key ca.crt) in internal mode
     edge  = { controlApiHost = local.api_host, caConfigMap = local.f.edge.mode == "internal" ? "trust" : "" }

@@ -7,6 +7,7 @@ apiSubjects:                   # API identities bound to ClusterRole serverless2
   - { kind: ServiceAccount, name: api-agent, namespace: api }    # the control cluster's API, on a worker
 runnerServiceAccount: job-runner   # ServiceAccount of the run pods (EXECUTOR_SA on the API)
 allowedImages: []              # image prefixes a container-run of this tenant may use (namespace annotation the API enforces); empty: any
+assets: []                     # restricted assets (fleet.yaml `assets`) granted to this tenant: one read-only static volume each (assets.yaml)
 # Execution options (docs/JOBS.md "Execution options"; terraform.tfvars tenants.<name>.identities / execution_profiles).
 # identities: <ref>: { audience: <token audience>, env: { AWS_ROLE_ARN: ... } } -> ServiceAccount identity-<ref> (bound to
 # the same Role as the runner) whose projected token the run's main container gets for OIDC federation.

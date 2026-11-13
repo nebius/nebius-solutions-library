@@ -65,11 +65,11 @@
  },
  "apps/DaemonSet/spegel/containerd-registry-config": {
   "component": "node-config",
-  "sha256": "2becbada53207f175db8b8f0227e1b1f148dde959540133ee836cc3e96481623"
+  "sha256": "b84347d835959ad2272ac3b4f892011e5232184b6de8c0fe38e88230065635a8"
  },
  "apps/Deployment/api/api": {
   "component": "api",
-  "sha256": "da3514d2100f1055df98c0448f4b72ee896bc2ab14ee5ae74ddc757ba0019ddd"
+  "sha256": "f2564f5c4119281ce2f9906cf4a8fdbc528bfb2c42e10c16aa526bf1627f9e81"
  },
  "apps/Deployment/envoy-gateway-system/ratelimit-redis": {
   "component": "gateway",
@@ -77,7 +77,7 @@
  },
  "apps/Deployment/kueue-system/dispatcher": {
   "component": "dispatcher",
-  "sha256": "e0d14a4f1c370a87d083c5c9b37b0774b4882453f770d8614493b7fb69e03f8b"
+  "sha256": "04e4b7562c00dec2c23d9d69edbce9e383a328d841180f69e18a7223599c5ed4"
  },
  "apps/Deployment/monitoring/alert-sink": {
   "component": "observability",
@@ -85,7 +85,7 @@
  },
  "batch/CronJob/kueue-system/price-feed": {
   "component": "dispatcher",
-  "sha256": "dbb892d8e1933c0213879cbf97de397d0d247cd24415a79025211c825fd2edb7"
+  "sha256": "013860d3d6720a6d853ab27fe9666b5ecce133ff766dcd043a0da679ad78e680"
  },
  "batch/CronJob/monitoring/cost-export": {
   "component": "observability",
@@ -129,11 +129,11 @@
  },
  "gateway.envoyproxy.io/EnvoyProxy/envoy-gateway-system/external": {
   "component": "gateway",
-  "sha256": "55c1c384cf9f5a77b0efc1811f29703e5b17cd1a0a3a047462c44636c908f984"
+  "sha256": "32acf0230e1202c17af5ea6b7ebdf5e6ae54f078828ca8640f99d3e0e27da111"
  },
  "gateway.envoyproxy.io/EnvoyProxy/envoy-gateway-system/internal": {
   "component": "gateway",
-  "sha256": "e21ed94e2bbff8ee5db419c90c3a022ff0df89b9d1f96257e24c8b41531abd09"
+  "sha256": "01ed0cac46f1dac49a46975224a08354d9b7a38aadca7e1ac73f96fae9d54175"
  },
  "gateway.envoyproxy.io/HTTPRouteFilter/api/api-not-found": {
   "component": "api",
@@ -153,7 +153,7 @@
  },
  "gateway.networking.k8s.io/HTTPRoute/api/api": {
   "component": "api",
-  "sha256": "165cd30a721032f5986b9e17c8c15b2a3d202014535b696ca78653829818decb"
+  "sha256": "9616c5c3359bbd7f2c7a362a725912f09681d876e7ec46e4e0bfeb7de36f261b"
  },
  "gateway.networking.k8s.io/HTTPRoute/api/api-authorize": {
   "component": "api",
@@ -221,7 +221,7 @@
  },
  "rbac.authorization.k8s.io/ClusterRole/_/serverless2-api-tenant": {
   "component": "tenant-clusterrole",
-  "sha256": "a9ad5ab84800b533cde7e84c334d3633c405b71658e62b3cf691e27c3985f80e"
+  "sha256": "89c2a4182901c7940b62c2e8a1dd61f5401099fe41880b09ed0f4f61118eec88"
  },
  "rbac.authorization.k8s.io/ClusterRole/_/serverless2-dispatcher": {
   "component": "dispatcher",

@@ -35,7 +35,7 @@ def test_endpoint_metadata_is_admin_owned_and_can_be_removed(client, admin_keys)
     assert predictor["annotations"] == EXTRA["annotations"]
     assert predictor["automountServiceAccountToken"] is False
     assert "example.org/startup-profile" not in fake.custom[key]["metadata"]["labels"]
-    assert admin_keys.rows[spec["id"]]["entry"]["podMetadata"] == EXTRA
+    assert admin_keys.rows[spec["id"]]["spec"]["pod_metadata"] == EXTRA
     assert c.get("/v1/models/metadata-endpoint", headers=ADMIN).json()["spec"]["pod_metadata"] == EXTRA
     del spec["pod_metadata"]
     del spec["automount_service_account_token"]

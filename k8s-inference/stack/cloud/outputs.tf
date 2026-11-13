@@ -14,6 +14,7 @@ output "clusters" {
     weights_filesystem_id  = module.cluster[id].weights_filesystem_id
     weights_filesystem     = c.weights_filesystem
     gpu_node_group_ids     = module.cluster[id].gpu_node_group_ids
+    cpu_node_group_ids     = module.cluster[id].cpu_node_group_ids
     ops_service_account_id = nebius_iam_v1_service_account.ops[c.project_id].id
     kubeconfig_command     = "nebius mk8s cluster get-credentials --id ${module.cluster[id].cluster_id} --external"
   } }

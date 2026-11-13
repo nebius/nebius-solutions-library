@@ -83,7 +83,7 @@ locals {
           secretName = "${local.id}-wildcard-tls"
           issuerRef  = { name = local.certificate_issuer, kind = "ClusterIssuer" }
           commonName = try(local.hostnames.api, local.hostnames.grafana) # a GPU region has no API hostname
-          dnsNames   = distinct(values(local.hostnames))
+          dnsNames   = distinct(concat(values(local.hostnames), local.role.control ? local.f.edge.extra_hostnames : []))
           privateKey = { rotationPolicy = "Always" }
         }
       }
