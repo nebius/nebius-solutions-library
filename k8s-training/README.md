@@ -633,6 +633,20 @@ still has its previous backend configuration in `.terraform`. Review the migrati
 prompt and subsequent plan before applying. Unsetting `K8S_TF_STATE_KEY` restores
 the historical `k8s-training.tfstate` key, not a cluster-specific key.
 
+Node service accounts retain Editor permissions within the deployment project.
+Loki can access only its three buckets. Grafana uses a separate project-Viewer
+identity; its container receives only an Observability-specific token. The
+underlying Grafana account retains project-wide Viewer permissions.
+`environment.sh` scopes its backend account to the state bucket; Terraform uses
+the current CLI caller. Upgrading existing node or Loki identities removes their
+old tenant memberships; review these changes before applying.
+The new backend account `k8s-training-tfstate-sa` leaves the legacy
+`k8s-training-sa` and its keys untouched. Backend storage is shared per project;
+additional clusters need distinct `cluster_name`, `K8S_TF_STATE_KEY` and working directories.
+Initialize the shared backend once before running cluster deployments in parallel.
+Keep the generated `grafana_access_token.txt` private between runs; on a new
+runner regenerate it with `terraform apply -replace='module.o11y.terraform_data.grafana_access_token[0]'`.
+
 ### Observability upgrades and testing
 
 Kubernetes training passes its cluster name to the observability module, which
@@ -646,16 +660,16 @@ does not demonstrate an upgrade against existing state. No live upgrade plan was
 run. Review the plan with your selected provider version before upgrading; no
 Terraform resource address changes, so a `moved` block is not needed.
 
-The published [API name schema][resource-metadata] has no restriction excluding
-dots. Acceptance of the prefixed names by the live API has not been tested.
+The published [API name schema][resource-metadata] permits these names. A fresh
+deployment verified the prefixed names against the live API.
 
 The example keeps `loki.enabled = false`, so copying it does not deploy Loki.
-Set it to `true` to enable Loki. CI separately plans a fixture with Loki enabled
+Set it to `true` to enable Loki. CI separately checks a fixture with Loki enabled
 and mocked providers. The test harness copies the access-key resources and their
 IAM dependencies directly from this module, so it checks the production resource
 definitions without provisioning a cluster or changing the example's default.
-These plans start with empty state and check names, not upgrade or replacement
-behavior. The fixture excludes ephemeral MysteryBox resources, which Terraform
+These checks start with empty state and verify distinct identities, buckets and
+key names for two clusters in one project, not upgrade or replacement behavior. The fixture excludes ephemeral MysteryBox resources, which Terraform
 1.11 cannot mock; secret retrieval and application deployment are not covered.
 Run the same check locally with
 `python3 modules/o11y/tests/check_access_keys.py` from the repository root.
