@@ -39,9 +39,10 @@ variable "service_cidrs" {
 variable "system_pool" {
   description = "The CPU node group that runs the platform add-ons (gateway, caches, controllers)."
   type = object({
-    platform   = string
-    preset     = string
-    node_count = number
+    platform      = string
+    preset        = string
+    node_count    = number
+    boot_disk_gib = optional(number, 128)
   })
 }
 
