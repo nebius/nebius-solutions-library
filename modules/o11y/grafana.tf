@@ -127,65 +127,67 @@ locals {
       # Keep this complete list synchronized with nebius-grafana/chart/values.yaml.
       datasources = {
         "datasources.yaml" = {
-          apiVersion = 1
-          datasources = [
-            {
-              name      = "Nebius Services"
-              type      = "prometheus"
-              access    = "proxy"
-              url       = "https://read.monitoring.api.nebius.cloud/projects/{{ .Values.nebius.projectId }}/service-provider/prometheus"
-              isDefault = true
-              jsonData = {
-                httpHeaderName1 = "Authorization"
-              }
-              secureJsonData = {
-                httpHeaderValue1 = "Bearer {{ .Values.nebius.accessToken }}"
-              }
-              version = 0
-            },
-            {
-              name      = "Nebius Monitoring"
-              type      = "prometheus"
-              access    = "proxy"
-              url       = "https://read.monitoring.api.nebius.cloud/projects/{{ .Values.nebius.projectId }}/prometheus"
-              isDefault = false
-              jsonData = {
-                httpHeaderName1 = "Authorization"
-              }
-              secureJsonData = {
-                httpHeaderValue1 = "Bearer {{ .Values.nebius.accessToken }}"
-              }
-              version = 0
-            },
-            {
-              name      = "Nebius Logging"
-              type      = "loki"
-              access    = "proxy"
-              url       = "https://read.logging.api.nebius.cloud/projects/{{ .Values.nebius.projectId }}"
-              isDefault = false
-              jsonData = {
-                httpHeaderName1 = "Authorization"
-              }
-              secureJsonData = {
-                httpHeaderValue1 = "Bearer {{ .Values.nebius.accessToken }}"
-              }
-              version = 0
-            },
-            {
-              name      = "Nebius Tracing"
-              type      = "tempo"
-              access    = "proxy"
-              url       = "https://read.tracing.api.nebius.cloud/projects/{{ .Values.nebius.projectId }}/tempo"
-              isDefault = false
-              jsonData = {
-                httpHeaderName1 = "Authorization"
-              }
-              secureJsonData = {
-                httpHeaderValue1 = "Bearer {{ .Values.nebius.accessToken }}"
-              }
-              version = 0
-            },
-          ]
+          secret = {
+            apiVersion = 1
+            datasources = [
+              {
+                name      = "Nebius Services"
+                type      = "prometheus"
+                access    = "proxy"
+                url       = "https://read.monitoring.api.nebius.cloud/projects/{{ .Values.nebius.projectId }}/service-provider/prometheus"
+                isDefault = true
+                jsonData = {
+                  httpHeaderName1 = "Authorization"
+                }
+                secureJsonData = {
+                  httpHeaderValue1 = "Bearer {{ .Values.nebius.accessToken }}"
+                }
+                version = 0
+              },
+              {
+                name      = "Nebius Monitoring"
+                type      = "prometheus"
+                access    = "proxy"
+                url       = "https://read.monitoring.api.nebius.cloud/projects/{{ .Values.nebius.projectId }}/prometheus"
+                isDefault = false
+                jsonData = {
+                  httpHeaderName1 = "Authorization"
+                }
+                secureJsonData = {
+                  httpHeaderValue1 = "Bearer {{ .Values.nebius.accessToken }}"
+                }
+                version = 0
+              },
+              {
+                name      = "Nebius Logging"
+                type      = "loki"
+                access    = "proxy"
+                url       = "https://read.logging.api.nebius.cloud/projects/{{ .Values.nebius.projectId }}"
+                isDefault = false
+                jsonData = {
+                  httpHeaderName1 = "Authorization"
+                }
+                secureJsonData = {
+                  httpHeaderValue1 = "Bearer {{ .Values.nebius.accessToken }}"
+                }
+                version = 0
+              },
+              {
+                name      = "Nebius Tracing"
+                type      = "tempo"
+                access    = "proxy"
+                url       = "https://read.tracing.api.nebius.cloud/projects/{{ .Values.nebius.projectId }}/tempo"
+                isDefault = false
+                jsonData = {
+                  httpHeaderName1 = "Authorization"
+                }
+                secureJsonData = {
+                  httpHeaderValue1 = "Bearer {{ .Values.nebius.accessToken }}"
+                }
+                version = 0
+              },
+            ]
+          }
         }
       }
     }

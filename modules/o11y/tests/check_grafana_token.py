@@ -395,6 +395,142 @@ def main():
         ):
             raise RuntimeError("Successful cleanup retry left local credentials behind")
 
+        # Exercise two consecutive, finalized rotations. The first replacement
+        # preserves key 1 while installing key 2. Simulate successful datasource
+        # validation by deleting key 1 and its local backup, then rotate again to
+        # key 3 and prove destroy cleans up keys 3 and 2.
+        consecutive = fixture / "consecutive-rotations"
+        consecutive.mkdir()
+        consecutive_current_token = consecutive / "grafana_access_token.txt"
+        consecutive_current_metadata = (
+            consecutive / "grafana_access_token.metadata.json"
+        )
+        consecutive_previous_token = (
+            consecutive / "grafana_access_token.previous.txt"
+        )
+        consecutive_previous_metadata = (
+            consecutive / "grafana_access_token.previous.metadata.json"
+        )
+        consecutive_log = consecutive / "nebius-calls.log"
+        consecutive_environment = environment.copy()
+        consecutive_environment.update(
+            {
+                "CURRENT_TOKEN_FILE": str(consecutive_current_token),
+                "CURRENT_METADATA_FILE": str(consecutive_current_metadata),
+                "PREVIOUS_TOKEN_FILE": str(consecutive_previous_token),
+                "PREVIOUS_METADATA_FILE": str(consecutive_previous_metadata),
+                "PARENT_ID": "project-test",
+                "SERVICE_ACCOUNT_ID": "service-account-test",
+                "FAKE_NEBIUS_LOG": str(consecutive_log),
+            }
+        )
+
+        # Clean first issue followed by the first requested rotation.
+        for _ in range(2):
+            subprocess.run(
+                ["/bin/bash", helper, "issue"],
+                cwd=consecutive,
+                env=consecutive_environment,
+                check=True,
+            )
+
+        if consecutive_current_token.read_text().strip() != (
+            "fixture-observability-token-2"
+        ):
+            raise RuntimeError("The first rotation did not install key 2")
+        if consecutive_previous_token.read_text().strip() != (
+            "fixture-observability-token-1"
+        ):
+            raise RuntimeError("The first rotation did not preserve key 1")
+
+        # Simulate successful datasource validation and operator finalization.
+        first_previous_key_id = json.loads(
+            consecutive_previous_metadata.read_text()
+        )["id"]
+        subprocess.run(
+            [
+                "nebius",
+                "iam",
+                "static-key",
+                "delete",
+                "--id",
+                first_previous_key_id,
+            ],
+            cwd=consecutive,
+            env=consecutive_environment,
+            check=True,
+            stdout=subprocess.DEVNULL,
+        )
+        consecutive_previous_token.unlink()
+        consecutive_previous_metadata.unlink()
+
+        # A second requested rotation must now install key 3 and preserve key 2.
+        subprocess.run(
+            ["/bin/bash", helper, "issue"],
+            cwd=consecutive,
+            env=consecutive_environment,
+            check=True,
+        )
+        if consecutive_current_token.read_text().strip() != (
+            "fixture-observability-token-3"
+        ):
+            raise RuntimeError("The second rotation did not install key 3")
+        if consecutive_previous_token.read_text().strip() != (
+            "fixture-observability-token-2"
+        ):
+            raise RuntimeError("The second rotation did not preserve key 2")
+        if json.loads(consecutive_current_metadata.read_text())["id"] != (
+            "static-key-3"
+        ):
+            raise RuntimeError("The second rotation recorded the wrong current key ID")
+        if json.loads(consecutive_previous_metadata.read_text())["id"] != (
+            "static-key-2"
+        ):
+            raise RuntimeError("The second rotation recorded the wrong previous key ID")
+
+        subprocess.run(
+            ["/bin/bash", helper, "cleanup"],
+            cwd=consecutive,
+            env=consecutive_environment,
+            check=True,
+        )
+        if any(
+            path.exists()
+            for path in (
+                consecutive_current_token,
+                consecutive_current_metadata,
+                consecutive_previous_token,
+                consecutive_previous_metadata,
+            )
+        ):
+            raise RuntimeError("Two-rotation cleanup left local credentials behind")
+
+        consecutive_calls = consecutive_log.read_text().splitlines()
+        consecutive_issues = [
+            call for call in consecutive_calls if call.startswith("issue:")
+        ]
+        if [call.split(":", 2)[1] for call in consecutive_issues] != [
+            "1",
+            "2",
+            "3",
+        ]:
+            raise RuntimeError(
+                "Expected an initial issue and two consecutive rotations; "
+                f"got {consecutive_issues}"
+            )
+        consecutive_deletes = [
+            call for call in consecutive_calls if call.startswith("delete:")
+        ]
+        if consecutive_deletes != [
+            "delete:static-key-1",
+            "delete:static-key-3",
+            "delete:static-key-2",
+        ]:
+            raise RuntimeError(
+                "Expected first-rotation finalization followed by cleanup of the "
+                f"second rotation; got {consecutive_deletes}"
+            )
+
 
 if __name__ == "__main__":
     main()
