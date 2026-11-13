@@ -78,7 +78,7 @@ nodesets:
           %{~ if nodeset.resources.gpus > 0 ~}
           customEnv:
             - name: "NVIDIA_DRIVER_CAPABILITIES"
-              value: "compute,graphics,utility,video"
+              value: "compute,graphics,utility,video,ngx"
           %{~ endif ~}
           resources:
             cpu: ${floor(nodeset.resources.cpu_cores * 1000)}m
