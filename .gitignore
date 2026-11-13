@@ -38,6 +38,8 @@ terraform.rc
 .DS_Store
 
 *.pem
+# Public certificate fixtures for offline trust regression tests.
+!/k8s-inference/tests/ca-trust/*.pem
 
 # Local variables for the core Terraform examples; commit .example files instead.
 /k8s-training/terraform.tfvars
