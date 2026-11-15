@@ -153,18 +153,32 @@ resource "nebius_mk8s_v1_node_group" "cpu-only" {
 # GPU NODE GROUPS
 #################
 data "nebius_billing_v1_pricing_policy" "gpu_spot" {
-  count = var.gpu_node_groups > 0 && anytrue([for pool in local.gpu_groups : pool.preemptible]) && var.gpu_nodes_spot_pricing_policy_id != null && !local.gb300_enabled ? 1 : 0
+  count = var.gpu_node_groups > 0 && var.gpu_nodes_spot_pricing_policy_id != null && anytrue([
+    for pool in local.gpu_groups : pool.preemptible && pool.spot_pricing_policy_id == var.gpu_nodes_spot_pricing_policy_id
+  ]) && !local.gb300_enabled ? 1 : 0
 
   id = var.gpu_nodes_spot_pricing_policy_id
 }
 
+data "nebius_billing_v1_pricing_policy" "gpu_spot_override" {
+  for_each = !local.gb300_enabled ? toset(compact([
+    for pool in local.gpu_groups : pool.preemptible && pool.spot_pricing_policy_id != var.gpu_nodes_spot_pricing_policy_id ? pool.spot_pricing_policy_id : null
+  ])) : toset([])
+
+  id = each.value
+}
+
 # Validate capped pricing policies once before creating GPU node groups.
 resource "terraform_data" "gpu_spot_pricing_validation" {
-  count = var.gpu_node_groups > 0 && var.gpu_nodes_spot_pricing_policy_id != null && !local.gb300_enabled ? 1 : 0
+  count = var.gpu_node_groups > 0 && var.gpu_nodes_spot_pricing_policy_id != null && anytrue([
+    for pool in local.gpu_groups : pool.preemptible && pool.spot_pricing_policy_id == var.gpu_nodes_spot_pricing_policy_id
+  ]) && !local.gb300_enabled ? 1 : 0
 
   lifecycle {
     precondition {
-      condition     = anytrue([for pool in local.gpu_groups : pool.preemptible])
+      condition = anytrue([
+        for pool in local.gpu_groups : pool.preemptible && pool.spot_pricing_policy_id == var.gpu_nodes_spot_pricing_policy_id
+      ])
       error_message = "gpu_nodes_spot_pricing_policy_id requires at least one preemptible GPU pool."
     }
 
@@ -179,9 +193,29 @@ resource "terraform_data" "gpu_spot_pricing_validation" {
       condition = anytrue([for pool in local.gpu_groups : pool.preemptible]) ? alltrue([
         for pool in local.gpu_groups : try(
           data.nebius_billing_v1_pricing_policy.gpu_spot[0].compute_instance_spec.v1.platform == pool.platform, false
-        ) if pool.preemptible
+        ) if pool.preemptible && pool.spot_pricing_policy_id == var.gpu_nodes_spot_pricing_policy_id
       ]) : true
-      error_message = "gpu_nodes_spot_pricing_policy_id must match every preemptible GPU pool's platform."
+      error_message = "gpu_nodes_spot_pricing_policy_id must match every GPU pool that uses it."
+    }
+  }
+}
+
+resource "terraform_data" "gpu_spot_pricing_override_validation" {
+  for_each = data.nebius_billing_v1_pricing_policy.gpu_spot_override
+
+  lifecycle {
+    precondition {
+      condition     = each.value.parent_id == var.parent_id
+      error_message = "A GPU pool spot pricing policy must reference a pricing policy in parent_id."
+    }
+
+    precondition {
+      condition = alltrue([
+        for pool in local.gpu_groups : try(
+          each.value.compute_instance_spec.v1.platform == pool.platform, false
+        ) if pool.preemptible && pool.spot_pricing_policy_id == each.key
+      ])
+      error_message = "A GPU pool spot pricing policy must match that pool's platform."
     }
   }
 }
@@ -189,7 +223,7 @@ resource "terraform_data" "gpu_spot_pricing_validation" {
 resource "nebius_mk8s_v1_node_group" "gpu" {
   count = local.gb300_enabled ? 0 : var.gpu_node_groups
 
-  depends_on = [terraform_data.gpu_spot_pricing_validation]
+  depends_on = [terraform_data.gpu_spot_pricing_validation, terraform_data.gpu_spot_pricing_override_validation]
 
   lifecycle {
     precondition {
@@ -250,12 +284,12 @@ resource "nebius_mk8s_v1_node_group" "gpu" {
     gpu_settings = var.gpu_nodes_driverfull_image ? { drivers_preset = local.device_preset } : null
     preemptible  = local.gpu_groups[count.index].preemptible ? {} : null
     follows_spot_price = (
-      local.gpu_groups[count.index].preemptible && var.gpu_nodes_spot_pricing_policy_id == null
+      local.gpu_groups[count.index].preemptible && local.gpu_groups[count.index].spot_pricing_policy_id == null
     ) ? {} : null
     spot_pricing_policy = (
-      local.gpu_groups[count.index].preemptible && var.gpu_nodes_spot_pricing_policy_id != null
+      local.gpu_groups[count.index].preemptible && local.gpu_groups[count.index].spot_pricing_policy_id != null
       ) ? {
-      id = var.gpu_nodes_spot_pricing_policy_id
+      id = local.gpu_groups[count.index].spot_pricing_policy_id
     } : null
 
     local_disks = var.gpu_enable_local_disks ? {

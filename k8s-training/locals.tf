@@ -1,16 +1,17 @@
 locals {
   gpu_group_defaults = {
-    platform           = local.gpu_nodes_platform
-    preset             = local.gpu_nodes_preset
-    attach_gpu_cluster = local.enable_gpu_cluster
-    fixed_count        = var.gpu_nodes_fixed_count_per_group
-    autoscaling        = var.gpu_nodes_autoscaling
-    labels             = {}
-    taints             = null
-    preemptible        = var.gpu_nodes_preemptible
-    disk_size          = tonumber(var.gpu_disk_size)
-    disk_type          = var.gpu_disk_type
-    reservation_policy = var.gpu_nodes_reservation_policy
+    platform               = local.gpu_nodes_platform
+    preset                 = local.gpu_nodes_preset
+    attach_gpu_cluster     = local.enable_gpu_cluster
+    fixed_count            = var.gpu_nodes_fixed_count_per_group
+    autoscaling            = var.gpu_nodes_autoscaling
+    labels                 = {}
+    taints                 = null
+    preemptible            = var.gpu_nodes_preemptible
+    disk_size              = tonumber(var.gpu_disk_size)
+    disk_type              = var.gpu_disk_type
+    reservation_policy     = var.gpu_nodes_reservation_policy
+    spot_pricing_policy_id = var.gpu_nodes_spot_pricing_policy_id
   }
   gpu_group_overrides = concat(var.gpu_node_group_overrides, [for index in range(var.gpu_node_groups) : { labels = {} }])
   gpu_groups = [for index in range(var.gpu_node_groups) : merge(

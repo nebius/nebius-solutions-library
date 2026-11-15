@@ -272,7 +272,8 @@ variable "gpu_node_group_overrides" {
       min_size = optional(number)
       max_size = optional(number)
     }))
-    preemptible = optional(bool)
+    preemptible            = optional(bool)
+    spot_pricing_policy_id = optional(string)
     reservation_policy = optional(object({
       policy          = optional(string)
       reservation_ids = optional(list(string))
@@ -291,6 +292,17 @@ variable "gpu_node_group_overrides" {
   validation {
     condition     = length(var.gpu_node_group_overrides) <= var.gpu_node_groups
     error_message = "GPU overrides must fit the existing gpu_node_groups count."
+  }
+
+  validation {
+    condition = alltrue([
+      for pool in var.gpu_node_group_overrides :
+      pool.spot_pricing_policy_id == null ? true : (
+        trimspace(pool.spot_pricing_policy_id) != "" &&
+        coalesce(pool.preemptible, var.gpu_nodes_preemptible)
+      )
+    ])
+    error_message = "A GPU pool spot pricing policy must be non-empty and applies only to a preemptible pool."
   }
 
   validation {
