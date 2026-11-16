@@ -272,7 +272,7 @@ resources:
               resources:
                 requests:
                   memory: ${resources.dcgm_exporter.memory}Gi
-                  cpu: ${resources.dcgm_exporter.cpu}m
+                  cpu: ${resources.dcgm_exporter.cpu * 1000}m
                 limits:
                   memory: ${resources.dcgm_exporter.memory}Gi
 
