@@ -79,9 +79,11 @@ resource "helm_release" "soperator_fluxcd_cm" {
     dcgm_exporter_enabled          = var.dcgm_exporter_enabled
     enroot_direct_squashfs_enabled = var.enroot_direct_squashfs_enabled
     # The shared jail must retain dockerd when either login or workers use Docker.
-    docker_enabled       = var.login_docker_enabled || anytrue([for nodeset in var.worker_nodesets : nodeset.node_local_image_storage.enabled])
-    login_docker_enabled = var.login_docker_enabled
-    pam_slurm_adopt      = var.pam_slurm_adopt
+    docker_enabled               = var.login_image_storage.enabled || anytrue([for nodeset in var.worker_nodesets : nodeset.node_local_image_storage.enabled])
+    login_docker_enabled         = var.login_image_storage.enabled
+    login_image_storage          = var.login_image_storage
+    login_user_isolation_enabled = var.login_user_isolation_enabled
+    pam_slurm_adopt              = var.pam_slurm_adopt
 
     tailscale_enabled       = var.tailscale_enabled
     apparmor_profile        = local.apparmor_profile

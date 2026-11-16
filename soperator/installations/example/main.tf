@@ -608,8 +608,16 @@ module "slurm" {
   }
   login_autoscaling = var.slurm_nodeset_login.autoscaling
 
-  login_docker_enabled = var.slurm_login_docker_enabled
-  pam_slurm_adopt      = var.pam_slurm_adopt
+  login_image_storage = {
+    enabled = var.slurm_login_image_disk.enabled
+    spec = var.slurm_login_image_disk.enabled ? {
+      size_gibibytes     = var.slurm_login_image_disk.spec.size_gibibytes
+      filesystem_type    = var.slurm_login_image_disk.spec.filesystem_type
+      storage_class_name = replace("${local.storage_class_prefix}-${lower(var.slurm_login_image_disk.spec.disk_type)}-${lower(var.slurm_login_image_disk.spec.filesystem_type)}", "_", "-")
+    } : null
+  }
+  login_user_isolation_enabled = var.slurm_login_user_isolation_enabled
+  pam_slurm_adopt              = var.pam_slurm_adopt
 
   # Resolved tier (auto-derived from the worker count unless var.sizing_tier_override forces it).
   sizing_tier_override = module.sizing.sizing_tier

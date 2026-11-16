@@ -524,12 +524,6 @@ resources:
                 emptyDir:
                   sizeLimit: ${slurm_cluster.nodes.worker.resources.ephemeral_storage}Gi
 
-              %{~ if login_docker_enabled ~}
-              - name: login-image-storage
-                emptyDir:
-                  sizeLimit: 20Gi
-              %{~ endif ~}
-
               %{~ if slurm_cluster.nfs.enabled ~}
               - name: nfs
                 nfs:
@@ -703,9 +697,9 @@ resources:
                 %{~ if login_docker_enabled ~}
                 docker:
                   enabled: true
-                userIsolation:
-                  enabled: true
                 %{~ endif ~}
+                userIsolation:
+                  enabled: ${login_user_isolation_enabled}
                 %{~ if slurm_cluster.nodes.login.autoscaling != null ~}
                 autoscaling:
                   enabled: ${slurm_cluster.nodes.login.autoscaling.enabled}
@@ -789,7 +783,13 @@ resources:
                     %{~ if login_docker_enabled ~}
                     - name: login-image-storage
                       mountPath: /mnt/image-storage
-                      volumeSourceName: login-image-storage
+                      volumeClaimTemplateSpec:
+                        accessModes:
+                          - ReadWriteOnce
+                        storageClassName: ${login_image_storage.spec.storage_class_name}
+                        resources:
+                          requests:
+                            storage: ${login_image_storage.spec.size_gibibytes}Gi
                     %{~ endif ~}
                     %{~ if slurm_cluster.nfs.enabled ~}
                     - mountPath: ${slurm_cluster.nfs.mount_path}
