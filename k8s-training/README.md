@@ -114,6 +114,19 @@ gpu_nodes_preset = "8gpu-128vcpu-1600gb" # The GPU node preset. Only nodes with 
 
 ```
 
+### GPU software and node labels
+
+For GPU nodes with preinstalled drivers, including B300 and GB300, this recipe
+installs the NVIDIA Device Plugin Marketplace application (`nvidia-device-plugin`).
+The application includes GPU Feature Discovery (GFD) and Node Feature Discovery
+(NFD), which provide GPU node labels such as `nvidia.com/gpu.product`.
+
+The application's device plugin component is disabled by default. GPU allocation
+is handled separately: by the MK8s built-in device plugin, or by DRA on GB300 when
+enabled. The Marketplace application supplies discovery in either case.
+
+For nodes without preinstalled drivers, the recipe uses GPU Operator instead.
+
 ### Preemptible node pricing
 
 Regular GPU node groups continue to use Nebius's implicit on-demand default.
@@ -292,7 +305,13 @@ configuration shown above. DRA applies to every rack created by `rack_count`.
 The recipe installs one NVIDIA GPU DRA Helm release (`0.4.1`) per cluster, with
 its kubelet plugins selected onto all DRA-enabled GB300 nodes. MK8s disables its
 built-in device plugin and provides managed DRANet on fabric-attached GPU nodes.
-The recipe also skips its separate device-plugin installation.
+
+Keep the Device Plugin Marketplace application installed when enabling DRA;
+its GFD and NFD components are still needed for
+[GPU node labels](#gpu-software-and-node-labels).
+
+If you installed GFD/NFD separately, reconcile that installation before applying
+this update to avoid duplicate discovery components.
 
 After applying, check driver readiness and advertised devices:
 
@@ -318,14 +337,15 @@ The recipe does not create workload claims or ComputeDomains. See the
 [public MK8s DRA setting](https://docs.nebius.com/terraform-provider/reference/resources/mk8s_v1_node_group#nestedatt--template--gpu_settings)
 and [NVIDIA DRA documentation](https://github.com/NVIDIA/k8s-dra-driver-gpu/tree/v0.4.1).
 
-DRA is disabled by default. With `dra = false`, the existing device-plugin and
-MK8s-managed static IMEX path remains in use. When upgrading an existing non-DRA
+DRA is disabled by default. With `dra = false`, the MK8s built-in device plugin
+and managed static IMEX remain in use. When upgrading an existing non-DRA
 deployment, check whether the plan changes an unset `gpu_settings.dra` to `false`.
 If it does, treat it as a node-group update and schedule a maintenance window.
 
 Prefer selecting DRA when creating the node groups. To enable it on an existing
-deployment, schedule a maintenance window. The device-plugin removal and node
-rollout are not ordered, so GPU allocation can be unavailable during the change:
+deployment, schedule a maintenance window. GPU allocation changes from the
+MK8s built-in device plugin to DRA during the node rollout and can be unavailable
+until the DRA components are ready:
 
 1. Pause GPU workload controllers or job submissions, then stop existing GPU
    workloads so legacy GPU pods are not recreated during the migration.
