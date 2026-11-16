@@ -335,6 +335,14 @@ slurm_login_image_disk = {
 # Per-user cgroup isolation for SSH sessions. Required when login Docker is enabled.
 slurm_login_user_isolation_enabled = true
 
+# When enabled, users can only SSH to worker nodes where they have running Slurm jobs.
+# Exempt users and groups can connect without a job.
+pam_slurm_adopt = {
+  enabled       = false
+  exempt_users  = []
+  exempt_groups = []
+}
+
 # Whether to enable Tailscale VPN.
 tailscale_enabled = false
 
