@@ -118,8 +118,23 @@ python3 k8s/alert_layer/falcon_alert_layer.py \
 ## Cross-node gate evidence test
 
 The cross-node correlation gate (suppress if both nodes show equal event rates) was
-evaluated as an evidence test.  It is NOT adopted in the alert layer.  To reproduce
-the test on saved fault trial logs:
+evaluated as an evidence test.  It is NOT adopted in the alert layer.
+
+**R3 evidence test results (2026-11-17):**
+
+| Dataset | Windows evaluated | Gate would suppress | Interpretation |
+|---|---|---|---|
+| R3 Megatron healthy soak (45K iters, both nodes) | 118 | 91 (77.1%) | True suppressions — healthy symmetric pattern |
+| Megatron fault trials (3 × 150ms, both nodes combined) | 13 | 0 (0%) | No false negatives — straggler creates asymmetry |
+| DDP/FSDP fault trials | n/a | 0 | Fault asymmetry, gate would not suppress |
+
+The gate is highly selective (77% suppression of healthy windows, 0% of fault windows),
+which is a useful property — but it is NOT adopted because the classification approach
+(F1+F2) already achieves 0 false STRAGGLER in healthy and 21/21 fault detection, making
+the gate unnecessary.  Additionally, the steering note prohibits adoption regardless of
+evidence (Decision 9 in `docs/K8S_DECISIONS_PENDING.md`).
+
+To reproduce the test on saved fault trial logs:
 
 ```bash
 python3 k8s/alert_layer/falcon_alert_layer.py \
