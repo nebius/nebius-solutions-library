@@ -156,15 +156,17 @@ sample_pod() {
         warn "$pod: nvidia-smi unavailable — skipping GPU metrics"
         return 0
     }
-    # CSV columns: index, clocks.gr [MHz], clocks.mem [MHz], power.draw [W], temperature.gpu [C], throttle_reasons
-    printf '%s\n' "$smi_out" | while IFS=', ' read -r gpu_idx clk_gr clk_mem pwr tmp throttle; do
-        # Strip units (nvidia-smi appends " MHz", " W", " C")
-        clk_gr="${clk_gr%% *}"
-        clk_mem="${clk_mem%% *}"
-        pwr="${pwr%% *}"
-        tmp="${tmp%% *}"
-        # throttle may contain spaces in some nvidia-smi versions; collapse
-        throttle="${throttle// /}"
+    # CSV format: "0, 1980 MHz, 3201 MHz, 154.99 W, 36, 0x0000000000000000"
+    # Fields are comma-separated; each field may contain a space + unit suffix.
+    # Use awk to split on comma only, then strip units within each field.
+    printf '%s\n' "$smi_out" | awk -F', *' '{
+        # Strip trailing unit suffixes (MHz, W, C, etc.) from each field
+        for (i=1; i<=NF; i++) {
+            gsub(/ .*$/, "", $i)
+        }
+        # Fields: 1=index, 2=clk_gr(MHz), 3=clk_mem(MHz), 4=power(W), 5=temp(C), 6=throttle
+        print $1, $2, $3, $4, $5, $6
+    }' | while read -r gpu_idx clk_gr clk_mem pwr tmp throttle; do
         emit "$ts" "$pod" "gpu${gpu_idx}_clocks_gr_mhz"    "$clk_gr"
         emit "$ts" "$pod" "gpu${gpu_idx}_clocks_mem_mhz"   "$clk_mem"
         emit "$ts" "$pod" "gpu${gpu_idx}_power_draw_w"      "$pwr"
