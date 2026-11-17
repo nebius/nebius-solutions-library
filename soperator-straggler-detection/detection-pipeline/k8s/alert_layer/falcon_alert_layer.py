@@ -237,7 +237,22 @@ def compute_f2(events: List[Stage3Event]) -> Tuple[bool, str]:
         # (a) Single-low-outlier pattern
         n_low = sum(1 for z in zs if z <= DEFAULT_LOW_Z_THRESH)
         n_near_or_above = sum(1 for z in zs if z >= -0.5)
+        # Also check for extreme single outlier (Z ≤ -5): if one member is extremely
+        # far below, the others may cluster so tightly that MAD is small and even
+        # slight variations put them below the -0.5 Z threshold, but they're all
+        # clearly "normal" relative to each other.  An extreme single outlier (Z ≤ -5)
+        # with the remaining members within a 2× range of each other is unambiguous.
+        n_extreme_low = sum(1 for z in zs if z <= -5.0)
+        peers = [v for v in vals if v not in sorted(vals)[:1] or True]  # all but minimum
+        min_v = min(vals)
+        peers_excl_min = sorted(vals)[1:]  # exclude the minimum
+        peer_range_ok = (max(peers_excl_min) / max(min(peers_excl_min), 1e-9) < 3.0
+                         if len(peers_excl_min) >= 2 else True)
         if n_low == 1 and n_near_or_above >= len(vals) - 1:
+            straggler_count += 1
+            continue
+        if n_extreme_low == 1 and peer_range_ok:
+            # Extreme single outlier with peers tightly clustered
             straggler_count += 1
             continue
 
