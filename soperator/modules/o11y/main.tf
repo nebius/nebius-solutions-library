@@ -147,12 +147,15 @@ EOT
     when        = destroy
     working_dir = path.root
     interpreter = ["/bin/bash", "-c"]
-    command     = <<EOT
+    command = <<EOT
 set -e
 
 unset NEBIUS_IAM_TOKEN
 export NEBIUS_IAM_TOKEN=$(nebius --profile ${self.triggers_replace.o11y_profile} iam get-access-token)
-O11Y_PROJECT_NAME="${self.triggers_replace.o11y_resources_name}-${self.triggers_replace.region}"
+O11Y_PROJECT_NAME="${try(
+    format("%s-%s", self.triggers_replace.o11y_resources_name, self.triggers_replace.region),
+    self.triggers_replace.o11y_resources_name
+)}"
 
 output=$(nebius iam project get-by-name --name "$O11Y_PROJECT_NAME" --parent-id "${self.triggers_replace.o11y_iam_tenant_id}" --format json)
 status=$?
@@ -175,7 +178,7 @@ if [ ! -z "$GROUP" ] && [ "$GROUP" != "null" ]; then
 fi
 
 EOT
-  }
+}
 }
 
 resource "terraform_data" "opentelemetry_collector_cm" {
