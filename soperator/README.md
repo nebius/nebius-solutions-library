@@ -227,6 +227,15 @@ Configure rollout separately for each entry in `slurm_nodeset_workers`:
 Every generated Slurm NodeSet and Kubernetes worker node group inherits the corresponding setting from its source
 nodeset, including GB300 rack splits. Other Kubernetes node groups do not use this drain timeout.
 
+Workers advertise `nodeType` in Slurm `Extra`: `ephemeral` when `ephemeral_nodes = true`, otherwise `static`.
+The type is added alongside `ib_pod` and `ib_su`; existing Slurm `Features` are preserved.
+After a worker registers with Slurm, select its type when submitting a job:
+
+```bash
+sbatch --extra='nodeType=static' --wrap='hostname'
+sbatch --extra='nodeType=ephemeral' --wrap='hostname'
+```
+
 Edit `terraform.tfvars` with your requirements:
 
 ```hcl

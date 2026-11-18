@@ -12,7 +12,7 @@ mock_provider "helm" {}
 # The Slurm "Extra" field travels to slurmd as a *quoted* JSON document, so the
 # NodeSet values must keep two levels of escaping: the YAML scalar carries the
 # literal surrounding quotes and backslash-escaped inner quotes, and only after
-# YAML parsing does the chart see
+# YAML parsing does the chart see a value such as
 #   "{ \"ib_pod\": \"$TOPO_SWITCH_TIER2\", \"ib_su\": \"$TOPO_SWITCH_TIER1\" }"
 # Rendering the bare { "ib_pod": ... } object instead loses one level and feeds
 # slurmd an unquoted Extra.
@@ -27,8 +27,13 @@ variables {
 
   # Written as a heredoc on purpose: HCL leaves backslashes alone here, so this
   # is byte-for-byte the line the rendered values file must contain.
-  expected_dynamic_line = chomp(<<EOT
-dynamic: "\"{ \\\"ib_pod\\\": \\\"$TOPO_SWITCH_TIER2\\\", \\\"ib_su\\\": \\\"$TOPO_SWITCH_TIER1\\\" }\""
+  expected_static_dynamic_line = chomp(<<EOT
+dynamic: "\"{ \\\"ib_pod\\\": \\\"$TOPO_SWITCH_TIER2\\\", \\\"ib_su\\\": \\\"$TOPO_SWITCH_TIER1\\\", \\\"nodeType\\\": \\\"static\\\" }\""
+EOT
+  )
+
+  expected_ephemeral_dynamic_line = chomp(<<EOT
+dynamic: "\"{ \\\"ib_pod\\\": \\\"$TOPO_SWITCH_TIER2\\\", \\\"ib_su\\\": \\\"$TOPO_SWITCH_TIER1\\\", \\\"nodeType\\\": \\\"ephemeral\\\" }\""
 EOT
   )
 
@@ -83,35 +88,87 @@ run "single_nodeset_renders_quoted_node_extra" {
     condition = [
       for line in split("\n", module.slurm.debug_flux_release_nodesets_rendered) :
       trimspace(line) if strcontains(line, "dynamic:")
-    ] == [var.expected_dynamic_line]
+    ] == [var.expected_static_dynamic_line]
     error_message = <<-EOT
       NodeSet dynamic config must render as
-        ${var.expected_dynamic_line}
+        ${var.expected_static_dynamic_line}
       got
         ${join(" ||| ", [for line in split("\n", module.slurm.debug_flux_release_nodesets_rendered) : trimspace(line) if strcontains(line, "dynamic:")])}
     EOT
   }
 }
 
-# Every worker NodeSet carries the same Extra, so adding NodeSets must not
-# change the escaping on any of them.
+# Static NodeSets keep the same Extra whether their mode is defaulted or explicit.
 run "every_nodeset_renders_quoted_node_extra" {
   command = plan
 
   variables {
-    slurm_nodeset_workers = [var.cpu_worker, var.second_cpu_worker]
+    slurm_nodeset_workers = [merge(var.cpu_worker, { ephemeral_nodes = false }), var.second_cpu_worker]
   }
 
   assert {
     condition = [
       for line in split("\n", module.slurm.debug_flux_release_nodesets_rendered) :
       trimspace(line) if strcontains(line, "dynamic:")
-    ] == [var.expected_dynamic_line, var.expected_dynamic_line]
+    ] == [var.expected_static_dynamic_line, var.expected_static_dynamic_line]
     error_message = <<-EOT
       Both NodeSets must render dynamic config as
-        ${var.expected_dynamic_line}
+        ${var.expected_static_dynamic_line}
       got
         ${join(" ||| ", [for line in split("\n", module.slurm.debug_flux_release_nodesets_rendered) : trimspace(line) if strcontains(line, "dynamic:")])}
     EOT
+  }
+}
+
+run "ephemeral_nodeset_renders_quoted_node_extra" {
+  command = plan
+
+  variables {
+    slurm_nodeset_workers = [merge(var.cpu_worker, {
+      ephemeral_nodes                = true
+      initial_number_ephemeral_nodes = 1
+    })]
+  }
+
+  assert {
+    condition = [
+      for line in split("\n", module.slurm.debug_flux_release_nodesets_rendered) :
+      trimspace(line) if strcontains(line, "dynamic:")
+    ] == [var.expected_ephemeral_dynamic_line]
+    error_message = "Ephemeral NodeSets must preserve topology fields and quote the node type in Slurm Extra."
+  }
+}
+
+run "mixed_nodesets_preserve_extra_and_custom_features" {
+  command = plan
+
+  variables {
+    slurm_nodeset_workers = [
+      merge(var.cpu_worker, { features = ["custom_static", "shared_feature"] }),
+      merge(var.second_cpu_worker, {
+        ephemeral_nodes                = true
+        initial_number_ephemeral_nodes = 0
+        features                       = ["custom_ephemeral", "shared_feature"]
+      }),
+    ]
+  }
+
+  assert {
+    condition = [
+      for line in split("\n", module.slurm.debug_flux_release_nodesets_rendered) :
+      trimspace(line) if strcontains(line, "dynamic:")
+    ] == [var.expected_static_dynamic_line, var.expected_ephemeral_dynamic_line]
+    error_message = "Each NodeSet must preserve topology fields and advertise its own type, including with zero initial ephemeral workers."
+  }
+
+  assert {
+    condition = [
+      for nodeset in yamldecode(module.slurm.debug_flux_release_nodesets_rendered).nodesets.overrideValues.nodesets :
+      nodeset.nodeConfig.features
+      ] == [
+      ["cpu_d3", "network_ssd", "custom_static", "shared_feature"],
+      ["cpu_d3", "network_ssd", "custom_ephemeral", "shared_feature"],
+    ]
+    error_message = "Adding nodeType to Extra must preserve platform, boot-disk, and custom Features for every NodeSet."
   }
 }
