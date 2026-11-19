@@ -4,6 +4,7 @@ case "${1:-}" in
   issue)
     set -euo pipefail
     umask 077
+    : "${CLUSTER_ID:?A cluster ID is required to identify the Grafana deployment}"
 
     TOKEN_TMP=""
     METADATA_TMP=""
@@ -76,10 +77,8 @@ case "${1:-}" in
       fi
     fi
 
-    # A clean first apply has neither local credentials nor an active
-    # Observability key for this service account. If an active remote key exists,
-    # missing local files mean this is another machine/runner and replacing the
-    # generator would orphan the credential that Grafana currently uses.
+    # Other applications and clusters can use the same service account.
+    # Only this deployment's active key indicates missing local credentials.
     if [ ! -e "$CURRENT_TOKEN_FILE" ] && [ ! -e "$CURRENT_METADATA_FILE" ]; then
       if ! EXISTING_KEYS_JSON=$(nebius iam static-key list \
         --parent-id "$PARENT_ID" \
@@ -89,17 +88,19 @@ case "${1:-}" in
         exit 1
       fi
 
-      EXISTING_KEY_ID=$(printf '%s' "$EXISTING_KEYS_JSON" | jq -r --arg SA "$SERVICE_ACCOUNT_ID" '
+      EXISTING_KEY_ID=$(printf '%s' "$EXISTING_KEYS_JSON" | jq -r --arg SA "$SERVICE_ACCOUNT_ID" --arg cluster "$CLUSTER_ID" '
         def items: if type == "array" then . else (.items // []) end;
         [items[]
           | select(.spec.service == "OBSERVABILITY")
           | select(.spec.account.service_account.id == $SA)
+          | select(.metadata.labels["solutions-library-app"] == "grafana")
+          | select(.metadata.labels["mk8s-cluster-id"] == $cluster)
           | select(.status.active == true)]
         | first
         | .metadata.id // empty')
 
       if [ -n "$EXISTING_KEY_ID" ]; then
-        echo "Cannot replace Grafana Observability key: active key $EXISTING_KEY_ID exists but the local credential files are missing" >&2
+        echo "Cannot replace Grafana Observability key: cluster $CLUSTER_ID has active key $EXISTING_KEY_ID but the local credential files are missing" >&2
         echo "Run the rotation from the original machine/runner or recover the current credential files first" >&2
         exit 1
       fi
@@ -141,6 +142,7 @@ case "${1:-}" in
       --parent-id "$PARENT_ID" \
       --account-service-account-id "$SERVICE_ACCOUNT_ID" \
       --service observability \
+      --labels "solutions-library-app=grafana,mk8s-cluster-id=$CLUSTER_ID" \
       --name "$KEY_NAME" \
       --format json)
 

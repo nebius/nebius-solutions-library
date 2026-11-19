@@ -539,6 +539,10 @@ state. Existing consumers that reference
 
 ### Rotating the Grafana Observability key
 
+Use a separate Terraform checkout for each deployment. Workspaces in the same
+checkout share the Grafana token filenames. Rotation and destroy use the files
+in the current directory and could revoke another deployment's key.
+
 Normal Terraform plans do not rotate the key. To request one intentional
 rotation, create and review a saved plan that explicitly replaces only the
 Grafana token generator:
@@ -576,13 +580,25 @@ request another replacement. This workflow does not automatically roll Grafana
 back to the previous credential. Resolve the failed datasource update through
 an explicit, reviewed recovery before retrying or finalizing the rotation.
 
-Rotation must run from the machine or persistent runner that holds the current
-local credential files. Before issuing a key, the helper checks for an active
-Observability key for the Grafana service account and refuses to continue if
-that remote key exists while the local credential files are missing.
+New Observability keys carry the labels `solutions-library-app=grafana` and
+`mk8s-cluster-id=<cluster-id>` at issuance. If both current credential files
+are missing, an active key with both labels for the current cluster and service
+account blocks issuance. A cluster rebuild that reuses the key leaves its
+original cluster label in place. If the files are later lost, use the original
+cluster ID when identifying the old key for manual revocation after validation.
+
+For deployments created before these labels existed, run the first rotation
+from the runner holding the original token, or restore that deployment's files
+from a trusted backup first. Legacy files lack ownership information, so check
+their origin before use. If no backup exists, identify the old key ID from a
+trusted issuance record or with the project administrator. After rotating and
+validating the replacement on all four datasources, delete the confirmed old
+key with `nebius iam static-key delete --id <confirmed-old-key-id>`.
+Several applications can share the service account, so its ID alone cannot
+identify the old key.
 
 After validation succeeds, invalidate the previous key and remove its local
-backup:
+backup from the checkout used for that rotation:
 
 ```bash
 set -euo pipefail

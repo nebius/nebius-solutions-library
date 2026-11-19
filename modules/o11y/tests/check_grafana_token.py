@@ -185,26 +185,25 @@ def main():
             "set -euo pipefail\n"
             "operation=\"$*\"\n"
             "name=\"\"\n"
+            "labels=\"\"\n"
             "key_id=\"\"\n"
             "while (( $# )); do\n"
             "  case \"$1\" in\n"
             "    --name) name=\"$2\"; shift 2 ;;\n"
+            "    --labels) labels=\"$2\"; shift 2 ;;\n"
             "    --id) key_id=\"$2\"; shift 2 ;;\n"
             "    *) shift ;;\n"
             "  esac\n"
             "done\n"
             "case \"$operation\" in\n"
             "  *\"static-key list\"*)\n"
-            "    if [ -n \"$FAKE_ACTIVE_KEY_SERVICE_ACCOUNT_ID\" ]; then\n"
-            "      printf '{\"items\":[{\"metadata\":{\"id\":\"static-key-existing\"},\"spec\":{\"service\":\"OBSERVABILITY\",\"account\":{\"service_account\":{\"id\":\"%s\"}}},\"status\":{\"active\":true}}]}\\n' \"$FAKE_ACTIVE_KEY_SERVICE_ACCOUNT_ID\"\n"
-            "    else\n"
-            "      printf '{\"items\":[]}\\n'\n"
-            "    fi\n"
+            "    printf '%s\\n' \"$FAKE_KEY_LIST\"\n"
             "    ;;\n"
             "  *\"static-key issue\"*)\n"
             "    issue_number=$(grep -c '^issue:' \"$FAKE_NEBIUS_LOG\" 2>/dev/null || true)\n"
             "    issue_number=$((issue_number + 1))\n"
             "    printf 'issue:%s:%s\\n' \"$issue_number\" \"$name\" >> \"$FAKE_NEBIUS_LOG\"\n"
+            "    printf 'labels:%s\\n' \"$labels\" >> \"$FAKE_NEBIUS_LOG\"\n"
             "    printf '{\"token\":\"fixture-observability-token-%s\"}\\n' \"$issue_number\"\n"
             "    ;;\n"
             "  *\"static-key get-by-name\"*)\n"
@@ -246,7 +245,7 @@ def main():
         environment["FAKE_DELETE_FAIL_ONCE_ID"] = ""
         environment["FAKE_DELETE_FAIL_MARKER"] = str(fixture / "unused-marker")
         environment["FAKE_DELETED_IDS_ARE_NOT_FOUND"] = "false"
-        environment["FAKE_ACTIVE_KEY_SERVICE_ACCOUNT_ID"] = ""
+        environment["FAKE_KEY_LIST"] = '{"items":[]}'
 
         subprocess.run(
             [terraform, "init", "-backend=false", "-input=false", "-no-color"],
@@ -285,8 +284,34 @@ def main():
 
         helper = fixture / "scripts/grafana-observability-key.sh"
 
-        # A replacement on a fresh runner must fail before issuing a key when an
-        # active remote key already exists; otherwise that key would be orphaned.
+        # Both keys should carry the cluster ID from the Terraform fixture.
+        expected_labels = {
+            "solutions-library-app=grafana",
+            "mk8s-cluster-id=mk8scluster-e00r7z9vfxmg1bk99s",
+        }
+        issued_labels = [
+            set(call.partition(":")[2].split(",")) for call in calls if call.startswith("labels:")
+        ]
+        if issued_labels != [expected_labels, expected_labels]:
+            raise RuntimeError("Initial issue and rotation must label keys for this deployment")
+
+        # A shared account can also have keys for other apps and clusters.
+        def listed_key(key_id, labels, *, active=True, sa="service-account-test", service="OBSERVABILITY"):
+            return {
+                "metadata": {"id": key_id, "labels": labels},
+                "spec": {"service": service, "account": {"service_account": {"id": sa}}},
+                "status": {"active": active},
+            }
+
+        owner = {"solutions-library-app": "grafana", "mk8s-cluster-id": "cluster-test"}
+        unrelated = [
+            listed_key("other-app", {**owner, "solutions-library-app": "other"}),
+            listed_key("other-cluster", {**owner, "mk8s-cluster-id": "other"}),
+            listed_key("other-account", owner, sa="other"),
+            listed_key("other-service", owner, service="CONTAINER_REGISTRY"),
+            listed_key("unlabeled", {}),
+            listed_key("inactive", owner, active=False),
+        ]
         missing_current = fixture / "missing-current"
         missing_current.mkdir()
         missing_log = missing_current / "nebius-calls.log"
@@ -305,21 +330,37 @@ def main():
                 ),
                 "PARENT_ID": "project-test",
                 "SERVICE_ACCOUNT_ID": "service-account-test",
+                "CLUSTER_ID": "cluster-test",
                 "FAKE_NEBIUS_LOG": str(missing_log),
-                "FAKE_ACTIVE_KEY_SERVICE_ACCOUNT_ID": "service-account-test",
+                "FAKE_KEY_LIST": json.dumps({"items": unrelated + [listed_key("owned-key", owner)]}),
             }
         )
-        missing_result = subprocess.run(
-            ["/bin/bash", helper, "issue"],
-            cwd=missing_current,
-            env=missing_environment,
-            capture_output=True,
-            text=True,
-        )
-        if missing_result.returncode == 0:
-            raise RuntimeError("Rotation without the current local credential must fail")
+        def issue_from_runner(**options):
+            return subprocess.run(
+                ["/bin/bash", helper, "issue"], cwd=missing_current, env=missing_environment, **options
+            )
+
+        missing_result = issue_from_runner(capture_output=True, text=True)
+        if missing_result.returncode == 0 or "owned-key" not in missing_result.stderr:
+            raise RuntimeError("Missing local files must identify the active deployment-owned key")
         if missing_log.exists() and "issue:" in missing_log.read_text():
             raise RuntimeError("Failed preflight unexpectedly issued a remote key")
+
+        missing_environment["FAKE_KEY_LIST"] = json.dumps(unrelated)
+        issue_from_runner(check=True)
+        shared_calls = missing_log.read_text().splitlines()
+        if sum(call.startswith("issue:") for call in shared_calls) != 1 or any(
+            call.startswith(("delete:", "revoke")) for call in shared_calls
+        ):
+            raise RuntimeError("A first install must issue its own key and leave unrelated keys alone")
+
+        # Pre-PR installations have a local token but no key-ID sidecar.
+        Path(missing_environment["CURRENT_METADATA_FILE"]).unlink()
+        issue_from_runner(check=True)
+        previous_token = Path(missing_environment["PREVIOUS_TOKEN_FILE"]).read_text().strip()
+        previous = json.loads(Path(missing_environment["PREVIOUS_METADATA_FILE"]).read_text())
+        if previous_token != "fixture-observability-token-1" or previous.get("legacy") is not True:
+            raise RuntimeError("Rotating a legacy token must preserve it for manual revocation")
 
         # If deletion of the previous key fails after the current key was
         # deleted, a retry must accept current-key NotFound and finish cleanup.
@@ -422,6 +463,7 @@ def main():
                 "PARENT_ID": "project-test",
                 "SERVICE_ACCOUNT_ID": "service-account-test",
                 "FAKE_NEBIUS_LOG": str(consecutive_log),
+                "CLUSTER_ID": "cluster-test",
             }
         )
 

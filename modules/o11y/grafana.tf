@@ -58,6 +58,7 @@ resource "terraform_data" "grafana_access_token" {
     working_dir = path.root
     interpreter = ["/bin/bash", "-c"]
     environment = {
+      CLUSTER_ID             = var.cluster_id
       CURRENT_TOKEN_FILE     = self.input.token_path
       CURRENT_METADATA_FILE  = self.input.metadata_path
       PREVIOUS_TOKEN_FILE    = self.input.previous_token_path

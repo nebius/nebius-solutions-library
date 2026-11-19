@@ -140,3 +140,19 @@ run "normal_apply_after_rotation_is_idempotent" {
     error_message = "A normal apply must retain the pending previous credential."
   }
 }
+
+run "cluster_rebuild_with_same_service_account" {
+  command = apply
+
+  variables {
+    cluster_id = "mk8scluster-e00r7z9vfxmg1bk99t"
+  }
+
+  assert {
+    condition = (
+      nebius_applications_v1alpha1_k8s_release.grafana[0].cluster_id == var.cluster_id &&
+      jsondecode(file(terraform_data.grafana_access_token[0].output.metadata_path)).id == "static-key-2"
+    )
+    error_message = "Grafana must deploy to the rebuilt cluster using the existing key."
+  }
+}

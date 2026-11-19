@@ -47,6 +47,9 @@ Important flags:
 - `enable_secondary_region = false` (primary-only) or `true` (two regions)
 - `gpu_nodes_*` and `cpu_nodes_*` sizing
 
+Use one Terraform checkout per deployment. Workspaces sharing a checkout also
+share Grafana credential files, including the files used during destroy.
+
 Normal applies do not rotate the Grafana Observability key. For an intentional
 rotation, run from the same machine or persistent runner that holds the current
 local Grafana credential files, then use Terraform's one-shot replacement
