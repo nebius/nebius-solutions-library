@@ -223,7 +223,7 @@ def main():
             "    if [ \"$FAKE_DELETED_IDS_ARE_NOT_FOUND\" = true ] && "
             "grep -qx \"delete:$key_id\" \"$FAKE_NEBIUS_LOG\"; then\n"
             "      printf 'ResourceNotFound: key not found\\n' >&2\n"
-            "      exit 1\n"
+            "      exit 13\n"
             "    fi\n"
             "    printf 'delete:%s\\n' \"$key_id\" >> \"$FAKE_NEBIUS_LOG\"\n"
             "    printf '{}\\n'\n"

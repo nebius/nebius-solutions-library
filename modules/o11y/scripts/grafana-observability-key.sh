@@ -31,8 +31,10 @@ case "${1:-}" in
           nebius iam static-key delete --id "$NEW_KEY_ID" >/dev/null || \
             echo "Warning: failed to delete newly issued key $NEW_KEY_ID" >&2
         else
-          nebius iam static-key revoke --token "$NEW_TOKEN" >/dev/null || \
-            echo "Warning: failed to revoke newly issued key" >&2
+          if ! nebius iam static-key revoke --token "$NEW_TOKEN" >/dev/null; then
+            echo "Failed to revoke the newly issued key. When IAM is available, look up its ID and delete it:" >&2
+            echo "  nebius iam static-key get-by-name --parent-id $PARENT_ID --name $KEY_NAME" >&2
+          fi
         fi
 
         if [ "$HAD_CURRENT" = true ]; then
@@ -190,16 +192,19 @@ case "${1:-}" in
   cleanup)
     set -euo pipefail
 
-    already_invalidated() {
-      printf '%s\n' "$1" | grep -Eiq 'ResourceNotFound|NotFound|not found|already (deleted|revoked)|has already been (deleted|revoked)'
-    }
+    for tool in nebius jq; do
+      command -v "$tool" >/dev/null || {
+        echo "Required command not found: $tool; local credential files were retained" >&2
+        exit 1
+      }
+    done
 
     delete_credential() {
       metadata_file="$1"
       token_file="$2"
       description="$3"
       key_id=""
-      command_output=""
+      local command_output="" command_status=0
 
       if [ -s "$metadata_file" ]; then
         key_id=$(jq -r '.id // empty' "$metadata_file")
@@ -207,28 +212,26 @@ case "${1:-}" in
 
       if [ -n "$key_id" ]; then
         echo "Deleting $description Grafana Observability key: $key_id"
-        if ! command_output=$(nebius iam static-key delete --id "$key_id" 2>&1); then
-          if already_invalidated "$command_output"; then
-            echo "$description Grafana Observability key is already absent: $key_id"
-          else
-            echo "Failed to delete $description Grafana Observability key $key_id; local credential files were retained" >&2
-            return 1
-          fi
-        fi
+        command_output=$(nebius iam static-key delete --id "$key_id" 2>&1) || command_status=$?
       elif [ -s "$token_file" ]; then
         echo "Revoking $description legacy Grafana Observability key"
-        if ! command_output=$(nebius iam static-key revoke --token "$(cat "$token_file")" 2>&1); then
-          if already_invalidated "$command_output"; then
-            echo "$description legacy Grafana Observability key is already revoked"
-          else
-            echo "Failed to revoke $description legacy Grafana Observability key; local credential files were retained" >&2
-            return 1
-          fi
-        fi
+        command_output=$(nebius iam static-key revoke --token "$(cat "$token_file")" 2>&1) || command_status=$?
       elif [ -e "$metadata_file" ] || [ -e "$token_file" ]; then
         echo "Cannot invalidate the $description Grafana Observability key: its local credential files are incomplete" >&2
         return 1
       fi
+
+      if [ "$command_status" -eq 0 ]; then
+        return 0
+      fi
+      # A retry can encounter a key deleted by the previous cleanup attempt.
+      if [ "$command_status" -eq 13 ] && grep -Eq \
+        '^[[:space:]]*((Error: )?rpc error: code = NotFound([[:space:]]|$)|(Resource not found )?ResourceNotFound:)' <<< "$command_output"; then
+        echo "$description Grafana Observability key is already absent"
+        return 0
+      fi
+      echo "Failed to invalidate $description Grafana Observability key (CLI exit $command_status); local credential files were retained" >&2
+      return "$command_status"
     }
 
     if [ ! -s "$CURRENT_METADATA_FILE" ] && [ ! -s "$CURRENT_TOKEN_FILE" ]; then
