@@ -530,12 +530,66 @@ Open browser to newly created URL with username “admin” and password from ou
 
 ### Output compatibility
 
-The sensitive `grafana_service_account` output no longer contains an
-`access_token` field. The Observability token is now read ephemerally and
-passed directly to the Grafana application without being stored in Terraform
-state. Existing consumers that reference
-`grafana_service_account.access_token` must remove that reference; the
-`id`, `access_key_id` and `secret_access_key` fields remain unchanged.
+The module delivers the Observability bearer token directly to Grafana.
+The `grafana_service_account` output still exposes `id`, `access_key_id` and
+`secret_access_key`. Built-in Grafana needs no migration. If another
+application reads the removed `access_token` field, migrate it before upgrading
+the stack that publishes this output.
+
+#### Migrating a token consumer
+
+1. Find callers that read the token through a module reference, Terraform
+   remote state, or a CI script that parses `terraform output`. For an
+   independently deployed application, use its own service account's static
+   key issued with `--service observability` and deliver it through that
+   application's existing secret store. If
+   the consumer intentionally shares Grafana's key, the current token is in
+   `grafana_access_token.txt` in the producer's Terraform working directory.
+   [Recover the file](#recovering-grafana-credentials-on-another-machine) if needed.
+2. Replace the old reference with the consumer's secret input. A runtime
+   application can read a mounted secret file. For a Terraform consumer, use
+   a sensitive, ephemeral variable in a supported destination, such as a
+   provider's write-only credential argument. If the resource only accepts a
+   regular argument, configure the application to read a runtime secret
+   instead. [Terraform ephemeral values](https://developer.hashicorp.com/terraform/language/manage-sensitive-data)
+
+   ```hcl
+   variable "observability_access_token" {
+     type      = string
+     sensitive = true
+     ephemeral = true
+   }
+   ```
+
+   For example, in a separate Terraform consumer that manages a Nebius Grafana
+   release, set `"grafana.nebius.accessToken" = var.observability_access_token`
+   in its existing `sensitive.set` map. If the key itself changes, include its
+   non-secret key ID in the release's `sensitive.version` calculation so
+   Terraform resends the write-only value. Supply
+   `TF_VAR_observability_access_token` from the consumer's secret store at
+   both plan and apply. An existing deployment that shares Grafana's key can
+   supply it from the producer's file in a Bash subshell:
+
+   ```bash
+   (
+     set +x
+     set -eu
+     : "${CONSUMER_ROOT:?Set the downstream Terraform directory}"
+     test -s ./grafana_access_token.txt  # Run from the producer's working directory.
+     TF_VAR_observability_access_token=$(<./grafana_access_token.txt)
+     export TF_VAR_observability_access_token
+     terraform -chdir="$CONSUMER_ROOT" plan
+     terraform -chdir="$CONSUMER_ROOT" apply
+   )
+   ```
+
+3. Confirm the consumer has loaded the intended credential revision, then run
+   a known working Observability query **from the migrated consumer**.
+   Once it succeeds, upgrade the producer and confirm the consumer still
+   works. For a consumer in the same Terraform root, you can also supply the
+   credential before planning and review both changes in one plan.
+   If the two share a key, update the consumer on every Grafana key
+   rotation and verify both applications before revoking the previous key.
 
 ### Rotating the Grafana Observability key
 

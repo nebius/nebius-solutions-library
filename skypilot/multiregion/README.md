@@ -75,10 +75,9 @@ key or request another rotation. After validation succeeds, follow the
 to invalidate the previous key and remove its local backup. A subsequent normal
 `terraform plan` must report no changes.
 
-Compatibility note: the sensitive `grafana_service_account` output no longer
-contains `access_token`. The token is delivered ephemerally to Grafana and is
-not stored in Terraform state. Consumers referencing that field must remove the
-reference; the other fields are unchanged.
+The `grafana_service_account` output no longer exposes `access_token`. If
+another application reads it, follow the [token consumer migration steps](../../k8s-training/README.md#migrating-a-token-consumer)
+before upgrading this stack. Built-in Grafana receives its token directly.
 
 Deploy:
 
