@@ -587,15 +587,8 @@ account blocks issuance. A cluster rebuild that reuses the key leaves its
 original cluster label in place. If the files are later lost, use the original
 cluster ID when identifying the old key for manual revocation after validation.
 
-For deployments created before these labels existed, run the first rotation
-from the runner holding the original token, or restore that deployment's files
-from a trusted backup first. Legacy files lack ownership information, so check
-their origin before use. If no backup exists, identify the old key ID from a
-trusted issuance record or with the project administrator. After rotating and
-validating the replacement on all four datasources, delete the confirmed old
-key with `nebius iam static-key delete --id <confirmed-old-key-id>`.
-Several applications can share the service account, so its ID alone cannot
-identify the old key.
+If the token file is missing, follow [credential recovery](#recovering-grafana-credentials-on-another-machine)
+before planning or rotating.
 
 After validation succeeds, invalidate the previous key and remove its local
 backup from the checkout used for that rotation:
@@ -624,6 +617,80 @@ rm -f -- "$PREVIOUS_TOKEN" "$PREVIOUS_METADATA"
 Observability keys before removing their local credential files. It stops with
 an error rather than silently orphaning a key if neither the current metadata
 nor token file is available on the machine running the destroy.
+
+### Recovering Grafana credentials on another machine
+
+A normal `terraform plan` reads `grafana_access_token.txt`. Initialize the new
+checkout against the existing backend and select the deployment's workspace.
+If you have a trusted backup of the current key, securely copy the token and
+its metadata (when present), plus both `previous` files from any unfinished rotation. Restore
+owner-only permissions (`0600`). If the backup may predate the last rotation,
+use the provisioning Secret procedure below.
+
+**If the original files are lost and Grafana is running**, an operator with
+read access to its provisioning Secret can restore the same active key. First
+confirm the four Nebius datasources work and match your Kubernetes context to
+the cluster shown by `terraform output -json kube_cluster`. In the Marketplace
+Grafana Deployment in namespace `o11y`, find the volume mounted at
+`/etc/grafana/provisioning/datasources/datasources.yaml` and its Secret name.
+Set `KUBE_CONTEXT` and `DATASOURCE_SECRET` to the verified names. Run this Bash
+block in a fresh checkout using `kubectl`, Mike Farah's `yq` v4, `jq`, and an
+authenticated Nebius CLI. Preserve any surviving credential files separately.
+
+```bash
+(
+  set +x
+  set -euo pipefail
+  umask 077
+  : "${KUBE_CONTEXT:?Set the deployment context}" "${DATASOURCE_SECRET:?Set the datasource Secret name}"
+  if compgen -G 'grafana_access_token*' >/dev/null; then
+    echo "Recovery requires a checkout without Grafana credential files" >&2
+    exit 1
+  fi
+  tmp=$(mktemp -d)
+  trap 'rm -rf -- "$tmp"' EXIT
+  sa=$(terraform output -json grafana_service_account | jq -er '.id | strings | select(length > 0)')
+
+  kubectl --context "$KUBE_CONTEXT" -n o11y get secret "$DATASOURCE_SECRET" \
+    -o jsonpath='{.data.datasources\.yaml}' |
+    jq -Rer '@base64d' | yq -o=json '.' |
+    jq -er '["Nebius Services","Nebius Monitoring","Nebius Logging","Nebius Tracing"] as $names |
+      [.datasources[] | select(.name as $n | $names | index($n) != null)] as $sources |
+      ($sources | map(.secureJsonData.httpHeaderValue1) | unique) as $headers |
+      if ($sources | map(.name) | sort) == ($names | sort) and ($headers | length) == 1
+      then $headers[0] | strings | capture("^Bearer (?<token>[^[:space:]{}$]+)$").token
+      else error("Expected the same credential on all four Nebius datasources") end' \
+    > "$tmp/token"
+
+  jq -Rs '{token: rtrimstr("\n")}' "$tmp/token" > "$tmp/lookup.json"
+  nebius iam static-key find --file "$tmp/lookup.json" --format json |
+    jq -e --arg sa "$sa" '(.static_key // .) |
+      select(.status.active == true and .spec.service == "OBSERVABILITY" and
+             .spec.account.service_account.id == $sa) |
+      .metadata | select(.id | strings | length > 0) | {id, name}' > "$tmp/metadata"
+
+  mv "$tmp/metadata" grafana_access_token.metadata.json
+  mv "$tmp/token" grafana_access_token.txt
+)
+```
+
+**Validate either recovery path.** Run `terraform plan -detailed-exitcode`.
+A steady deployment returns `0`. Exit `1` indicates an error. Exit `2` means
+Terraform found changes that need review. In Grafana, run a known working
+query against each of Nebius Services, Monitoring, Logging and Tracing.
+The plan checks local readability. The queries check live datasource access.
+
+If the files were lost during a rotation, keep both keys active. While both are
+valid, a successful query alone cannot identify which key Grafana used.
+Recover the previous key ID from a trusted issuance record or the project
+administrator, including for older unlabeled keys. Confirm which key is serving
+Grafana before finalizing the previous key.
+If that cannot be established, retain both and involve the project
+administrator before another rotation or destroy.
+
+If the Secret is unavailable or IAM cannot confirm the key, keep any working
+credential active and have the deployment administrator recover a trusted copy.
+Terraform state and an IAM key listing cannot reconstruct the token.
 
 ## Accessing storage
 
