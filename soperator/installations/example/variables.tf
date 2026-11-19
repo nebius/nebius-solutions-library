@@ -1028,7 +1028,8 @@ variable "slurm_nodeset_workers" {
     name = string
     size = number
     autoscaling = optional(object({
-      enabled  = optional(bool, true)
+      # Defaults to enabled for all platforms except gpu-gb300, which does not support autoscaling.
+      enabled  = optional(bool)
       min_size = optional(number, 0)
     }), {})
     resource = object({
@@ -1168,6 +1169,25 @@ variable "slurm_nodeset_workers" {
       worker.resource.platform == "gpu-gb300" ? try(coalesce(worker.nvlink.type, "GB300") == "GB300", false) : true
     ])
     error_message = "GB300 worker nodesets must use nvlink.type = \"GB300\"."
+  }
+
+  validation {
+    # GB300 workers are generated as fixed-size, rack-scoped NVLink node groups,
+    # so node group autoscaling cannot be honored. Reject it explicitly instead
+    # of silently turning it off. Omitting autoscaling.enabled is fine: it
+    # resolves to false for GB300.
+    condition = alltrue([
+      for worker in var.slurm_nodeset_workers :
+      worker.resource.platform == "gpu-gb300" ? !try(worker.autoscaling.enabled == true, false) : true
+    ])
+    error_message = format(
+      "Autoscaling is not supported for gpu-gb300 worker nodesets: GB300 workers are provisioned as fixed-size, rack-scoped (%d nodes) NVLink node groups. Set autoscaling.enabled = false (or omit it) for worker nodeset(s): %s.",
+      local.gb300_nodes_per_nodegroup,
+      join(", ", [
+        for worker in var.slurm_nodeset_workers : worker.name
+        if worker.resource.platform == "gpu-gb300" && try(worker.autoscaling.enabled == true, false)
+      ]),
+    )
   }
 
   validation {

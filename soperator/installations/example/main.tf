@@ -85,6 +85,14 @@ locals {
         )
       })
       auto_resume = coalesce(nodeset.auto_resume, var.slurm_nodeset_auto_resume)
+      # GB300 workers are fixed-size rack groups; an explicit enabled = true is
+      # rejected by variable validation, so null resolves to false for GB300.
+      autoscaling = merge(nodeset.autoscaling, {
+        enabled = coalesce(
+          nodeset.autoscaling.enabled,
+          nodeset.resource.platform != local.gb300_platform,
+        )
+      })
     })
   ]
 
@@ -263,7 +271,7 @@ locals {
         : min(nodeset.nodes_per_nodegroup, nodeset.size - subset * nodeset.nodes_per_nodegroup) # min=max
       )
       max_size               = nodeset.resource.platform == local.gb300_platform ? nodeset.size : max(1, min(nodeset.nodes_per_nodegroup, nodeset.size - subset * nodeset.nodes_per_nodegroup))
-      autoscaling            = nodeset.resource.platform == local.gb300_platform ? false : nodeset.autoscaling.enabled
+      autoscaling            = nodeset.autoscaling.enabled # Always false for GB300, see slurm_nodeset_workers_with_defaults.
       drain_timeout          = nodeset.drain_timeout
       resource               = nodeset.resource
       boot_disk              = nodeset.boot_disk
