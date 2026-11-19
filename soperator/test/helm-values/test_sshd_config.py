@@ -19,6 +19,9 @@ def render_login(config_map_ref, root_public_keys):
     resources = {"cpu": 1, "memory": 2, "ephemeral_storage": 10}
     variables = {
         "apparmor_profile": "unconfined",
+        "login_docker_enabled": False,
+        "login_image_storage": {"enabled": False, "spec": None},
+        "login_user_isolation_enabled": True,
         "tailscale_enabled": False,
         "telemetry_enabled": False,
         "slurm_cluster": {

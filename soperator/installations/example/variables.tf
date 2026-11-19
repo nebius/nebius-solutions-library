@@ -104,6 +104,52 @@ variable "slurm_login_public_ip" {
   default     = true
 }
 
+variable "slurm_login_image_disk" {
+  description = "Per-login image-storage disk. Enabling it also enables Docker for login SSH sessions."
+  type = object({
+    enabled = optional(bool, false)
+    spec = optional(object({
+      size_gibibytes  = number
+      filesystem_type = string
+      disk_type       = string
+    }))
+  })
+  default  = {}
+  nullable = false
+
+  validation {
+    condition     = !var.slurm_login_image_disk.enabled || var.slurm_login_image_disk.spec != null
+    error_message = "slurm_login_image_disk.spec must be provided if enabled."
+  }
+
+  validation {
+    condition = var.slurm_login_image_disk.spec == null ? true : (
+      var.slurm_login_image_disk.spec.size_gibibytes > 0 &&
+      contains(["ext4", "xfs"], var.slurm_login_image_disk.spec.filesystem_type) &&
+      contains(["NETWORK_SSD_NON_REPLICATED", "NETWORK_SSD_IO_M3"], var.slurm_login_image_disk.spec.disk_type)
+    )
+    error_message = "Login image storage requires a positive size, ext4 or xfs, and NETWORK_SSD_NON_REPLICATED or NETWORK_SSD_IO_M3."
+  }
+}
+
+variable "slurm_login_user_isolation_enabled" {
+  description = "Enable per-user cgroup isolation for login SSH sessions. Required when the login image disk enables Docker."
+  type        = bool
+  default     = true
+  nullable    = false
+}
+
+variable "pam_slurm_adopt" {
+  description = "Require worker SSH sessions to join a running Slurm job, except for exempt users and groups."
+  type = object({
+    enabled       = optional(bool, false)
+    exempt_users  = optional(list(string), [])
+    exempt_groups = optional(list(string), [])
+  })
+  default  = {}
+  nullable = false
+}
+
 variable "tailscale_enabled" {
   description = "Whether to enable tailscale init container on login pod"
   type        = bool
