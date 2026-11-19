@@ -322,6 +322,27 @@ slurm_login_ssh_root_public_keys = [
 # Whether to create public IP for login load balancer.
 slurm_login_public_ip = true
 
+# Enabling a per-login image-storage disk also enables Docker on login nodes.
+slurm_login_image_disk = {
+  enabled = false
+  # spec = {
+  #   size_gibibytes  = 930 # Must be divisible by 93.
+  #   filesystem_type = "ext4"
+  #   disk_type       = "NETWORK_SSD_IO_M3" # Or "NETWORK_SSD_NON_REPLICATED".
+  # }
+}
+
+# Per-user cgroup isolation for SSH sessions. Required when login Docker is enabled.
+slurm_login_user_isolation_enabled = true
+
+# When enabled, users can only SSH to worker nodes where they have running Slurm jobs.
+# Exempt users and groups can connect without a job.
+pam_slurm_adopt = {
+  enabled       = false
+  exempt_users  = []
+  exempt_groups = []
+}
+
 # Whether to enable Tailscale VPN.
 tailscale_enabled = false
 

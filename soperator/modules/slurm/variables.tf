@@ -37,6 +37,48 @@ variable "k8s_cluster_id" {
 
 # region Configuration
 
+variable "login_image_storage" {
+  description = "Per-login image-storage PVC configuration. Enabling it also enables login Docker."
+  type = object({
+    enabled = optional(bool, false)
+    spec = optional(object({
+      size_gibibytes     = number
+      filesystem_type    = string
+      storage_class_name = string
+    }))
+  })
+  default  = {}
+  nullable = false
+
+  validation {
+    condition     = !var.login_image_storage.enabled || var.login_image_storage.spec != null
+    error_message = "login_image_storage.spec must be provided if enabled."
+  }
+}
+
+variable "login_user_isolation_enabled" {
+  description = "Enable per-user cgroup isolation for login SSH sessions. Required when login Docker is enabled."
+  type        = bool
+  default     = true
+  nullable    = false
+
+  validation {
+    condition     = !var.login_image_storage.enabled || var.login_user_isolation_enabled
+    error_message = "Login Docker requires login_user_isolation_enabled=true."
+  }
+}
+
+variable "pam_slurm_adopt" {
+  description = "Require worker SSH sessions to join a running Slurm job, except for exempt users and groups."
+  type = object({
+    enabled       = optional(bool, false)
+    exempt_users  = optional(list(string), [])
+    exempt_groups = optional(list(string), [])
+  })
+  default  = {}
+  nullable = false
+}
+
 variable "slurm_custom_config_override" {
   description = "Custom Slurm settings to append or override the auto-generated ones. One setting per element."
   type        = list(string)
