@@ -46,6 +46,27 @@ variable "enable_egress_gateway" {
   default     = false
 }
 
+variable "enable_nat_gateway" {
+  description = "Create NAT gateway infrastructure for private Kubernetes nodes."
+  type        = bool
+  default     = false
+  nullable    = false
+}
+
+variable "nat_gateway" {
+  description = "Dedicated public gateway nodes and their fixed public IP pool. Reserve at least node_count + 1 IPs for upgrades."
+  type = object({
+    node_count          = optional(number, 2)
+    public_ip_pool_size = optional(number, 3)
+    nodes_platform      = optional(string, "cpu-d3")
+    nodes_preset        = optional(string, "4vcpu-16gb")
+    nodes_disk_type     = optional(string, "NETWORK_SSD")
+    nodes_disk_size     = optional(number, 128)
+  })
+  default  = {}
+  nullable = false
+}
+
 # K8s filestore
 variable "enable_filestore" {
   description = "Use Filestore."
@@ -552,6 +573,18 @@ variable "gpu_nodes_preemptible" {
   description = "Use preemptible VMs for GPU nodes"
   type        = bool
   default     = false
+}
+
+variable "gpu_nodes_spot_pricing_policy_id" {
+  description = "Optional pricing policy ID that caps the spot price for preemptible GPU nodes. Null follows the current spot price."
+  type        = string
+  default     = null
+  nullable    = true
+
+  validation {
+    condition     = var.gpu_nodes_spot_pricing_policy_id == null ? true : trimspace(var.gpu_nodes_spot_pricing_policy_id) != ""
+    error_message = "gpu_nodes_spot_pricing_policy_id must be null or a non-empty pricing policy ID."
+  }
 }
 
 variable "custom_driver" {

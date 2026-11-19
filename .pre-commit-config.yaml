@@ -1,0 +1,39 @@
+# Local Git hooks, see https://pre-commit.com
+# Install once per clone: pre-commit install --allow-missing-config
+repos:
+  - repo: local
+    hooks:
+      # Uses the locally installed Terraform CLI, same check as CI.
+      - id: terraform-fmt
+        name: terraform fmt
+        entry: terraform fmt -diff
+        language: system
+        files: \.(tf|tfvars|tftest\.hcl)$
+
+      # terraform fmt rejects .example filenames, so format them through stdin.
+      # Limited to the examples that CI checks.
+      - id: terraform-fmt-tfvars-example
+        name: terraform fmt (tfvars examples)
+        entry: |
+          bash -c '
+            exit_status=0
+
+            for file in "$@"; do
+              formatted=$(mktemp) || exit 1
+
+              if terraform fmt - < "$file" > "$formatted"; then
+                if ! cmp -s "$file" "$formatted"; then
+                  diff -u "$file" "$formatted" || true
+                  cat "$formatted" > "$file" || exit_status=1
+                fi
+              else
+                exit_status=1
+              fi
+
+              rm -f "$formatted"
+            done
+
+            exit "$exit_status"
+          ' --
+        language: system
+        files: ^(k8s-training|vm-instance|dsvm|bastion|wireguard)/terraform\.tfvars\.example$

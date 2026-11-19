@@ -40,6 +40,11 @@ resource "terraform_data" "gb300_validation" {
     }
 
     precondition {
+      condition     = var.gpu_nodes_spot_pricing_policy_id == null
+      error_message = "GB300 rack nodes cannot be preemptible, so gpu_nodes_spot_pricing_policy_id must be unset."
+    }
+
+    precondition {
       condition     = !var.gpu_nodes_public_ips
       error_message = "GB300 nodes must not receive public IP addresses."
     }

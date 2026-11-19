@@ -45,11 +45,6 @@ run "disabled_by_default" {
   }
 
   assert {
-    condition     = !can(yamldecode(yamldecode(helm_release.soperator_fluxcd_cm.values[0]).resources[0].data["values.yaml"]).slurmCluster.overrideValues.pamSlurmAdopt)
-    error_message = "PAM adoption must remain disabled by default."
-  }
-
-  assert {
     condition     = yamldecode(yamldecode(helm_release.soperator_fluxcd_cm.values[0]).resources[0].data["values.yaml"]).slurmCluster.overrideValues.slurmNodes.login.userIsolation.enabled
     error_message = "User isolation must preserve the chart's enabled default independently of Docker."
   }
@@ -66,11 +61,6 @@ run "enabled_with_configurable_pvc" {
         filesystem_type    = "xfs"
         storage_class_name = "compute-csi-network-ssd-io-m3-xfs"
       }
-    }
-    pam_slurm_adopt = {
-      enabled       = true
-      exempt_users  = ["bob", "dockeruser"]
-      exempt_groups = ["operators"]
     }
   }
 
@@ -100,15 +90,6 @@ run "enabled_with_configurable_pvc" {
       }
     }
     error_message = "Each login pod must get a PVC template with the requested size and storage class."
-  }
-
-  assert {
-    condition = yamldecode(yamldecode(helm_release.soperator_fluxcd_cm.values[0]).resources[0].data["values.yaml"]).slurmCluster.overrideValues.pamSlurmAdopt == {
-      enabled      = true
-      exemptUsers  = ["bob", "dockeruser"]
-      exemptGroups = ["operators"]
-    }
-    error_message = "PAM adoption and SSH exemptions must be rendered with login Docker."
   }
 }
 

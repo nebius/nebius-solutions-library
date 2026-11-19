@@ -27,9 +27,15 @@ locals {
       gpu_nodes_platform = "gpu-b300-sxm"
       gpu_nodes_preset   = "1gpu-24vcpu-346gb"
     }
+    uk-south1 = {
+      cpu_nodes_platform = "cpu-d3"
+      cpu_nodes_preset   = "16vcpu-64gb"
+      gpu_nodes_platform = "gpu-b300-sxm"
+      gpu_nodes_preset   = "1gpu-24vcpu-346gb"
+    }
   }
 
-  current_region_defaults = local.regions_default[var.region]
+  current_region_defaults = lookup(local.regions_default, var.region, null)
 
   boot_image_family = coalesce(
     var.boot_image_family,

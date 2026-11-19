@@ -45,11 +45,24 @@ resource "nebius_compute_v1_instance" "instance" {
     priority      = 3
   } : null
 
+  follows_spot_price = var.preemptible ? {} : null
+
   recovery_policy = var.preemptible ? "FAIL" : "RECOVER"
+
+  reservation_policy = (var.reservation_policy != "" || length(var.reservation_ids) > 0) ? {
+    policy          = var.reservation_policy != "" ? var.reservation_policy : "STRICT"
+    reservation_ids = length(var.reservation_ids) > 0 ? var.reservation_ids : null
+  } : null
 
 
 
   gpu_cluster = var.gpu_cluster != "" ? { id = var.gpu_cluster } : {}
+  local_disks = var.enable_local_disks ? {
+    passthrough_group = {
+      requested = true
+    }
+  } : null
+
   secondary_disks = var.add_extra_storage ? [
     {
       attach_mode = "READ_WRITE"
@@ -70,17 +83,23 @@ resource "nebius_compute_v1_instance" "instance" {
   ] : []
 
 
-  cloud_init_user_data = templatefile("../modules/cloud-init/simple-setup-init.tftpl", {
-    users                   = local.users,
-    extra_path              = local.extra_path,
-    extra_disk_id           = local.extra_disk_id,
-    shared_filesystem_id    = var.shared_filesystem_id,
-    shared_filesystem_mount = var.shared_filesystem_mount,
-    aws_access_key_id       = var.aws_access_key_id,
-    aws_secret_access_key   = var.aws_secret_access_key,
-    mount_bucket            = var.mount_bucket,
-    s3_mount_path           = var.s3_mount_path
-    region                  = var.region
+  cloud_init_user_data = templatefile("${path.module}/../cloud-init/simple-setup-init.tftpl", {
+    local_nvme_script              = file("${path.module}/../cloud-init/prepare-local-nvme.sh"),
+    region                         = var.region,
+    users                          = local.users,
+    extra_path                     = local.extra_path,
+    extra_disk_id                  = local.extra_disk_id,
+    shared_filesystem_id           = var.shared_filesystem_id,
+    shared_filesystem_mount        = var.shared_filesystem_mount,
+    aws_access_key_id              = var.aws_access_key_id,
+    aws_secret_access_key          = var.aws_secret_access_key,
+    mount_bucket                   = var.mount_bucket,
+    s3_mount_path                  = var.s3_mount_path
+    enable_local_disks             = var.enable_local_disks
+    local_disks_dependent_services = var.local_disks_dependent_services
+    local_disks_expected_count     = var.local_disks_expected_count
+    local_disks_mount_mode         = var.local_disks_mount_mode
+    local_nvme_drives_path         = var.local_nvme_drives_path
   })
 }
 

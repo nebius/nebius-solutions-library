@@ -1,4 +1,10 @@
 #cloud-config
+package_update: true
+package_upgrade: true
+%{if enable_local_disks && local_disks_mount_mode == "raid0"}
+packages:
+  - mdadm
+%{endif}
 users:
 %{ for user in users}
   - name: ${user.user_name}
@@ -9,12 +15,43 @@ users:
       - ${user.ssh_public_key}
 %{ endfor}
 
+%{if enable_local_disks}
+write_files:
+  - path: /usr/local/sbin/prepare-local-nvme.sh
+    owner: root:root
+    permissions: "0755"
+    content: |
+      ${indent(6, local_nvme_script)}
+  - path: /etc/systemd/system/local-nvme.service
+    owner: root:root
+    permissions: "0644"
+    content: |
+      [Unit]
+      Description=Prepare and mount local NVMe disks
+      After=systemd-udev-settle.service
+      Wants=systemd-udev-settle.service
 
+      [Service]
+      Type=oneshot
+      RemainAfterExit=yes
+      TimeoutStartSec=10min
+      ExecStart=/usr/local/sbin/prepare-local-nvme.sh ${local_disks_mount_mode} ${local_nvme_drives_path} ${local_disks_expected_count}
+
+      [Install]
+      WantedBy=multi-user.target
+
+%{ for service in local_disks_dependent_services }
+  - path: /etc/systemd/system/${service}.d/local-nvme.conf
+    owner: root:root
+    permissions: "0644"
+    content: |
+      [Unit]
+      Requires=local-nvme.service
+      After=local-nvme.service
+%{ endfor }
+%{endif}
+%{ if extra_disk_id != "" || shared_filesystem_id != "" || aws_access_key_id != "" || enable_local_disks }
 runcmd:
-- apt-get update
-- apt-get upgrade
-
-
 # mount disk if provided
 %{ if extra_disk_id != "" }
 # Prepare partition on secondary disk
@@ -74,3 +111,9 @@ runcmd:
 - mount-s3 --upload-checksums=off --maximum-throughput-gbps=200 --allow-delete --allow-overwrite --allow-other --endpoint-url=https://storage.${region}.nebius.cloud:443 ${mount_bucket} ${s3_mount_path}
 %{endif}
 %{endif}
+
+%{if enable_local_disks}
+- systemctl daemon-reload
+- systemctl enable --now local-nvme.service
+%{endif}
+%{ endif }

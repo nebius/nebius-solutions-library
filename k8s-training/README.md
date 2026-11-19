@@ -114,6 +114,73 @@ gpu_nodes_preset = "8gpu-128vcpu-1600gb" # The GPU node preset. Only nodes with 
 
 ```
 
+### GPU software and node labels
+
+For GPU nodes with preinstalled drivers, including B300 and GB300, this recipe
+installs the NVIDIA Device Plugin Marketplace application (`nvidia-device-plugin`).
+The application includes GPU Feature Discovery (GFD) and Node Feature Discovery
+(NFD), which provide GPU node labels such as `nvidia.com/gpu.product`.
+
+The application's device plugin component is disabled by default. GPU allocation
+is handled separately: by the MK8s built-in device plugin, or by DRA on GB300 when
+enabled. The Marketplace application supplies discovery in either case.
+
+For nodes without preinstalled drivers, the recipe uses GPU Operator instead.
+
+### Preemptible node pricing
+
+Regular GPU node groups continue to use Nebius's implicit on-demand default.
+This solution only sets a pricing model explicitly for preemptible GPU nodes,
+so existing on-demand and Capacity Block Group configurations are left
+unchanged. Spot pricing is available only for GPU platforms.
+
+Set `gpu_nodes_preemptible` to `true` to create a preemptible GPU node group. By
+default, its VMs accept the current spot price:
+
+```hcl
+gpu_nodes_preemptible = true
+```
+
+> **Upgrade note:** Existing preemptible GPU node groups created by an earlier
+> version of this solution did not set a pricing model explicitly. Adding the
+> follow-spot pricing model changes the node-group template and may trigger a
+> node roll-out on the next apply. Review the Terraform plan first and allow for
+> workload disruption or limited spot capacity while replacement nodes start.
+
+To cap the accepted spot price, create a Nebius Billing pricing policy outside
+this solution and pass its ID for the applicable node group:
+
+```hcl
+gpu_nodes_preemptible            = true
+gpu_nodes_spot_pricing_policy_id = "pricingpolicy-..."
+```
+
+This solution does not create the pricing policy. Supply the ID of a pre-existing
+policy as a literal value in `terraform.tfvars`. The policy can be created by a
+separate Terraform configuration, in the Nebius console, or with the CLI. If a
+separate Terraform configuration creates it, pass that configuration's output
+ID into this solution; a `.tfvars` file cannot directly reference a resource in
+another Terraform root. Keeping policy creation separate allows a billing or
+platform team to own and reuse one policy across multiple VM or MK8s deployments.
+
+A pricing policy ID requires `gpu_nodes_preemptible` to be `true`; otherwise
+planning fails. The same pricing choice applies to every VM created in the node
+group. When an ID is set, Terraform reads the policy and verifies that it belongs
+to `parent_id` and targets the selected GPU platform. The identity running
+Terraform therefore needs permission to read Billing pricing policies. These
+checks catch configuration mismatches but do not guarantee spot capacity.
+
+Pricing-policy behavior to consider:
+
+- Without a policy, nodes follow the current spot price. It can change every
+  15 minutes, while remaining below the regular PAYG price for the GPU platform.
+- If a policy's maximum price is below the current spot price, scheduling is
+  blocked until the price falls or the maximum is raised.
+- A policy's maximum price can change only when its `status.running_vm_count` is
+  zero. For a shared policy, every running consumer must be stopped first.
+- A policy can be shared only by deployments in the same project that use the
+  same GPU platform.
+
 ### GPU capacity reservation
 
 `gpu_nodes_reservation_policy` controls capacity reservation placement for **generic GPU node groups only**. It does not apply to CPU or GB300 node groups. The same policy and ordered reservation IDs apply to every generic GPU node group.
@@ -135,6 +202,20 @@ gpu_nodes_reservation_policy = {
 `reservation_ids` is an ordered list of capacity block group IDs. When the list is non-empty, explicitly set `policy` to `AUTO` or `STRICT`. Omit the list, set it to `null`, or use `[]` when you do not want to select specific groups. Individual entries must not be null, empty, or whitespace-only strings. An empty list does not force PAYG; use `policy = "FORBID"` for that.
 
 This policy is part of the GPU node template, so changing it can trigger node recreation. Review the Terraform plan and the existing [`node_group_strategy` configuration](./variables.tf) before applying it, especially when reserved capacity leaves no room for surge nodes.
+
+### Kubernetes NAT gateway
+
+Create NAT gateway nodes with a reserved public-IP pool for private workers.
+
+```hcl
+enable_egress_gateway = false
+enable_nat_gateway    = true
+cpu_nodes_public_ips  = false
+gpu_nodes_public_ips  = false
+```
+
+See the [NAT gateway module](../modules/k8s-nat-gateway/README.md) for
+requirements, configuration options, and routing cutover.
 
 ### GB300 production racks
 
@@ -224,7 +305,13 @@ configuration shown above. DRA applies to every rack created by `rack_count`.
 The recipe installs one NVIDIA GPU DRA Helm release (`0.4.1`) per cluster, with
 its kubelet plugins selected onto all DRA-enabled GB300 nodes. MK8s disables its
 built-in device plugin and provides managed DRANet on fabric-attached GPU nodes.
-The recipe also skips its separate device-plugin installation.
+
+Keep the Device Plugin Marketplace application installed when enabling DRA;
+its GFD and NFD components are still needed for
+[GPU node labels](#gpu-software-and-node-labels).
+
+If you installed GFD/NFD separately, reconcile that installation before applying
+this update to avoid duplicate discovery components.
 
 After applying, check driver readiness and advertised devices:
 
@@ -250,14 +337,15 @@ The recipe does not create workload claims or ComputeDomains. See the
 [public MK8s DRA setting](https://docs.nebius.com/terraform-provider/reference/resources/mk8s_v1_node_group#nestedatt--template--gpu_settings)
 and [NVIDIA DRA documentation](https://github.com/NVIDIA/k8s-dra-driver-gpu/tree/v0.4.1).
 
-DRA is disabled by default. With `dra = false`, the existing device-plugin and
-MK8s-managed static IMEX path remains in use. When upgrading an existing non-DRA
+DRA is disabled by default. With `dra = false`, the MK8s built-in device plugin
+and managed static IMEX remain in use. When upgrading an existing non-DRA
 deployment, check whether the plan changes an unset `gpu_settings.dra` to `false`.
 If it does, treat it as a node-group update and schedule a maintenance window.
 
 Prefer selecting DRA when creating the node groups. To enable it on an existing
-deployment, schedule a maintenance window. The device-plugin removal and node
-rollout are not ordered, so GPU allocation can be unavailable during the change:
+deployment, schedule a maintenance window. GPU allocation changes from the
+MK8s built-in device plugin to DRA during the node rollout and can be unavailable
+until the DRA components are ready:
 
 1. Pause GPU workload controllers or job submissions, then stop existing GPU
    workloads so legacy GPU pods are not recreated during the migration.
@@ -269,10 +357,10 @@ rollout are not ordered, so GPU allocation can be unavailable during the change:
 4. Update workload manifests to use the required ResourceClaims and
    ComputeDomains, then resume controllers or resubmit workloads.
 
-The GB300 path currently rejects autoscaling, preemptible or public GPU nodes,
-MIG, custom drivers, x86 NUMA presets, the bundled HGX NCCL test, and the
-bundled KubeRay profiles. These guardrails keep the initial production path
-within the components validated for Grace ARM rack deployments.
+The GB300 path currently rejects autoscaling, preemptible or spot-priced nodes,
+public GPU nodes, MIG, custom drivers, x86 NUMA presets, the bundled HGX NCCL
+test, and the bundled KubeRay profiles. These guardrails keep the initial
+production path within the components validated for Grace ARM rack deployments.
 
 ### Nvidia Multi Instance GPU (MIG) configuration
 

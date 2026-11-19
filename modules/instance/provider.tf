@@ -1,8 +1,10 @@
 terraform {
+  required_version = ">= 1.9.0"
+
   required_providers {
     nebius = {
       source  = "nebius/nebius"
-      version = ">= 0.5.55"
+      version = ">= 0.6.59"
     }
   }
 }

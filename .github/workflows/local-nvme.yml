@@ -1,0 +1,29 @@
+name: Local NVMe checks
+
+on:
+  pull_request:
+    paths:
+      - 'modules/cloud-init/prepare-local-nvme.sh'
+      - 'modules/cloud-init/simple-setup-init.tftpl'
+      - 'modules/instance/**'
+      - 'vm-instance/**'
+      - '.github/workflows/local-nvme.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  offline-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: '1.11.4'
+          terraform_wrapper: false
+      - name: Install ShellCheck
+        run: sudo apt-get update -qq && sudo apt-get install -y shellcheck
+      - name: Lint local NVMe script
+        run: shellcheck modules/cloud-init/prepare-local-nvme.sh
+      - name: Render cloud-init and test disk safety with mocked tools
+        run: python3 -m unittest discover -s vm-instance/tests -v
