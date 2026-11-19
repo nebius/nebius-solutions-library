@@ -5,7 +5,8 @@ The temporary fixture uses the real grafana.tf and a fake Nebius CLI. A clean
 apply proves that terraform_data creates the token file before the ephemeral
 local_command reads it and passes it to the application's write-only fields.
 Subsequent applies exercise one-shot replacement and idempotency.
-Requires Terraform >= 1.11.4 on PATH (or set TERRAFORM_BIN).
+Requires Terraform >= 1.11.4 on PATH (or set TERRAFORM_BIN) and Git access to
+the public Marketplace chart repository.
 """
 
 import json
@@ -174,6 +175,28 @@ def main():
         shutil.copyfile(
             MODULE / "tests/grafana-token/grafana_token.tftest.hcl",
             tests / "grafana_token.tftest.hcl",
+        )
+
+        render = tests / "render"
+        shutil.copytree(MODULE / "tests/grafana-token/render", render)
+        # nebius-grafana 1.0.0, including its vendored Grafana 8.15.0 dependency.
+        chart_repo = "https://github.com/nebius/nebius-k8s-applications.git"
+        chart_revision = "33d14191284544d986a60e2ff56f0de690d597d6"
+        checkout = render / "marketplace"
+        subprocess.run(["git", "init", "--quiet", checkout], check=True)
+        subprocess.run(
+            ["git", "fetch", "--quiet", "--no-tags", "--depth=1", chart_repo, chart_revision],
+            cwd=checkout, check=True,
+        )
+        subprocess.run(
+            ["git", "checkout", "FETCH_HEAD", "--", "nebius-grafana/chart"],
+            cwd=checkout, check=True,
+        )
+        (fixture / "chart_test.tf").write_text(
+            'module "marketplace_grafana" {\n'
+            '  source      = "./tests/render"\n'
+            '  values_yaml = local.grafana_values\n'
+            '}\n'
         )
 
         binary_directory = fixture / "bin"

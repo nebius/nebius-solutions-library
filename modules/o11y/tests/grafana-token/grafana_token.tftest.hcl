@@ -74,10 +74,10 @@ run "clean_first_apply_reads_generated_token" {
 
   assert {
     condition = (
-      yamldecode(local.grafana_values).grafana.datasources["datasources.yaml"].secret.apiVersion == 1 &&
-      length(yamldecode(local.grafana_values).grafana.datasources["datasources.yaml"].secret.datasources) == 4 &&
+      module.marketplace_grafana.datasource_config.apiVersion == 1 &&
+      length(module.marketplace_grafana.datasource_config.datasources) == 4 &&
       toset([
-        for datasource in yamldecode(local.grafana_values).grafana.datasources["datasources.yaml"].secret.datasources : "${datasource.name}|${datasource.type}"
+        for datasource in module.marketplace_grafana.datasource_config.datasources : "${datasource.name}|${datasource.type}"
         ]) == toset([
         "Nebius Services|prometheus",
         "Nebius Monitoring|prometheus",
@@ -85,10 +85,10 @@ run "clean_first_apply_reads_generated_token" {
         "Nebius Tracing|tempo",
       ]) &&
       alltrue([
-        for datasource in yamldecode(local.grafana_values).grafana.datasources["datasources.yaml"].secret.datasources : datasource.version == 0
+        for datasource in module.marketplace_grafana.datasource_config.datasources : datasource.version == 0
       ])
     )
-    error_message = "The Marketplace secret values must contain apiVersion 1 and all four Nebius datasources with version 0."
+    error_message = "The rendered Marketplace datasource Secret must contain apiVersion 1 and all four Nebius datasources with version 0."
   }
 }
 
