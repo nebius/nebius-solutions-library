@@ -177,7 +177,7 @@ slurm_nodeset_workers = [
     auto_resume                    = false # Whether to automatically resume workers when there are jobs in the queue.
     initial_number_ephemeral_nodes = 1     # How many ephemeral nodes should be running when the cluster is created.
     autoscaling = {
-      enabled  = true # If enabled, ephemeral node suspend/resume will lead to VM deletion/creation.
+      enabled  = true # If enabled, ephemeral node suspend/resume will lead to VM deletion/creation. Not supported for GB300 NodeSets: set false or omit.
       min_size = 0    # Minimum NodeGroup size. If null, min_size=max_size (no scale-down).
     }
 
