@@ -610,16 +610,9 @@ Use a separate Terraform checkout for each deployment. Workspaces in the same
 checkout share the Grafana token filenames. Rotation and destroy use the files
 in the current directory and could revoke another deployment's key.
 
-The token generator tracks the IAM access key's resource ID in
-`triggers_replace`. Replacing the generator rotates the Observability token
-and keeps the IAM access key. Forcing replacement of `grafana_key` itself
-under its existing name fails. The generator's `create_before_destroy` also
-applies to its IAM key dependency, so Terraform requests the same name while
-the old key still owns it. IAM returns `AlreadyExists` before rotation begins.
-
-Normal Terraform plans do not rotate the key. To request one intentional
-rotation, create and review a saved plan that explicitly replaces only the
-Grafana token generator:
+To rotate the token Grafana uses to read metrics and logs, follow the commands
+below. They replace only the token generator. Leave the separate IAM access key
+(`grafana_key`) in place.
 
 ```bash
 terraform plan \
@@ -629,6 +622,11 @@ terraform plan \
 terraform show grafana-rotation.tfplan
 terraform apply grafana-rotation.tfplan
 ```
+
+If you target `grafana_key` by mistake, Terraform tries to create a second IAM
+key with the same name while the original still exists. Nebius rejects the
+request with `AlreadyExists` before rotation starts. Grafana keeps using its
+current token.
 
 The plan must show replacement of only the Grafana token-generation
 `terraform_data` resource and an update of the Grafana application; it must not
