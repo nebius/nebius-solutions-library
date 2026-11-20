@@ -7,7 +7,8 @@ terraform {
       version = ">= 0.6.70"
     }
     kubernetes = {
-      source = "hashicorp/kubernetes"
+      source  = "hashicorp/kubernetes"
+      version = ">= 2.36.0"
     }
     units = {
       source  = "dstaroff/units"

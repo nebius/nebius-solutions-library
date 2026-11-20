@@ -42,3 +42,9 @@ variable "cdi_enabled" {
   type        = bool
   default     = null
 }
+
+variable "values" {
+  description = "Optional native Helm values YAML content for the Marketplace application."
+  type        = string
+  default     = null
+}

@@ -1,0 +1,23 @@
+# Supply tenant_id, parent_id, subnet_id and iam_token through environment.sh/TF_VAR_*.
+# Review regional accelerator availability and quota before applying.
+cluster_name               = "inference"
+region                     = "eu-north1"
+k8s_version                = "1.35"
+ssh_public_key             = { path = "~/.ssh/id_ed25519.pub" }
+cpu_nodes_platform         = "cpu-d3"
+cpu_nodes_preset           = "4vcpu-16gb"
+cpu_nodes_fixed_count      = 3
+cpu_disk_size              = 512
+cpu_nodes_public_ips       = false
+gpu_nodes_public_ips       = false
+gpu_nodes_platform         = "gpu-l40s-a"
+gpu_nodes_preset           = "1gpu-24vcpu-96gb"
+infiniband_fabric          = ""
+gpu_nodes_autoscaling      = { enabled = true, min_size = 0, max_size = 2 }
+gpu_nodes_driverfull_image = true
+gpu_node_group_overrides   = [{ taints = [{ key = "nvidia.com/gpu", value = "present", effect = "NO_SCHEDULE" }] }]
+enable_dynamo              = true
+# Standalone owns KAI and Grove. Existing owners can be selected through dynamo.
+dynamo = { scheduler_mode = "standalone" }
+
+loki = { enabled = false }
