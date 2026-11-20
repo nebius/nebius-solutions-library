@@ -205,8 +205,9 @@ resource "nebius_applications_v1alpha1_k8s_release" "grafana" {
   product_slug     = "nebius/grafana-solution-by-nebius"
 
   sensitive = {
-    # The values are write-only. Their non-secret hash is retained in state so
-    # a changed token revision causes the provider to resend them.
+    # Changing the token revision changes this hash and resends the write-only settings.
+    # adminPassword only seeds a new Grafana database. Change an existing admin
+    # password in Grafana, so a password-only replacement needs no release update.
     version = sha256(local.grafana_values)
     values  = local.grafana_values
     set = {

@@ -526,7 +526,18 @@ To access Grafana GUI:
 ```
 Nebius Web GUI > Main menu > Applications > grafana-solution-by-nebius > Endpoints + Create > Copy URL
 ```
-Open browser to newly created URL with username “admin” and password from output of “terraform output grafana_password”
+
+For the first login, open the endpoint and sign in as `admin` with the password
+from `terraform output -raw grafana_password`. Grafana uses this value when it
+creates the admin account in a new database.
+
+To change the password on an existing installation, sign in as `admin`, open
+the user menu, and select **Change password**. Verify the new password in a
+private browser window before closing your current session. Terraform still
+reports its generated bootstrap password. Replacing `random_password.grafana_password`
+alone changes that output without updating the release or the existing login.
+If you have lost access, use Grafana's reset procedure against the same database.
+[Grafana admin password recovery](https://grafana.com/docs/grafana/latest/administration/cli/#reset-admin-password)
 
 ### Output compatibility
 
