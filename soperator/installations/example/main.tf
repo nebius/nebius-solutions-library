@@ -785,6 +785,7 @@ module "slurm" {
     gres_name                                = lookup(module.resources.gres_name_by_platform, nodeset.resource.platform, null)
     gres_config                              = lookup(module.resources.gres_config_by_platform, nodeset.resource.platform, null)
     auto_resume                              = nodeset.auto_resume
+    auto_suspend_seconds                     = nodeset.auto_suspend_seconds
     create_partition                         = nodeset.create_partition != null ? nodeset.create_partition : false
     partition_topology                       = nodeset.resource.platform == local.gb300_platform ? "block-nvl72" : startswith(nodeset.resource.platform, "gpu-") ? "tree-ib" : "flat"
     ephemeral_nodes                          = nodeset.ephemeral_nodes

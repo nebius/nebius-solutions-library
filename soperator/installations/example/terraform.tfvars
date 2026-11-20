@@ -175,6 +175,7 @@ slurm_nodeset_workers = [
     #------------------------------------------------#
     ephemeral_nodes                = true  # If enabled, users can suspend and resume workers using Slurm commands.
     auto_resume                    = false # Whether to automatically resume workers when there are jobs in the queue.
+    auto_suspend_seconds           = null  # Idle seconds before Slurm suspends a worker. 0 suspends immediately; null uses the partition/global SuspendTime.
     initial_number_ephemeral_nodes = 1     # How many ephemeral nodes should be running when the cluster is created.
     autoscaling = {
       enabled  = true # If enabled, ephemeral node suspend/resume will lead to VM deletion/creation. Not supported for GB300.

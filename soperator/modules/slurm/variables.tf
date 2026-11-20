@@ -1007,6 +1007,7 @@ variable "worker_nodesets" {
     gres_name                      = optional(string)
     gres_config                    = list(string)
     auto_resume                    = optional(bool, false)
+    auto_suspend_seconds           = optional(number)
     create_partition               = bool
     partition_topology             = string
     ephemeral_nodes                = optional(bool, false)
