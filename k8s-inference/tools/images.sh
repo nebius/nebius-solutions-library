@@ -43,7 +43,7 @@ case "$cmd" in
       [ "$c" = dispatcher ] && extra=(--build-arg "OPS_IMAGE=$reg/serverless2/ops:$ops_tag")
       [ "$c" = ops ] && ops_tag="$t"
       echo "== $c:$t"
-      docker buildx build --push --platform linux/amd64 -t "$reg/serverless2/$c:$t" -f "$df" "${extra[@]}" "$ctx"
+      docker buildx build --pull --no-cache --push --platform linux/amd64 -t "$reg/serverless2/$c:$t" -f "$df" "${extra[@]}" "$ctx"
     done ;;
   copy)
     from="${1:?from registry}"; to="$(registry "${2:-}")"

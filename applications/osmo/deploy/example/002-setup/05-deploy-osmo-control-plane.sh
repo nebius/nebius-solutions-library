@@ -10,6 +10,7 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
+source "${SCRIPT_DIR}/lib/tls.sh"
 source "${SCRIPT_DIR}/defaults.sh"
 
 echo ""
@@ -1470,7 +1471,7 @@ EOF
         _kc_token=""
         _token_resp="/tmp/osmo-kc-token.json"
         for _i in 1 2 3 4 5; do
-            curl -sk -X POST "${KC_URL}/realms/master/protocol/openid-connect/token" \
+            keycloak_curl -sS -X POST "${KC_URL}/realms/master/protocol/openid-connect/token" \
                 --data-urlencode "client_id=admin-cli" \
                 --data-urlencode "username=admin" \
                 --data-urlencode "password=${KEYCLOAK_ADMIN_PASSWORD}" \
@@ -1484,10 +1485,10 @@ EOF
         rm -f "$_token_resp"
         if [[ -n "$_kc_token" ]]; then
             _realm_json="/tmp/osmo-realm-get.json"
-            curl -sk -H "Authorization: Bearer $_kc_token" "${KC_URL}/admin/realms/osmo" -o "$_realm_json" 2>/dev/null || true
+            keycloak_curl -sS -H "Authorization: Bearer $_kc_token" "${KC_URL}/admin/realms/osmo" -o "$_realm_json" 2>/dev/null || true
             if [[ -s "$_realm_json" ]] && jq -e . "$_realm_json" >/dev/null 2>&1; then
                 if jq --arg url "https://${AUTH_DOMAIN}" '.attributes = ((.attributes // {}) | . + {"frontendUrl": $url})' "$_realm_json" > /tmp/osmo-realm-frontend.json 2>/dev/null; then
-                    _put_code=$(curl -sk -o /dev/null -w "%{http_code}" -X PUT "${KC_URL}/admin/realms/osmo" \
+                    _put_code=$(keycloak_curl -sS -o /dev/null -w "%{http_code}" -X PUT "${KC_URL}/admin/realms/osmo" \
                         -H "Authorization: Bearer $_kc_token" \
                         -H "Content-Type: application/json" \
                         -d @/tmp/osmo-realm-frontend.json 2>/dev/null)
@@ -2875,7 +2876,7 @@ if [[ -n "${INGRESS_URL:-}" && -n "${AUTH_DOMAIN:-}" && "${DEPLOY_KEYCLOAK:-fals
         fi
     fi
     echo -n "First redirect from /: "
-    _loc=$(curl -sI -k --connect-timeout 5 "${INGRESS_URL}/" 2>/dev/null | grep -i "^location:" | head -1 | sed 's/\r$//') || true
+    _loc=$(keycloak_curl -sSI --connect-timeout 5 "${INGRESS_URL}/" 2>/dev/null | grep -i "^location:" | head -1 | sed 's/\r$//') || true
     if [[ -n "$_loc" ]]; then
         echo "$_loc"
         if echo "$_loc" | grep -q '\.local'; then

@@ -61,7 +61,7 @@ on the region it lands in.
 
 The cloud stage creates the source registry (`<name>-images` in the hub project; `images.source` to use an
 existing one). `tools/images.sh build <registry>` builds and pushes the four platform images (api,
-dispatcher, jobs, ops) once, tagged by `images.versions`; `tools/images.sh copy <from> <to>` copies them
+dispatcher, jobs, ops) with `--pull --no-cache`, tagged by `images.versions`; `tools/images.sh copy <from> <to>` copies them
 from another registry without a build. Any other image is the same three steps: build once, push to the
 source registry, reference it through the host:
 

@@ -1,5 +1,16 @@
 # Changelog
 
+## CA trust remediation — 2026-10-22
+
+- Use one authoritative public trust store for the API and reject the compromised eMudhra hierarchy.
+- Refresh Python CA packages and OS packages in clean image builds. Route AWS CLI through system roots.
+- Reuse the jobs image for cost-report uploads and remove the old standalone AWS CLI image.
+- Check OS, Python, pip, AWS CLI and merged API trust against both compromised signing paths in CI.
+- Image versions: api 0.11.40, dispatcher 0.2.13, jobs 0.1.16, ops 0.1.13.
+
+Build and deploy these tags before changing existing fleets. See the
+[rollout instructions](../docs/security/emudhra-ca-remediation.md).
+
 The platform images (`services/api`, `services/dispatcher`, `services/jobs`, `services/ops`; tags in
 `stack/config/variables.tf` `images.versions`) and the charts (`charts/fleet`, `charts/platform`, `charts/tenant`;
 `version` in each `Chart.yaml`). The current versions are in `README.md` "Versions".
