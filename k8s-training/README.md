@@ -665,7 +665,9 @@ If the token file is missing, follow [credential recovery](#recovering-grafana-c
 before planning or rotating.
 
 After validation succeeds, invalidate the previous key and remove its local
-backup from the checkout used for that rotation:
+backup from the checkout used for that rotation. If interrupted between
+revocation and backup removal, rerun the block. It removes the two previous files when
+IAM confirms the key is already absent. Other errors leave the backups in place.
 
 ```bash
 set -euo pipefail
@@ -675,15 +677,29 @@ PREVIOUS_TOKEN="grafana_access_token.previous.txt"
 test -s "$PREVIOUS_METADATA"
 PREVIOUS_KEY_ID="$(jq -r '.id // empty' "$PREVIOUS_METADATA")"
 
-if [[ -n "$PREVIOUS_KEY_ID" ]]; then
-  nebius iam static-key delete --id "$PREVIOUS_KEY_ID"
+invalidate_previous() {
+  if [[ -n "$PREVIOUS_KEY_ID" ]]; then
+    nebius iam static-key delete --id "$PREVIOUS_KEY_ID"
+  else
+    # Legacy credentials have a token but no recorded key ID.
+    test -s "$PREVIOUS_TOKEN" || return 1
+    jq -Rs '{token: sub("\n+\\z"; "")}' "$PREVIOUS_TOKEN" |
+      nebius iam static-key revoke --file /dev/stdin
+  fi
+}
+
+if response=$(invalidate_previous 2>&1); then
+  echo "Previous Grafana key invalidated."
 else
-  # Compatibility path for credentials created before key metadata was recorded.
-  test -s "$PREVIOUS_TOKEN"
-  nebius iam static-key revoke --token "$(cat "$PREVIOUS_TOKEN")"
+  cli_status=$?
+  if [[ "$cli_status" != 13 ]] || ! grep -Eq \
+    '^[[:space:]]*((Error: )?rpc error: code = NotFound([[:space:]]|$)|(Resource not found )?ResourceNotFound:)' <<< "$response"; then
+    echo "Could not confirm revocation (exit $cli_status). Previous credential files retained." >&2
+    exit "$cli_status"
+  fi
+  echo "Previous Grafana key already absent."
 fi
 
-# This line is reached only after the remote delete or revoke succeeds.
 rm -f -- "$PREVIOUS_TOKEN" "$PREVIOUS_METADATA"
 ```
 

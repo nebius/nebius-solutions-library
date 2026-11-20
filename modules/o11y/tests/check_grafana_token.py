@@ -153,6 +153,8 @@ def main():
             "    printf '{}\\n'\n"
             "    ;;\n"
             "  *\"static-key revoke\"*)\n"
+            "    test \"$operation\" = 'iam static-key revoke --file /dev/stdin'\n"
+            "    jq -e '.token | strings | . == env.FAKE_EXPECTED_REVOKE_TOKEN' /dev/stdin >/dev/null\n"
             "    printf 'revoke\\n' >> \"$FAKE_NEBIUS_LOG\"\n"
             "    printf '{}\\n'\n"
             "    ;;\n"
@@ -207,7 +209,11 @@ def main():
         subprocess.run(
             [terraform, "test", "-filter=tests/upgrade.tftest.hcl", "-no-color"],
             cwd=fixture,
-            env={**environment, "FAKE_NEBIUS_LOG": str(upgrade_log)},
+            env={
+                **environment,
+                "FAKE_NEBIUS_LOG": str(upgrade_log),
+                "FAKE_EXPECTED_REVOKE_TOKEN": "fixture-observability-token-1",
+            },
             check=True,
         )
         upgrade_calls = upgrade_log.read_text().splitlines()

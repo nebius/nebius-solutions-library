@@ -1,5 +1,10 @@
 #!/usr/bin/env bash
 
+# The CLI accepts a JSON request file. Stream it to keep the token out of argv.
+revoke_token() {
+  jq -Rs '{token: sub("\n+\\z"; "")}' | nebius iam static-key revoke --file /dev/stdin
+}
+
 case "${1:-}" in
   issue)
     set -euo pipefail
@@ -32,7 +37,7 @@ case "${1:-}" in
           nebius iam static-key delete --id "$NEW_KEY_ID" >/dev/null || \
             echo "Warning: failed to delete newly issued key $NEW_KEY_ID" >&2
         else
-          if ! nebius iam static-key revoke --token "$NEW_TOKEN" >/dev/null; then
+          if ! printf '%s' "$NEW_TOKEN" | revoke_token >/dev/null; then
             echo "Failed to revoke the newly issued key. When IAM is available, look up its ID and delete it:" >&2
             echo "  nebius iam static-key get-by-name --parent-id $PARENT_ID --name $KEY_NAME" >&2
           fi
@@ -217,7 +222,7 @@ case "${1:-}" in
         command_output=$(nebius iam static-key delete --id "$key_id" 2>&1) || command_status=$?
       elif [ -s "$token_file" ]; then
         echo "Revoking $description legacy Grafana Observability key"
-        command_output=$(nebius iam static-key revoke --token "$(cat "$token_file")" 2>&1) || command_status=$?
+        command_output=$(revoke_token < "$token_file" 2>&1) || command_status=$?
       elif [ -e "$metadata_file" ] || [ -e "$token_file" ]; then
         echo "Cannot invalidate the $description Grafana Observability key: its local credential files are incomplete" >&2
         return 1

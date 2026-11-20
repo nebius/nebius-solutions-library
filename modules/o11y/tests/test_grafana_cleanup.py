@@ -1,5 +1,6 @@
 """Run cleanup failures in isolation with dummy keys and no cloud access."""
 
+import json
 import shutil
 import subprocess
 import tempfile
@@ -103,6 +104,52 @@ esac
         name = issued_name.read_text().strip()
         self.assertIn(f"static-key get-by-name --parent-id {project} --name {name}", result.stderr)
         self.assertNotIn("dummy-rollback-credential", result.stdout + result.stderr)
+
+    def test_retry_documented_finalization(self):
+        readme = HELPER.parents[3] / "k8s-training/README.md"
+        section = readme.read_text().split("After validation succeeds, invalidate the previous key", 1)[1]
+        snippet = section.split("```bash\n", 1)[1].split("\n```", 1)[0]
+        root = self.bin.parent
+        current = root / "grafana_access_token.txt"
+        current_metadata = root / "grafana_access_token.metadata.json"
+        previous = root / "grafana_access_token.previous.txt"
+        metadata = root / "grafana_access_token.previous.metadata.json"
+        current.write_text("current-token")
+        current_metadata.write_text('{"id":"current-id"}')
+        (self.bin / "nebius").write_text(
+            '''#!/bin/bash
+case "$*" in
+  "iam static-key delete --id previous-id") ;;
+  "iam static-key revoke --file /dev/stdin") jq -e '.token == "previous-token"' >/dev/null || exit 2 ;;
+  *) exit 2 ;;
+esac
+printf '%s\\n' "$API_ERROR" >&2
+exit "$CLI_STATUS"
+'''
+        )
+        for key_id in ("previous-id", None):
+            for status, error, removed in (
+                (0, "", True),
+                (7, "Error: rpc error: code = PermissionDenied", False),
+                (1, "connection timed out", False),
+                (13, "profile not found", False),
+                (1, "Error: rpc error: code = NotFound desc = key absent", False),
+                (13, "Error: rpc error: code = NotFound desc = key absent", True),
+            ):
+                with self.subTest(key_id=key_id, status=status, error=error):
+                    previous.write_text("previous-token\n")
+                    metadata.write_text(json.dumps({"id": key_id}))
+                    result = subprocess.run(
+                        ["/bin/bash", "-c", snippet], cwd=root,
+                        env=dict(self.env, CLI_STATUS=str(status), API_ERROR=error),
+                        text=True, capture_output=True,
+                    )
+                    self.assertEqual(result.returncode, 0 if removed else status, result.stderr)
+                    self.assertEqual(previous.exists(), not removed)
+                    self.assertEqual(metadata.exists(), not removed)
+                    self.assertEqual(current.read_text(), "current-token")
+                    self.assertEqual(current_metadata.read_text(), '{"id":"current-id"}')
+                    self.assertNotIn("previous-token", result.stdout + result.stderr)
 
 
 if __name__ == "__main__":
