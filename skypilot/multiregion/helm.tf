@@ -46,7 +46,6 @@ module "o11y" {
   #gpu_nodes_count           = var.gpu_nodes_count_per_group * var.gpu_node_groups
   k8s_node_group_sa_id      = var.enable_k8s_node_group_sa ? nebius_iam_v1_service_account.k8s_node_group_sa[local.primary-cluster-key].id : null
   k8s_node_group_sa_enabled = var.enable_k8s_node_group_sa
-
   o11y = {
     nebius_o11y_agent = {
       enabled                  = var.enable_nebius_o11y_agent

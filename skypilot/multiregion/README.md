@@ -47,6 +47,38 @@ Important flags:
 - `enable_secondary_region = false` (primary-only) or `true` (two regions)
 - `gpu_nodes_*` and `cpu_nodes_*` sizing
 
+Use one Terraform checkout per deployment. Workspaces sharing a checkout also
+share Grafana credential files, including the files used during destroy.
+
+Normal applies do not rotate the Grafana Observability key. For an intentional
+rotation, run from the same machine or persistent runner that holds the current
+local Grafana credential files, then use Terraform's one-shot replacement
+workflow:
+
+```bash
+terraform plan \
+  -replace='module.o11y.terraform_data.grafana_access_token[0]' \
+  -out=grafana-rotation.tfplan
+terraform show grafana-rotation.tfplan
+terraform apply grafana-rotation.tfplan
+```
+
+Before applying, confirm that the plan replaces only
+`module.o11y.terraform_data.grafana_access_token[0]`, updates the existing
+Grafana application in place, and does not replace clusters or node groups.
+
+After apply, validate all four provisioned datasources: **Nebius Services**,
+**Nebius Monitoring**, **Nebius Logging** and **Nebius Tracing**. If validation
+fails, retain both the current and previous credential files; do not revoke a
+key or request another rotation. After validation succeeds, follow the
+[canonical finalization steps](../../k8s-training/README.md#rotating-the-grafana-observability-key)
+to invalidate the previous key and remove its local backup. A subsequent normal
+`terraform plan` must report no changes.
+
+The `grafana_service_account` output no longer exposes `access_token`. If
+another application reads it, follow the [token consumer migration steps](../../k8s-training/README.md#migrating-a-token-consumer)
+before upgrading this stack. Built-in Grafana receives its token directly.
+
 Deploy:
 
 ```bash

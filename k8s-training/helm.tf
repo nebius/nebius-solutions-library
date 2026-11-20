@@ -52,7 +52,6 @@ module "o11y" {
   cluster_id                = nebius_mk8s_v1_cluster.k8s-cluster.id
   k8s_node_group_sa_id      = var.enable_k8s_node_group_sa ? nebius_iam_v1_service_account.k8s_node_group_sa[0].id : null
   k8s_node_group_sa_enabled = var.enable_k8s_node_group_sa
-
   o11y = {
     nebius_o11y_agent = {
       enabled                  = var.enable_nebius_o11y_agent

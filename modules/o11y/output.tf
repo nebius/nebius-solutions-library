@@ -24,12 +24,11 @@ output "nebius_grafana_password" {
 }
 
 output "grafana_service_account" {
-  description = "Grafana service account information"
+  description = "Grafana service account information. The Observability access token is intentionally excluded because it is delivered ephemerally and is not stored in Terraform state."
   value = var.o11y.grafana.enabled && var.k8s_node_group_sa_enabled ? {
     id                = var.k8s_node_group_sa_id
     access_key_id     = nebius_iam_v2_access_key.grafana_key[0].status.aws_access_key_id
     secret_access_key = nebius_iam_v2_access_key.grafana_key[0].status.secret
-    access_token      = local.grafana_access_token
   } : null
   sensitive = true
 }

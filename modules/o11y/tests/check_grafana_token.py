@@ -1,0 +1,532 @@
+#!/usr/bin/env python3
+"""Exercise the production Grafana token flow with mocked cloud providers.
+
+The temporary fixture uses the real grafana.tf and a fake Nebius CLI. A clean
+apply proves that terraform_data creates the token file before the ephemeral
+local_command reads it and passes it to the application's write-only fields.
+Subsequent applies exercise one-shot replacement and idempotency. A separate
+upgrade test carries existing Grafana state and a legacy token across applies.
+Requires Terraform >= 1.11.4 on PATH (or set TERRAFORM_BIN) and Git access to
+the public Marketplace chart repository.
+"""
+
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import tempfile
+
+
+MODULE = Path(__file__).resolve().parents[1]
+
+
+def check_production_wiring():
+    grafana = (MODULE / "grafana.tf").read_text()
+    output = (MODULE / "output.tf").read_text()
+    versions = (MODULE / "versions.tf").read_text()
+
+    required = (
+        "triggers_replace = {",
+        "create_before_destroy = true",
+        "grafana_access_token.previous.txt",
+        'ephemeral "local_command" "grafana_access_token"',
+        "terraform_data.grafana_access_token[0].output.token_path",
+        '"nebius.com/observability-token-revision"',
+        "version = sha256(local.grafana_values)",
+        "values  = local.grafana_values",
+        'type = "Recreate"',
+        'version = "~> 2.9"',
+    )
+    for expression in required:
+        if expression not in grafana and expression not in versions:
+            raise RuntimeError(f"Missing Grafana token wiring: {expression}")
+
+    forbidden = (
+        "try(trimspace(file(",
+        "access_token      = local.grafana_access_token",
+        "grafana_observability_key_generation",
+        "rotation_generation",
+    )
+    combined = grafana + output
+    for expression in forbidden:
+        if expression in combined:
+            raise RuntimeError(f"Obsolete Grafana token wiring remains: {expression}")
+
+
+def main():
+    check_production_wiring()
+    terraform = os.environ.get("TERRAFORM_BIN", "terraform")
+
+    with tempfile.TemporaryDirectory(prefix="o11y-grafana-token-") as directory:
+        fixture = Path(directory)
+        for filename in ("grafana.tf", "variables.tf", "versions.tf"):
+            shutil.copyfile(MODULE / filename, fixture / filename)
+        shutil.copytree(MODULE / "scripts", fixture / "scripts")
+
+        tests = fixture / "tests"
+        tests.mkdir()
+        shutil.copyfile(
+            MODULE / "tests/grafana-token/grafana_token.tftest.hcl",
+            tests / "grafana_token.tftest.hcl",
+        )
+
+        render = tests / "render"
+        shutil.copytree(MODULE / "tests/grafana-token/render", render)
+        # nebius-grafana 1.0.0, including its vendored Grafana 8.15.0 dependency.
+        chart_repo = "https://github.com/nebius/nebius-k8s-applications.git"
+        chart_revision = "33d14191284544d986a60e2ff56f0de690d597d6"
+        checkout = render / "marketplace"
+        subprocess.run(["git", "init", "--quiet", checkout], check=True)
+        subprocess.run(
+            ["git", "fetch", "--quiet", "--no-tags", "--depth=1", chart_repo, chart_revision],
+            cwd=checkout, check=True,
+        )
+        subprocess.run(
+            ["git", "checkout", "FETCH_HEAD", "--", "nebius-grafana/chart"],
+            cwd=checkout, check=True,
+        )
+        (fixture / "chart_test.tf").write_text(
+            'module "marketplace_grafana" {\n'
+            '  source      = "./tests/render"\n'
+            '  values_yaml = local.grafana_values\n'
+            '}\n'
+        )
+
+        legacy = tests / "pre-pr"
+        shutil.copytree(MODULE / "tests/grafana-token/pre-pr", legacy)
+        for filename in ("variables.tf", "versions.tf"):
+            shutil.copyfile(fixture / filename, legacy / filename)
+        shutil.copyfile(
+            MODULE / "tests/grafana-token/upgrade.tftest.hcl", tests / "upgrade.tftest.hcl"
+        )
+
+        binary_directory = fixture / "bin"
+        binary_directory.mkdir()
+        nebius_log = fixture / "nebius-calls.log"
+        fake_nebius = binary_directory / "nebius"
+        fake_nebius.write_text(
+            "#!/bin/bash\n"
+            "set -euo pipefail\n"
+            "operation=\"$*\"\n"
+            "name=\"\"\n"
+            "labels=\"\"\n"
+            "key_id=\"\"\n"
+            "while (( $# )); do\n"
+            "  case \"$1\" in\n"
+            "    --name) name=\"$2\"; shift 2 ;;\n"
+            "    --labels) labels=\"$2\"; shift 2 ;;\n"
+            "    --id) key_id=\"$2\"; shift 2 ;;\n"
+            "    *) shift ;;\n"
+            "  esac\n"
+            "done\n"
+            "case \"$operation\" in\n"
+            "  *\"static-key list\"*)\n"
+            "    printf '%s\\n' \"$FAKE_KEY_LIST\"\n"
+            "    ;;\n"
+            "  *\"static-key issue\"*)\n"
+            "    issue_number=$(grep -c '^issue:' \"$FAKE_NEBIUS_LOG\" 2>/dev/null || true)\n"
+            "    issue_number=$((issue_number + 1))\n"
+            "    printf 'issue:%s:%s\\n' \"$issue_number\" \"$name\" >> \"$FAKE_NEBIUS_LOG\"\n"
+            "    printf 'labels:%s\\n' \"$labels\" >> \"$FAKE_NEBIUS_LOG\"\n"
+            "    printf '{\"token\":\"fixture-observability-token-%s\"}\\n' \"$issue_number\"\n"
+            "    ;;\n"
+            "  *\"static-key get-by-name\"*)\n"
+            "    issue_number=$(awk -F: -v key_name=\"$name\" '$1 == \"issue\" && $3 == key_name {print $2}' \"$FAKE_NEBIUS_LOG\" | tail -1)\n"
+            "    test -n \"$issue_number\"\n"
+            "    printf '{\"metadata\":{\"id\":\"static-key-%s\"}}\\n' \"$issue_number\"\n"
+            "    ;;\n"
+            "  *\"static-key delete\"*)\n"
+            "    if [ -n \"$FAKE_DELETE_FAIL_ONCE_ID\" ] && "
+            "[ \"$key_id\" = \"$FAKE_DELETE_FAIL_ONCE_ID\" ] && "
+            "[ ! -e \"$FAKE_DELETE_FAIL_MARKER\" ]; then\n"
+            "      : > \"$FAKE_DELETE_FAIL_MARKER\"\n"
+            "      printf 'simulated delete failure\\n' >&2\n"
+            "      exit 1\n"
+            "    fi\n"
+            "    if [ \"$FAKE_DELETED_IDS_ARE_NOT_FOUND\" = true ] && "
+            "grep -qx \"delete:$key_id\" \"$FAKE_NEBIUS_LOG\"; then\n"
+            "      printf 'ResourceNotFound: key not found\\n' >&2\n"
+            "      exit 13\n"
+            "    fi\n"
+            "    printf 'delete:%s\\n' \"$key_id\" >> \"$FAKE_NEBIUS_LOG\"\n"
+            "    printf '{}\\n'\n"
+            "    ;;\n"
+            "  *\"static-key revoke\"*)\n"
+            "    test \"$operation\" = 'iam static-key revoke --file /dev/stdin'\n"
+            "    jq -e '.token | strings | . == env.FAKE_EXPECTED_REVOKE_TOKEN' /dev/stdin >/dev/null\n"
+            "    printf 'revoke\\n' >> \"$FAKE_NEBIUS_LOG\"\n"
+            "    printf '{}\\n'\n"
+            "    ;;\n"
+            "  *)\n"
+            "    printf 'Unexpected fake Nebius invocation: %s\\n' \"$operation\" >&2\n"
+            "    exit 1\n"
+            "    ;;\n"
+            "esac\n"
+        )
+        fake_nebius.chmod(0o755)
+
+        environment = os.environ.copy()
+        environment["PATH"] = f"{binary_directory}:{environment['PATH']}"
+        environment["FAKE_NEBIUS_LOG"] = str(nebius_log)
+        environment["FAKE_DELETE_FAIL_ONCE_ID"] = ""
+        environment["FAKE_DELETE_FAIL_MARKER"] = str(fixture / "unused-marker")
+        environment["FAKE_DELETED_IDS_ARE_NOT_FOUND"] = "false"
+        environment["FAKE_KEY_LIST"] = '{"items":[]}'
+
+        subprocess.run(
+            [terraform, "init", "-backend=false", "-input=false", "-no-color"],
+            cwd=fixture,
+            env=environment,
+            check=True,
+        )
+
+        subprocess.run(
+            [
+                terraform,
+                "test",
+                "-filter=tests/grafana_token.tftest.hcl",
+                "-no-color",
+            ],
+            cwd=fixture,
+            env=environment,
+            check=True,
+        )
+
+        # The last apply still has a pending previous key. Check Terraform's
+        # teardown before another test can issue a key in the same directory.
+        credential_files = (
+            "grafana_access_token.txt",
+            "grafana_access_token.metadata.json",
+            "grafana_access_token.previous.txt",
+            "grafana_access_token.previous.metadata.json",
+        )
+        retained = [name for name in credential_files if (fixture / name).exists()]
+        if retained:
+            raise RuntimeError(f"Destroy left Grafana credential files behind: {retained}")
+
+        upgrade_log = fixture / "upgrade-cli.log"
+        subprocess.run(
+            [terraform, "test", "-filter=tests/upgrade.tftest.hcl", "-no-color"],
+            cwd=fixture,
+            env={
+                **environment,
+                "FAKE_NEBIUS_LOG": str(upgrade_log),
+                "FAKE_EXPECTED_REVOKE_TOKEN": "fixture-observability-token-1",
+            },
+            check=True,
+        )
+        upgrade_calls = upgrade_log.read_text().splitlines()
+        if [line.split(":", 1)[0] for line in upgrade_calls] != ["issue", "labels", "revoke"]:
+            raise RuntimeError("Expected one legacy issue, no upgrade rotation, and one teardown revocation")
+
+        calls = nebius_log.read_text().splitlines()
+        issue_calls = [call for call in calls if call.startswith("issue:")]
+        issue_numbers = [call.split(":", 2)[1] for call in issue_calls]
+        if issue_numbers != ["1", "2"]:
+            raise RuntimeError(
+                "Expected one initial issuance and one requested rotation; "
+                f"got {issue_calls}"
+            )
+
+        delete_calls = [call for call in calls if call.startswith("delete:")]
+        if delete_calls != ["delete:static-key-2", "delete:static-key-1"]:
+            raise RuntimeError(
+                "Expected destroy to delete the current and previous keys; "
+                f"got {delete_calls}"
+            )
+
+        helper = fixture / "scripts/grafana-observability-key.sh"
+
+        # Both keys should carry the cluster ID from the Terraform fixture.
+        expected_labels = {
+            "solutions-library-app=grafana",
+            "mk8s-cluster-id=mk8scluster-e00r7z9vfxmg1bk99s",
+        }
+        issued_labels = [
+            set(call.partition(":")[2].split(",")) for call in calls if call.startswith("labels:")
+        ]
+        if issued_labels != [expected_labels, expected_labels]:
+            raise RuntimeError("Initial issue and rotation must label keys for this deployment")
+
+        # A shared account can also have keys for other apps and clusters.
+        def listed_key(key_id, labels, *, active=True, sa="service-account-test", service="OBSERVABILITY"):
+            return {
+                "metadata": {"id": key_id, "labels": labels},
+                "spec": {"service": service, "account": {"service_account": {"id": sa}}},
+                "status": {"active": active},
+            }
+
+        owner = {"solutions-library-app": "grafana", "mk8s-cluster-id": "cluster-test"}
+        unrelated = [
+            listed_key("other-app", {**owner, "solutions-library-app": "other"}),
+            listed_key("other-cluster", {**owner, "mk8s-cluster-id": "other"}),
+            listed_key("other-account", owner, sa="other"),
+            listed_key("other-service", owner, service="CONTAINER_REGISTRY"),
+            listed_key("unlabeled", {}),
+            listed_key("inactive", owner, active=False),
+        ]
+        missing_current = fixture / "missing-current"
+        missing_current.mkdir()
+        missing_log = missing_current / "nebius-calls.log"
+        missing_environment = environment.copy()
+        missing_environment.update(
+            {
+                "CURRENT_TOKEN_FILE": str(missing_current / "grafana_access_token.txt"),
+                "CURRENT_METADATA_FILE": str(
+                    missing_current / "grafana_access_token.metadata.json"
+                ),
+                "PREVIOUS_TOKEN_FILE": str(
+                    missing_current / "grafana_access_token.previous.txt"
+                ),
+                "PREVIOUS_METADATA_FILE": str(
+                    missing_current / "grafana_access_token.previous.metadata.json"
+                ),
+                "PARENT_ID": "project-test",
+                "SERVICE_ACCOUNT_ID": "service-account-test",
+                "CLUSTER_ID": "cluster-test",
+                "FAKE_NEBIUS_LOG": str(missing_log),
+                "FAKE_KEY_LIST": json.dumps({"items": unrelated + [listed_key("owned-key", owner)]}),
+            }
+        )
+        def issue_from_runner(**options):
+            return subprocess.run(
+                ["/bin/bash", helper, "issue"], cwd=missing_current, env=missing_environment, **options
+            )
+
+        missing_result = issue_from_runner(capture_output=True, text=True)
+        if missing_result.returncode == 0 or "owned-key" not in missing_result.stderr:
+            raise RuntimeError("Missing local files must identify the active deployment-owned key")
+        if missing_log.exists() and "issue:" in missing_log.read_text():
+            raise RuntimeError("Failed preflight unexpectedly issued a remote key")
+
+        missing_environment["FAKE_KEY_LIST"] = json.dumps(unrelated)
+        issue_from_runner(check=True)
+        shared_calls = missing_log.read_text().splitlines()
+        if sum(call.startswith("issue:") for call in shared_calls) != 1 or any(
+            call.startswith(("delete:", "revoke")) for call in shared_calls
+        ):
+            raise RuntimeError("A first install must issue its own key and leave unrelated keys alone")
+
+        # Pre-PR installations have a local token but no key-ID sidecar.
+        Path(missing_environment["CURRENT_METADATA_FILE"]).unlink()
+        issue_from_runner(check=True)
+        previous_token = Path(missing_environment["PREVIOUS_TOKEN_FILE"]).read_text().strip()
+        previous = json.loads(Path(missing_environment["PREVIOUS_METADATA_FILE"]).read_text())
+        if previous_token != "fixture-observability-token-1" or previous.get("legacy") is not True:
+            raise RuntimeError("Rotating a legacy token must preserve it for manual revocation")
+
+        # If deletion of the previous key fails after the current key was
+        # deleted, a retry must accept current-key NotFound and finish cleanup.
+        cleanup_retry = fixture / "cleanup-retry"
+        cleanup_retry.mkdir()
+        current_token = cleanup_retry / "grafana_access_token.txt"
+        current_metadata = cleanup_retry / "grafana_access_token.metadata.json"
+        previous_token = cleanup_retry / "grafana_access_token.previous.txt"
+        previous_metadata = (
+            cleanup_retry / "grafana_access_token.previous.metadata.json"
+        )
+        current_token.write_text("fixture-observability-token-2\n")
+        current_metadata.write_text('{"id":"static-key-2"}\n')
+        previous_token.write_text("fixture-observability-token-1\n")
+        previous_metadata.write_text('{"id":"static-key-1"}\n')
+        for credential_file in (
+            current_token,
+            current_metadata,
+            previous_token,
+            previous_metadata,
+        ):
+            credential_file.chmod(0o600)
+
+        retry_log = cleanup_retry / "nebius-calls.log"
+        retry_marker = cleanup_retry / "previous-delete-failed"
+        retry_environment = environment.copy()
+        retry_environment.update(
+            {
+                "CURRENT_TOKEN_FILE": str(current_token),
+                "CURRENT_METADATA_FILE": str(current_metadata),
+                "PREVIOUS_TOKEN_FILE": str(previous_token),
+                "PREVIOUS_METADATA_FILE": str(previous_metadata),
+                "FAKE_NEBIUS_LOG": str(retry_log),
+                "FAKE_DELETE_FAIL_ONCE_ID": "static-key-1",
+                "FAKE_DELETE_FAIL_MARKER": str(retry_marker),
+                "FAKE_DELETED_IDS_ARE_NOT_FOUND": "true",
+            }
+        )
+        first_cleanup = subprocess.run(
+            ["/bin/bash", helper, "cleanup"],
+            cwd=cleanup_retry,
+            env=retry_environment,
+            capture_output=True,
+            text=True,
+        )
+        if first_cleanup.returncode == 0:
+            raise RuntimeError("The injected previous-key deletion failure was ignored")
+        if not all(
+            path.exists()
+            for path in (
+                current_token,
+                current_metadata,
+                previous_token,
+                previous_metadata,
+            )
+        ):
+            raise RuntimeError("A partial cleanup removed local recovery files")
+
+        subprocess.run(
+            ["/bin/bash", helper, "cleanup"],
+            cwd=cleanup_retry,
+            env=retry_environment,
+            check=True,
+        )
+        if any(
+            path.exists()
+            for path in (
+                current_token,
+                current_metadata,
+                previous_token,
+                previous_metadata,
+            )
+        ):
+            raise RuntimeError("Successful cleanup retry left local credentials behind")
+
+        # Exercise two consecutive, finalized rotations. The first replacement
+        # preserves key 1 while installing key 2. Simulate successful datasource
+        # validation by deleting key 1 and its local backup, then rotate again to
+        # key 3 and prove destroy cleans up keys 3 and 2.
+        consecutive = fixture / "consecutive-rotations"
+        consecutive.mkdir()
+        consecutive_current_token = consecutive / "grafana_access_token.txt"
+        consecutive_current_metadata = (
+            consecutive / "grafana_access_token.metadata.json"
+        )
+        consecutive_previous_token = (
+            consecutive / "grafana_access_token.previous.txt"
+        )
+        consecutive_previous_metadata = (
+            consecutive / "grafana_access_token.previous.metadata.json"
+        )
+        consecutive_log = consecutive / "nebius-calls.log"
+        consecutive_environment = environment.copy()
+        consecutive_environment.update(
+            {
+                "CURRENT_TOKEN_FILE": str(consecutive_current_token),
+                "CURRENT_METADATA_FILE": str(consecutive_current_metadata),
+                "PREVIOUS_TOKEN_FILE": str(consecutive_previous_token),
+                "PREVIOUS_METADATA_FILE": str(consecutive_previous_metadata),
+                "PARENT_ID": "project-test",
+                "SERVICE_ACCOUNT_ID": "service-account-test",
+                "FAKE_NEBIUS_LOG": str(consecutive_log),
+                "CLUSTER_ID": "cluster-test",
+            }
+        )
+
+        # Clean first issue followed by the first requested rotation.
+        for _ in range(2):
+            subprocess.run(
+                ["/bin/bash", helper, "issue"],
+                cwd=consecutive,
+                env=consecutive_environment,
+                check=True,
+            )
+
+        if consecutive_current_token.read_text().strip() != (
+            "fixture-observability-token-2"
+        ):
+            raise RuntimeError("The first rotation did not install key 2")
+        if consecutive_previous_token.read_text().strip() != (
+            "fixture-observability-token-1"
+        ):
+            raise RuntimeError("The first rotation did not preserve key 1")
+
+        # Simulate successful datasource validation and operator finalization.
+        first_previous_key_id = json.loads(
+            consecutive_previous_metadata.read_text()
+        )["id"]
+        subprocess.run(
+            [
+                "nebius",
+                "iam",
+                "static-key",
+                "delete",
+                "--id",
+                first_previous_key_id,
+            ],
+            cwd=consecutive,
+            env=consecutive_environment,
+            check=True,
+            stdout=subprocess.DEVNULL,
+        )
+        consecutive_previous_token.unlink()
+        consecutive_previous_metadata.unlink()
+
+        # A second requested rotation must now install key 3 and preserve key 2.
+        subprocess.run(
+            ["/bin/bash", helper, "issue"],
+            cwd=consecutive,
+            env=consecutive_environment,
+            check=True,
+        )
+        if consecutive_current_token.read_text().strip() != (
+            "fixture-observability-token-3"
+        ):
+            raise RuntimeError("The second rotation did not install key 3")
+        if consecutive_previous_token.read_text().strip() != (
+            "fixture-observability-token-2"
+        ):
+            raise RuntimeError("The second rotation did not preserve key 2")
+        if json.loads(consecutive_current_metadata.read_text())["id"] != (
+            "static-key-3"
+        ):
+            raise RuntimeError("The second rotation recorded the wrong current key ID")
+        if json.loads(consecutive_previous_metadata.read_text())["id"] != (
+            "static-key-2"
+        ):
+            raise RuntimeError("The second rotation recorded the wrong previous key ID")
+
+        subprocess.run(
+            ["/bin/bash", helper, "cleanup"],
+            cwd=consecutive,
+            env=consecutive_environment,
+            check=True,
+        )
+        if any(
+            path.exists()
+            for path in (
+                consecutive_current_token,
+                consecutive_current_metadata,
+                consecutive_previous_token,
+                consecutive_previous_metadata,
+            )
+        ):
+            raise RuntimeError("Two-rotation cleanup left local credentials behind")
+
+        consecutive_calls = consecutive_log.read_text().splitlines()
+        consecutive_issues = [
+            call for call in consecutive_calls if call.startswith("issue:")
+        ]
+        if [call.split(":", 2)[1] for call in consecutive_issues] != [
+            "1",
+            "2",
+            "3",
+        ]:
+            raise RuntimeError(
+                "Expected an initial issue and two consecutive rotations; "
+                f"got {consecutive_issues}"
+            )
+        consecutive_deletes = [
+            call for call in consecutive_calls if call.startswith("delete:")
+        ]
+        if consecutive_deletes != [
+            "delete:static-key-1",
+            "delete:static-key-3",
+            "delete:static-key-2",
+        ]:
+            raise RuntimeError(
+                "Expected first-rotation finalization followed by cleanup of the "
+                f"second rotation; got {consecutive_deletes}"
+            )
+
+
+if __name__ == "__main__":
+    main()
