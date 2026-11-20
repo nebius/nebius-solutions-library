@@ -36,18 +36,68 @@ data:
       tenant: {{ include "fleet.poolTenant" (dict "fleet" $f "pool" $p.pool) | quote }}
     {{- end }}
     {{- end }}
+  fit.yaml: |
+    {{- /* per-node fit (docs/SCHEDULING.md "Per-node fit"): what ONE node of each pool admits, by cluster id and pool
+           label, from the same helpers that size the Kueue quotas (fleet.quota / fleet.cpuPoolQuota / fleet.systemQuota
+           with one node, no endpoint floor): the API refuses a pod shape no node of a candidate pool can hold and
+           constrains a run to the pools whose node holds it, so Kueue's aggregate quota never admits a pod that no
+           single node fits (api 0.11.80). shared_fs as the flavors' nodeLabels (worker-flavors.yaml). */}}
+    {{- range $rn, $r := $f.regions }}
+    {{- if or (include "fleet.isControl" $) (eq $r.id $.Values.cluster) }}
+    {{- $fs := default dict $r.weights_filesystem }}
+    {{- $fsOn := and (default false $fs.enabled) true }}
+    {{- $sq := include "fleet.systemQuota" (dict "fleet" $f "system_pool" (merge (dict "node_count" 1) (default dict $r.system_pool))) | fromYaml }}
+    {{ $r.id }}:
+      system: { kind: system, gpus: 0, cpu: {{ $sq.cpu }}, memory_gib: {{ $sq.memoryGi }}, ephemeral_gib: {{ $sq.ephemeralGi }}, shared_fs: {{ if and $fsOn (default false $fs.mount_on_system) }}true{{ else }}false{{ end }} }
+      {{- range $pn, $p := (default dict $r.cpu_pools) }}
+      {{- $q := include "fleet.cpuPoolQuota" (dict "fleet" $f "pool" (merge (dict "max_nodes" 1) $p)) | fromYaml }}
+      {{ $pn }}: { kind: cpu, gpus: 0, cpu: {{ $q.cpu }}, memory_gib: {{ $q.memoryGi }}, ephemeral_gib: {{ $q.ephemeralGi }}, shared_fs: {{ if and $fsOn (or (not (hasKey $p "shared_filesystem")) (eq (toString $p.shared_filesystem) "true")) }}true{{ else }}false{{ end }} }
+      {{- end }}
+      {{- range $pn, $p := $r.pools }}
+      {{- $q := include "fleet.quota" (dict "fleet" $f "pool" (merge (dict "max_nodes" 1 "endpoint_floor_gpus" 0) $p)) | fromYaml }}
+      {{ $pn }}: { kind: gpu, gpus: {{ $q.gpu }}, cpu: {{ $q.cpu }}, memory_gib: {{ $q.memoryGi }}, ephemeral_gib: {{ $q.ephemeralGi }}, shared_fs: {{ if $fsOn }}true{{ else }}false{{ end }} }
+      {{- end }}
+    {{- end }}
+    {{- end }}
   clusters.yaml: |
     {{- /* cluster id (MultiKueueCluster name, pools' `region`, catalog deployments) -> the Nebius region and project:
-           what the API uses to pick a kubeconfig, a gateway domain and a price list (services/api/kube.py cluster_region) */}}
+           what the API uses to pick a kubeconfig, a gateway domain and a price list (services/api/kube.py cluster_region);
+           `cluster_id` (the mk8s cluster, from the cloud state through the platform stage) is what the console links
+           need (docs/API.md "Placement") */}}
     {{- range $rn, $r := $f.regions }}
-    {{ $r.id }}: { region: {{ $rn }}, project: {{ $r.project }} }
+    {{ $r.id }}: { region: {{ $rn }}, project: {{ $r.project }}{{ with $r.cluster_id }}, cluster_id: {{ . }}{{ end }} }
     {{- end }}
     {{- if ne $f.control.id "none" }}
-    {{ $f.control.id }}: { region: {{ $f.control.region }}, project: {{ $f.control.project }}, control: true }
+    {{ $f.control.id }}: { region: {{ $f.control.region }}, project: {{ $f.control.project }}, control: true{{ with $f.control.cluster_id }}, cluster_id: {{ . }}{{ end }} }
     {{- end }}
+  cpu_pools.yaml: |
+    {{- /* the GPU-free pools per cluster id (docs/FLEET.md "Customer CPU pools"): the system nodes and every cpu_pools
+           entry with platform/preset (the instance type the API reports for an attempt whose node is gone) and, for a CPU
+           pool, its node group (from the cloud state): what kube.tenant_pool pins a tenant's GPU-free work to */}}
+    {{- range $rn, $r := $f.regions }}
+    {{- if or (include "fleet.isControl" $) (eq $r.id $.Values.cluster) }}
+    {{- $sp := default dict $r.system_pool }}
+    {{ $r.id }}:
+      system: { kind: system, platform: {{ default "" $sp.platform | quote }}, preset: {{ default "" $sp.preset | quote }}, min_nodes: {{ default 0 $sp.node_count }}, max_nodes: {{ default 0 $sp.node_count }} }
+      {{- range $pn, $p := (default dict $r.cpu_pools) }}
+      {{ $pn }}: { kind: cpu, platform: {{ $p.platform | quote }}, preset: {{ $p.preset | quote }}, min_nodes: {{ default 0 $p.min_nodes }}, max_nodes: {{ $p.max_nodes }}{{ with $p.node_group_id }}, node_group_id: {{ . }}{{ end }} }
+      {{- end }}
+    {{- end }}
+    {{- end }}
+  policy.yaml: |
+    {{- /* fleet-wide scheduling policy the API reads (services/api/kube.py): `tenant_system_flavor` false keeps every
+           tenant off the system nodes (the tenant queues list no system flavor, kube.tenant_pool pins GPU-free work to
+           the customer CPU pool) */}}
+    tenant_system_flavor: {{ if hasKey $f "tenant_system_flavor" }}{{ $f.tenant_system_flavor }}{{ else }}true{{ end }}
   tenants.yaml: |
     {{- range $tn, $t := (default dict $f.tenants) }}
-    {{ $tn }}: { gpu_quota: {{ default "null" $t.gpu_quota }}, fair_share_weight: {{ default 1 $t.fair_share_weight }}, dedicated_pools: {{ default list $t.dedicated_pools | toJson }} }
+    {{ $tn }}: { gpu_quota: {{ default "null" $t.gpu_quota }}, fair_share_weight: {{ default 1 $t.fair_share_weight }}, dedicated_pools: {{ default list $t.dedicated_pools | toJson }}, assets: {{ default list $t.assets | toJson }} }
+    {{- end }}
+  assets.yaml: |
+    {{- /* restricted assets (docs/JOBS.md "Restricted assets"): what a run class may name; the tenant chart renders the
+           granted ones as read-only static volumes; the API refuses a weights/data path that reaches one */}}
+    {{- range $an, $a := (default dict $f.assets) }}
+    {{ $an }}: { kind: {{ $a.kind }}, host_path: {{ $a.host_path | quote }}, gid: {{ default 65532 $a.gid }}, sha256: {{ default "" $a.sha256 | quote }}, size: {{ default 0 $a.size }} }
     {{- end }}
   list.yaml: |
     {{- range $platform, $pr := $f.prices }}

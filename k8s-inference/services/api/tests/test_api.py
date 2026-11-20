@@ -13,6 +13,7 @@ import app as appmod
 import auth
 import catalog
 import config
+import db
 import jobs
 import keys
 import kube
@@ -57,6 +58,17 @@ FLEET = {
 class Items:
     def __init__(self, items):
         self.items = items
+
+
+def _merge(into: dict, patch: dict) -> dict:
+    for k, v in patch.items():
+        if v is None:
+            into.pop(k, None)
+        elif isinstance(v, dict) and isinstance(into.get(k), dict):
+            _merge(into[k], v)
+        else:
+            into[k] = v
+    return into
 
 
 class FakeCluster:
@@ -136,9 +148,10 @@ class FakeCluster:
         )
 
     def patch_namespaced_job(self, name, ns, body):
+        if (ns, name) not in self.jobs:
+            raise ApiException(status=404, reason="NotFound")  # as the API answers for an expired Job
         j = self.jobs[(ns, name)]
-        j["spec"].update(body.get("spec", {}))
-        j["metadata"].setdefault("annotations", {}).update((body.get("metadata") or {}).get("annotations") or {})
+        _merge(j, body)  # a merge patch: nested maps merge, None deletes (labels, annotations, template metadata)
         return j
 
     def delete_namespaced_job(self, name, ns, propagation_policy=None):
@@ -175,13 +188,22 @@ class FakeCluster:
             raise ApiException(status=404, reason="NotFound")
         del self.pvcs[(ns, name)]
 
+    _rv = 0
+
+    def _stamp(self, body, uid=None):
+        FakeCluster._rv += 1
+        body["metadata"]["uid"] = uid or f"uid-{FakeCluster._rv}"
+        body["metadata"]["resourceVersion"] = str(FakeCluster._rv)
+
     def create_namespaced_secret(self, ns, body):
         if (ns, body["metadata"]["name"]) in self.secrets:
             raise ApiException(status=409, reason="AlreadyExists")
         body = copy.deepcopy(body)
         if "stringData" in body:
             body["data"] = dict(body["stringData"])  # the API server would base64-encode; tests read either
+        self._stamp(body)
         self.secrets[(ns, body["metadata"]["name"])] = body
+        return body
 
     def read_namespaced_secret(self, name, ns):
         if (ns, name) not in self.secrets:
@@ -191,15 +213,22 @@ class FakeCluster:
     def replace_namespaced_secret(self, name, ns, body):
         if (ns, name) not in self.secrets:
             raise ApiException(status=404, reason="NotFound")
+        current = self.secrets[(ns, name)]
+        rv = (body.get("metadata") or {}).get("resourceVersion")
+        if rv is not None and str(rv) != str(current["metadata"].get("resourceVersion")):
+            raise ApiException(status=409, reason="Conflict")  # the API server's optimistic concurrency
         body = copy.deepcopy(body)
         if "stringData" in body:
             body["data"] = dict(body["stringData"])
+        self._stamp(body, uid=current["metadata"].get("uid"))
         self.secrets[(ns, name)] = body
         return body
 
     def patch_namespaced_secret(self, name, ns, body):
         s = self.secrets[(ns, name)]
         s["metadata"].setdefault("annotations", {}).update((body.get("metadata") or {}).get("annotations") or {})
+        FakeCluster._rv += 1
+        s["metadata"]["resourceVersion"] = str(FakeCluster._rv)
         return s
 
     def list_namespaced_secret(self, ns, label_selector=""):
@@ -217,9 +246,16 @@ class FakeCluster:
 
         return Items([s for (n, _), s in self.secrets.items() if n == ns and ok(s)])
 
-    def delete_namespaced_secret(self, name, ns):
+    def delete_namespaced_secret(self, name, ns, body=None):
         if (ns, name) not in self.secrets:
             raise ApiException(status=404, reason="NotFound")
+        pre = getattr(body, "preconditions", None)
+        if pre is not None:  # V1Preconditions: the deletion is conditional on uid and resourceVersion
+            md = self.secrets[(ns, name)]["metadata"]
+            if (pre.uid and pre.uid != md.get("uid")) or (
+                pre.resource_version and str(pre.resource_version) != str(md.get("resourceVersion"))
+            ):
+                raise ApiException(status=409, reason="Conflict")
         del self.secrets[(ns, name)]
 
     def delete_collection_namespaced_secret(self, ns, label_selector=""):
@@ -335,6 +371,9 @@ def cluster(monkeypatch):
 
 @pytest.fixture
 def client(monkeypatch, cluster):
+    import admissions
+
+    monkeypatch.setattr(admissions, "record", lambda job, region, prefix: None)  # no ledger in the fake world
     monkeypatch.setattr(
         appmod.artifacts, "storage", lambda ns, region="eu-north1": {"bucket": f"serverless2-demo-{region}"}
     )
@@ -342,6 +381,8 @@ def client(monkeypatch, cluster):
         kube, "endpoint_status", lambda n, ns, region="eu-north1": {"status": "scaled-to-zero", "replicas_ready": 0}
     )
     monkeypatch.setattr(kube, "isvc", lambda n, ns, region="eu-north1": None)
+    monkeypatch.setattr(kube, "WORKLOADS_CACHE_S", 0.0)  # every read sees the fake's current Workloads
+    monkeypatch.setattr(kube, "_workloads_cache", {})
 
     async def fake_info(key):
         if key != "sk-good":
@@ -401,7 +442,7 @@ def test_catalog_entries_are_renderable_or_run_classes():
         for f in os.listdir(d):
             doc = yaml.safe_load(open(os.path.join(d, f)))
             assert doc.get("id"), f
-            assert doc.get("runtime") or (
+            assert doc.get("image") or (
                 doc.get("mode") == "run" and doc.get("job", {}).get("image") and doc["job"].get("command")
             ), f
 
@@ -906,7 +947,9 @@ def test_resume_reuses_the_volume_in_the_same_region(client):
     )
     owners = [o["uid"] for o in fake.pvcs[("tenant-demo", f"{oid}-work")]["metadata"]["ownerReferences"]]
     assert owners == [f"uid-{oid}", f"uid-{oid}-r1"]  # the volume now outlives either Job
-    assert c.get(f"/v1/operations/{oid}", headers=H).json()["resumable"] is True
+    # the original's handle is its lineage head now (the resumed Job, QUEUED): the lineage is not resumable until it ends
+    head = c.get(f"/v1/operations/{oid}", headers=H).json()
+    assert head["id"] == f"{oid}-r1" and head["resumed_from"] == oid and head["resumable"] is False
     # the resumed run fails again: the next resume chains from the root name
     new["status"] = {"startTime": "x", "conditions": [{"type": "Failed", "status": "True"}]}
     r = c.post(f"/v1/operations/{oid}-r1:resume", headers=H)
@@ -940,6 +983,9 @@ def test_sync_proxies_to_the_predictor(client, monkeypatch):
 
         async def __aexit__(self, *a):
             pass
+
+        async def aclose(self):  # api 0.11.127: the proxy closes its client explicitly
+            return None
 
         async def post(self, url, json=None, headers=None):
             calls.append((url, headers))
@@ -986,6 +1032,9 @@ def test_sync_for_another_region_goes_through_that_regions_gateway(client, monke
         async def __aexit__(self, *a):
             pass
 
+        async def aclose(self):  # api 0.11.127: the proxy closes its client explicitly
+            return None
+
         async def post(self, url, json=None, headers=None):
             calls.append((url, json, headers))
             return R()
@@ -1010,10 +1059,12 @@ def test_sync_for_another_region_goes_through_that_regions_gateway(client, monke
     url, sent, headers = calls[0]
     assert url == "https://llm-example-predictor.models.203.0.113.10.sslip.io/openai/v1/chat/completions"
     assert sent == {"messages": [], "model": "llm"}
-    assert headers == {
+    sid = headers[appmod.OPERATION_HEADER]
+    assert sid.startswith("sync-") and headers == {
         "Authorization": "Bearer sk-good",
-        appmod.ADMITTED_HEADER: appmod._admitted_token(keys.key_hash("sk-good")),
-    }  # the hook counts this call once
+        appmod.ADMITTED_HEADER: appmod._admitted_token(keys.key_hash("sk-good"), "llm-example", sid),
+        appmod.OPERATION_HEADER: sid,
+    }  # the hook counts this call once; the token is bound to the key, the model and this call's admission
 
 
 def test_sync_preserves_binary_results_and_client_errors(client, monkeypatch):
@@ -1035,6 +1086,9 @@ def test_sync_preserves_binary_results_and_client_errors(client, monkeypatch):
 
         async def __aexit__(self, *a):
             pass
+
+        async def aclose(self):  # api 0.11.127: the proxy closes its client explicitly
+            return None
 
         async def post(self, *a, **kw):
             return response
@@ -1062,7 +1116,14 @@ def test_endpoint_scratch_and_downward_identity(client, admin_keys):
         "regions": ["eu-north1"],
         "shm_gib": 16,
         "env_field_refs": {"POD_UID": "metadata.uid"},
-        "empty_dirs": [{"name": "runtime-cache", "mount_path": "/runtime-cache", "size_limit": "4Gi"}],
+        "empty_dirs": [
+            {"name": "runtime-cache", "mount_path": "/runtime-cache", "size_limit": "4Gi"},
+            {
+                "name": "engine-cache",
+                "mount_path": "/app/.cache",
+                "size_limit": "8Gi",
+            },  # a hidden directory is ordinary scratch
+        ],
     }
     result = c.post("/v1/models", json=spec, headers=ADMIN)
     assert result.status_code == 201, result.text
@@ -1071,6 +1132,8 @@ def test_endpoint_scratch_and_downward_identity(client, admin_keys):
     assert {"name": "POD_UID", "valueFrom": {"fieldRef": {"fieldPath": "metadata.uid"}}} in container["env"]
     assert {"name": "runtime-cache", "mountPath": "/runtime-cache"} in container["volumeMounts"]
     assert {"name": "runtime-cache", "emptyDir": {"sizeLimit": "4Gi"}} in predictor["volumes"]
+    assert {"name": "engine-cache", "mountPath": "/app/.cache"} in container["volumeMounts"]
+    assert {"name": "engine-cache", "emptyDir": {"sizeLimit": "8Gi"}} in predictor["volumes"]
     assert {"name": "shm", "emptyDir": {"medium": "Memory", "sizeLimit": "16Gi"}} in predictor["volumes"]
     for change in (
         {"env_field_refs": {"POD_UID": "spec.nodeName"}},
@@ -1080,6 +1143,23 @@ def test_endpoint_scratch_and_downward_identity(client, admin_keys):
         {"empty_dirs": [{"name": "scratch", "mount_path": "/dev", "size_limit": "1Gi"}]},
         {"empty_dirs": [{"name": "scratch", "mount_path": "/tmp", "size_limit": "4"}]},
         {"empty_dirs": [{"name": "scratch", "mount_path": "/tmp", "size_limit": "4Gi", "hostPath": "/"}]},
+        # canonical paths only: dot components, empty components, traversal, trailing slash, overlaps
+        {"empty_dirs": [{"name": "scratch", "mount_path": "/app/./cache", "size_limit": "1Gi"}]},
+        {"empty_dirs": [{"name": "scratch", "mount_path": "/app/../cache", "size_limit": "1Gi"}]},
+        {"empty_dirs": [{"name": "scratch", "mount_path": "/app//cache", "size_limit": "1Gi"}]},
+        {"empty_dirs": [{"name": "scratch", "mount_path": "/app/.cache/", "size_limit": "1Gi"}]},
+        {"empty_dirs": [{"name": "scratch", "mount_path": "/..", "size_limit": "1Gi"}]},
+        {
+            "weights": {"path": "p"},
+            "empty_dirs": [{"name": "scratch", "mount_path": "/weights/.cache", "size_limit": "1Gi"}],
+        },  # under the declared weights mount
+        {"empty_dirs": [{"name": "scratch", "mount_path": "/dev/shm/.x", "size_limit": "1Gi"}]},
+        {
+            "empty_dirs": [
+                {"name": "scratch", "mount_path": "/app/.cache", "size_limit": "1Gi"},
+                {"name": "two", "mount_path": "/app/.cache/sub", "size_limit": "1Gi"},
+            ]
+        },
         {"kind": "job"},
     ):
         assert c.post("/v1/models", json={**spec, "id": "invalid-model", **change}, headers=ADMIN).status_code == 400
@@ -1139,17 +1219,163 @@ class FakeKeys:
         return [self._info(h) for h, r in sorted(self.rows.items()) if r["tenant"] == tenant]
 
     # admission and import (keys.py migration 8): recorded, never refused here; the database tests hold the real rules
-    def admit(self, h, operation, tenant, gpu_seconds=0.0, counts_request=True):
+    def admit(self, h, operation, tenant, gpu_seconds=0.0, counts_request=True, run_member=False):
         self.calls.append(("admit", operation, gpu_seconds, counts_request))
+        self.reservations = getattr(self, "reservations", {})
+        self.reservations[operation] = h
+        if run_member:
+            self.members = getattr(self, "members", [])
+            if not any(m["operation"] == operation for m in self.members):
+                self.members.append({"operation": operation, "root": operation, "predecessor": None, "state": "active"})
         return {"operation": operation, "replay": False}
 
     def release(self, operation, gpu_seconds=None):
         self.calls.append(("release", operation, gpu_seconds))
+        getattr(self, "reservations", {}).pop(operation, None)
         return True
+
+    def reservation_key(self, operation):
+        return getattr(self, "reservations", {}).get(operation)
 
     def abandon(self, operation, h):
         self.calls.append(("abandon", operation))
         return True
+
+    # the run ledger (keys.py migration 11): members recorded in order, the head rule and budgets live in the database tests
+    def _lineage(self, root, kind, stage):
+        return [
+            m
+            for m in getattr(self, "members", [])
+            if m["root"] == root and m.get("kind", "continuation") == kind and m.get("stage") == stage
+        ]
+
+    def run_head(self, root):
+        chain = self._lineage(root, "continuation", None)
+        return chain[-1]["operation"] if chain else None
+
+    def stage_head(self, root, stage):
+        chain = self._lineage(root, "stage", stage)
+        return chain[-1]["operation"] if chain else None
+
+    def member_of(self, operation):
+        m = next((m for m in getattr(self, "members", []) if m["operation"] == operation), None)
+        return (
+            {
+                "root": m["root"],
+                "kind": m.get("kind", "continuation"),
+                "stage": m.get("stage"),
+                "state": m["state"],
+                "predecessor": m["predecessor"],
+                "created_at": m.get("created_at"),
+            }
+            if m
+            else None
+        )
+
+    def prepare_run_member(
+        self, root, operation, predecessor, gpus, timeout_s, transfer_only=False, kind="continuation", stage=None
+    ):
+        self.calls.append(
+            ("prepare", root, operation, predecessor, gpus, timeout_s, transfer_only)
+            + ((kind, stage) if kind != "continuation" else ())
+        )
+        self.members = getattr(self, "members", [])
+        if any(m["operation"] == operation for m in self.members):
+            return {"operation": operation, "replay": True}
+        if kind == "stage":  # the database rules (test_database.py), in short: declared, open, one lineage per stage
+            g = self.graphs.get(root)
+            if g is None:
+                raise keys.KeyLimit(409, f"run {root} declared no stage graph")
+            if stage not in g["stages"]:
+                raise keys.KeyLimit(400, f"stage {stage!r} is not declared by {root}")
+            if g["cancelled_at"]:
+                raise keys.KeyLimit(409, f"the graph of {root} is cancelled")
+            head = self.stage_head(root, stage)
+            if predecessor is None:
+                if head is not None:
+                    raise keys.KeyLimit(409, f"stage {stage!r} of {root} already has an operation ({head})")
+                if g["closed_at"]:
+                    raise keys.KeyLimit(409, f"the graph of {root} is closed")
+            elif predecessor != head:
+                raise keys.KeyLimit(409, f"only the current head of stage {stage!r} may be continued ({head})")
+        elif predecessor != self.run_head(root):
+            raise keys.KeyLimit(409, f"only the current run head may be continued ({self.run_head(root)})")
+        self.members.append(
+            {
+                "operation": operation,
+                "root": root,
+                "predecessor": predecessor,
+                "state": "active",
+                "kind": kind,
+                "stage": stage,
+                "note": None,
+            }
+        )
+        return {"operation": operation, "replay": False}
+
+    # stage graphs (keys.py migration 13)
+    @property
+    def graphs(self):
+        self._graphs = getattr(self, "_graphs", {})
+        return self._graphs
+
+    def declare_graph(self, root, tenant, owner, stages, deadline_at=None, models=None):
+        self.calls.append(("graph", root, sorted(stages)))
+        self.graphs.setdefault(
+            root,
+            {
+                "root": root,
+                "tenant": tenant,
+                "owner": owner,
+                "stages": stages,
+                "models": dict(models or {}),
+                "deadline_at": deadline_at,
+                "cancelled_at": None,
+                "closed_at": None,
+                "reason": None,
+            },
+        )
+
+    def graph_of(self, root):
+        return dict(self.graphs[root]) if root in self.graphs else None
+
+    def open_graphs(self):
+        return [dict(g) for g in self.graphs.values() if not g["cancelled_at"] and not g["closed_at"]]
+
+    def cancel_graph(self, root, reason):
+        g = self.graphs.get(root)
+        if g is None:
+            return False
+        g["cancelled_at"] = g["cancelled_at"] or "now"
+        g["reason"] = g["reason"] or reason
+        return True
+
+    def note_member(self, operation, note):
+        for m in getattr(self, "members", []):
+            if m["operation"] == operation:
+                m["note"] = note
+
+    def settle_run_member(self, operation, gpu_seconds):
+        self.calls.append(("settle", operation, gpu_seconds))
+        for m in getattr(self, "members", []):
+            if m["operation"] == operation and m["state"] == "active":
+                m["state"] = "unknown" if gpu_seconds is None else "settled"
+        return {"settled": True}
+
+    def rollback_run_member(self, operation):
+        self.calls.append(("rollback", operation))
+        self.members = [m for m in getattr(self, "members", []) if m["operation"] != operation]
+        return True
+
+    def run_usage(self, h):
+        return {"active_operations": 0, "reserved_gpu_seconds": 0.0, "unknown_gpu_seconds": 0.0}
+
+    def run_members(self, root):
+        return [
+            {"kind": "continuation", "stage": None, "note": None, **m, "gpu_bound": 0.0, "gpu_seconds": None}
+            for m in getattr(self, "members", [])
+            if m["root"] == root
+        ]
 
     def own_operation(self, operation, tenant, owner, model):
         self.owners[operation] = (tenant, owner, model)
@@ -1223,9 +1449,13 @@ class FakeKeys:
 
 @pytest.fixture
 def fake_keys(monkeypatch):
+    import children
     import db
     import keys
 
+    # every fake-key world runs with db.enabled() but no pool: the endpoint-children boundary a cancel reaches is a
+    # no-op here (test_children.py exercises the real one on the real database)
+    monkeypatch.setattr(children, "cancel_for_root", lambda *a, **k: [])
     fk = FakeKeys()
     for name in (
         "info",
@@ -1241,9 +1471,34 @@ def fake_keys(monkeypatch):
         "operation_lock",
         "stale_reservations",
         "import_records",
+        "run_head",
+        "prepare_run_member",
+        "settle_run_member",
+        "rollback_run_member",
+        "run_usage",
+        "run_members",
+        "stage_head",
+        "member_of",
+        "reservation_key",
+        "declare_graph",
+        "graph_of",
+        "open_graphs",
+        "cancel_graph",
+        "note_member",
     ):
         monkeypatch.setattr(keys, name, getattr(fk, name))
     monkeypatch.setattr(db, "enabled", lambda: True)  # the fleet API: it has the database
+    # no settlement on an owner's read in the fake world (it would reach the real pool with no database behind it);
+    # the billing pass is faked per test, the read-settlement itself is tested against PostgreSQL (test_settle_on_read)
+    monkeypatch.setattr(appmod, "_settle_on_read", lambda p, job, region: False)
+    import leases
+
+    monkeypatch.setattr(leases, "get", lambda op: None)  # no native execution unless a test fakes leases itself
+    monkeypatch.setattr(leases, "history", lambda op: [])
+    monkeypatch.setattr(leases, "prepare", lambda *a, **k: None)
+    monkeypatch.setattr(leases, "request_cancel", lambda *a, **k: None)
+    monkeypatch.setattr(leases, "settle_decision", lambda op, required: (True, None, "worker usage unmeasured"))
+    monkeypatch.setattr(leases, "mark_settled", lambda op: None)
     return fk
 
 
@@ -2006,6 +2261,17 @@ def test_multinode_status_cancel_and_resume(client, monkeypatch):
     assert {"name": "checkpoints", "mountPath": "/work/checkpoint", "subPath": f"checkpoints/{op['id']}"} in main[
         "volumeMounts"
     ]
+    # the same leaf on EVERY container of the resumed rank pod, the checkpoint-provision init included: it must
+    # provision the root's leaf the ranks restore from, never a fresh checkpoints/<successor> (0.11.110 regression)
+    rpod = _jobset_pod(new)
+    init = next(x for x in rpod["initContainers"] if x["name"] == "checkpoint-provision")
+    assert init["volumeMounts"] == [
+        {"name": "checkpoints", "mountPath": "/work/checkpoint", "subPath": f"checkpoints/{op['id']}"}
+    ]
+    for x in list(rpod["containers"]) + list(rpod["initContainers"]):
+        for m in x.get("volumeMounts", []):
+            if m["name"] == "checkpoints":
+                assert m["subPath"] == f"checkpoints/{op['id']}", (x["name"], m)
     import billing
 
     job, _ = jobs.find("tenant-demo", op["id"])
@@ -2032,8 +2298,8 @@ class FakeDB:
     def get_model(self, mid):
         return self.rows.get(mid)
 
-    def upsert_model(self, entry, spec, by, managed_by="api", expected=None, create_only=False):
-        mid = entry["id"]
+    def upsert_model(self, definition, spec, by, managed_by="api", expected=None, create_only=False):
+        mid = definition["id"]
         old = self.rows.get(mid)
         if expected is not None and (old or {}).get("version") != expected:
             from fastapi import HTTPException
@@ -2044,21 +2310,24 @@ class FakeDB:
 
             raise HTTPException(409, "model exists")
         version = max((h["version"] for h in self.hist if h["id"] == mid), default=0) + 1
-        self.changes[mid] = {
+        row = {
             "id": mid,
-            "version": version,
-            "entry": copy.deepcopy(entry),
-            "previous": copy.deepcopy((old or {}).get("entry") or self.changes.get(mid, {}).get("previous") or {}),
-        }
-        self.rows[entry["id"]] = {
-            "id": entry["id"],
             "kind": spec.get("kind", "endpoint"),
             "spec": copy.deepcopy(spec),
-            "entry": copy.deepcopy(entry),
+            "deployments": copy.deepcopy(definition["deployments"]),
             "version": version,
             "managed_by": managed_by,
             "updated_by": by,
         }
+        self.changes[mid] = {
+            "id": mid,
+            "version": version,
+            "entry": {k: copy.deepcopy(row[k]) for k in db.ROW},
+            "previous": copy.deepcopy(
+                {k: old[k] for k in db.ROW} if old else self.changes.get(mid, {}).get("previous") or {}
+            ),
+        }
+        self.rows[mid] = row
         self.hist.append(
             {
                 "version": version,
@@ -2066,10 +2335,10 @@ class FakeDB:
                 "by": by,
                 "at": "now",
                 "spec": copy.deepcopy(spec),
-                "id": entry["id"],
+                "id": mid,
             }
         )
-        return self.rows[entry["id"]]
+        return self.rows[mid]
 
     def delete_model(self, mid, by, expected=None):
         if mid not in self.rows:
@@ -2088,7 +2357,7 @@ class FakeDB:
             "id": mid,
             "version": self.rows[mid]["version"] + 1,
             "entry": None,
-            "previous": self.rows[mid]["entry"],
+            "previous": {k: self.rows[mid][k] for k in db.ROW},
         }
         del self.rows[mid]
         return True
@@ -2139,12 +2408,18 @@ def admin_keys(monkeypatch):
         monkeypatch.setattr(db, name, getattr(fdb, name))
     import keys as keys_mod  # admission reservations live in the database too: recorded, never refused here
 
+    ledger: list = []  # the run ledger (migration 11): recorded in memory, never refused here
+    reservations: dict = {}  # operation -> key hash while admitted (keys.reservation_key)
     monkeypatch.setattr(
         keys_mod,
         "admit",
-        lambda h, op, tenant, gpu_seconds=0.0, counts_request=True: {"operation": op, "replay": False},
+        lambda h, op, tenant, gpu_seconds=0.0, counts_request=True, run_member=False: (
+            (ledger.append({"operation": op, "root": op, "predecessor": None}) if run_member else None)
+            or reservations.__setitem__(op, h)
+            or {"operation": op, "replay": False}
+        ),
     )
-    monkeypatch.setattr(keys_mod, "release", lambda op, gpu_seconds=None: True)
+    monkeypatch.setattr(keys_mod, "release", lambda op, gpu_seconds=None: reservations.pop(op, None) or True)
     operation_owners = {}
     monkeypatch.setattr(
         keys_mod,
@@ -2157,6 +2432,28 @@ def admin_keys(monkeypatch):
 
     monkeypatch.setattr(keys_mod, "operation_lock", lambda op: nullcontext())
     monkeypatch.setattr(keys_mod, "stale_reservations", lambda older_than_s: [])
+    monkeypatch.setattr(
+        keys_mod, "run_head", lambda root: next((m["operation"] for m in reversed(ledger) if m["root"] == root), None)
+    )
+    monkeypatch.setattr(keys_mod, "stage_head", lambda root, stage: None)
+    monkeypatch.setattr(keys_mod, "member_of", lambda op: None)
+    monkeypatch.setattr(keys_mod, "reservation_key", lambda op: reservations.get(op))
+    monkeypatch.setattr(keys_mod, "graph_of", lambda root: None)
+    monkeypatch.setattr(
+        keys_mod,
+        "prepare_run_member",
+        lambda root, op, pred, gpus, timeout_s, transfer_only=False, kind="continuation", stage=None: (
+            ledger.append({"operation": op, "root": root, "predecessor": pred}) or {"operation": op, "replay": False}
+        ),
+    )
+    monkeypatch.setattr(keys_mod, "settle_run_member", lambda op, gpu_seconds: {"settled": True})
+    monkeypatch.setattr(keys_mod, "rollback_run_member", lambda op: True)
+    monkeypatch.setattr(keys_mod, "run_members", lambda root: [])
+    monkeypatch.setattr(
+        keys_mod,
+        "run_usage",
+        lambda h: {"active_operations": 0, "reserved_gpu_seconds": 0.0, "unknown_gpu_seconds": 0.0},
+    )
     monkeypatch.setattr(
         m, "ENDPOINT_DOMAINS", {"eu-north1": "203.0.113.10.sslip.io", "eu-south1": "203.0.113.20.sslip.io"}
     )
@@ -2261,7 +2558,7 @@ def test_create_endpoint_from_a_container(client, admin_keys, monkeypatch):
         row["version"] == 1
         and row["managed_by"] == "api"
         and row["updated_by"] == "tenant-demo"
-        and row["entry"]["runtime"]["port"] == 8000
+        and row["spec"]["port"] == 8000
     )
     assert (
         "configmaps" not in fake.__dict__ and "configmaps" not in south.__dict__
