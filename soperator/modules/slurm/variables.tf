@@ -1007,6 +1007,7 @@ variable "worker_nodesets" {
     gres_name                      = optional(string)
     gres_config                    = list(string)
     auto_resume                    = optional(bool, false)
+    auto_suspend_seconds           = optional(number)
     create_partition               = bool
     partition_topology             = string
     ephemeral_nodes                = optional(bool, false)
@@ -1050,6 +1051,17 @@ variable "worker_nodesets" {
       contains(["rollingUpdate", "slurmAwareRollingUpdate"], worker.rolling_update_strategy)
     ])
     error_message = "worker_nodesets.rolling_update_strategy must be one of: rollingUpdate, slurmAwareRollingUpdate."
+  }
+
+  validation {
+    condition = alltrue([
+      for worker in var.worker_nodesets :
+      worker.auto_suspend_seconds == null || (
+        worker.auto_suspend_seconds >= 0 &&
+        floor(worker.auto_suspend_seconds) == worker.auto_suspend_seconds
+      )
+    ])
+    error_message = "worker_nodesets.auto_suspend_seconds must be null or a non-negative whole number."
   }
 
   validation {

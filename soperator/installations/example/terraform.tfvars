@@ -175,6 +175,7 @@ slurm_nodeset_workers = [
     #------------------------------------------------#
     ephemeral_nodes                = true  # If enabled, users can suspend and resume workers using Slurm commands.
     auto_resume                    = false # Whether to automatically resume workers when there are jobs in the queue.
+    auto_suspend_seconds           = null  # Ephemeral nodes only. Idle seconds before Slurm suspends a worker. 0 suspends immediately; null uses the partition/global SuspendTime.
     initial_number_ephemeral_nodes = 1     # How many ephemeral nodes should be running when the cluster is created.
     autoscaling = {
       enabled  = true # If enabled, ephemeral node suspend/resume will lead to VM deletion/creation. Not supported for GB300.
@@ -268,7 +269,9 @@ slurm_nodeset_workers = [
 # You must not remove the "hidden" partition.
 # There must be exactly one partition with Default=YES.
 #
-# NOTE: Automatic suspention of ephemeral nodes can be enabled per partition, by using "SuspendTime=<sec>" setting.
+# NOTE: Automatic suspension of ephemeral nodes is configured per worker nodeset with auto_suspend_seconds in
+# slurm_nodeset_workers. A partition-level "SuspendTime=<sec>" in config still applies to nodes whose nodeset leaves
+# auto_suspend_seconds unset; a nodeset value takes precedence over it.
 #
 # Available Slurm partition settings: https://slurm.schedmd.com/slurm.conf.html#SECTION_PARTITION-CONFIGURATION
 slurm_nodesets_partitions = [
