@@ -92,22 +92,22 @@ export NEBIUS_VPC_SUBNET_ID
 
 # Object Storage Bucket
 export NEBIUS_BUCKET_NAME="tfstate-k8s-training-$(echo -n "${NEBIUS_TENANT_ID}-${NEBIUS_PROJECT_ID}" | md5sum | awk '$0=$1')"
-EXISTS=$(nebius storage bucket list \
+NEBIUS_BUCKET_ID=$(nebius storage bucket list \
   --parent-id "${NEBIUS_PROJECT_ID}" \
   --format json \
-  | jq -r --arg BUCKET "${NEBIUS_BUCKET_NAME}" 'try .items[] | select(.metadata.name == $BUCKET) | .metadata.name')
-if [ -z "${EXISTS}" ]; then
-  RESPONSE=$(nebius storage bucket create \
+  | jq -r --arg BUCKET "${NEBIUS_BUCKET_NAME}" 'try .items[] | select(.metadata.name == $BUCKET) | .metadata.id')
+if [ -z "${NEBIUS_BUCKET_ID}" ]; then
+  NEBIUS_BUCKET_ID=$(nebius storage bucket create \
     --name "${NEBIUS_BUCKET_NAME}" \
     --parent-id "${NEBIUS_PROJECT_ID}" \
-    --versioning-policy 'enabled')
+    --versioning-policy 'enabled' --format json | jq -er '.metadata.id // empty') || return
   echo "Created bucket: ${NEBIUS_BUCKET_NAME}"
 else
   echo "Using existing bucket: ${NEBIUS_BUCKET_NAME}"
 fi
 
 # Nebius service account
-NEBIUS_SA_NAME="k8s-training-sa"
+NEBIUS_SA_NAME="k8s-training-tfstate-sa"
 
 if NEBIUS_SA_ID=$(nebius iam service-account get-by-name \
   --parent-id "$NEBIUS_PROJECT_ID" \
@@ -139,24 +139,40 @@ fi
 
 echo "$NEBIUS_SA_ACTION service account: $NEBIUS_SA_ID"
 
-# Ensure service account is member of editors group
-NEBIUS_GROUP_EDITORS_ID=$(nebius iam group get-by-name \
-  --parent-id "${NEBIUS_TENANT_ID}" \
-  --name 'editors' \
-  --format json \
-  | jq -r '.metadata.id')
-IS_MEMBER=$(nebius iam group-membership list-members \
-  --parent-id "${NEBIUS_GROUP_EDITORS_ID}" \
-  --page-size 1000 \
-  --format json \
-  | jq -r --arg SAID "${NEBIUS_SA_ID}" '.memberships[] | select(.spec.member_id == $SAID) | .spec.member_id')
+# This service account accesses only the Terraform state bucket.
+if NEBIUS_STATE_GROUP_ID=$(nebius iam group get-by-name \
+  --parent-id "${NEBIUS_PROJECT_ID}" --name "${NEBIUS_SA_NAME}-state" \
+  --format 'jsonpath=.metadata.id'); then
+  :
+else
+  NEBIUS_GROUP_LOOKUP_EXIT_CODE=$?
+  [ "$NEBIUS_GROUP_LOOKUP_EXIT_CODE" -eq 13 ] || return "$NEBIUS_GROUP_LOOKUP_EXIT_CODE"
+  NEBIUS_STATE_GROUP_ID=$(nebius iam group create \
+    --parent-id "${NEBIUS_PROJECT_ID}" --name "${NEBIUS_SA_NAME}-state" \
+    --format 'jsonpath=.metadata.id') || return
+fi
+NEBIUS_STATE_PERMITS=$(nebius iam access-permit list \
+  --parent-id "${NEBIUS_STATE_GROUP_ID}" --all --format json) || return
+for NEBIUS_STATE_ROLE in storage.object-editor storage.viewer; do
+  if ! jq -e --arg role "$NEBIUS_STATE_ROLE" --arg bucket "$NEBIUS_BUCKET_ID" \
+    '.items[]? | select(.spec.role == $role and .spec.resource_id == $bucket)' \
+    <<< "$NEBIUS_STATE_PERMITS" >/dev/null; then
+    nebius iam access-permit create --parent-id "${NEBIUS_STATE_GROUP_ID}" \
+      --resource-id "$NEBIUS_BUCKET_ID" --role "$NEBIUS_STATE_ROLE" >/dev/null || return
+  fi
+done
+NEBIUS_STATE_MEMBERS=$(nebius iam group-membership list-members \
+  --parent-id "${NEBIUS_STATE_GROUP_ID}" --page-size 1000 --format json) || return
+IS_MEMBER=$(jq -r --arg SAID "${NEBIUS_SA_ID}" \
+  '.memberships[]? | select(.spec.member_id == $SAID) | .spec.member_id' \
+  <<< "$NEBIUS_STATE_MEMBERS") || return
 if [ -z "${IS_MEMBER}" ]; then
   RESPONSE=$(nebius iam group-membership create \
-    --parent-id "${NEBIUS_GROUP_EDITORS_ID}" \
-    --member-id "${NEBIUS_SA_ID}")
-  echo "Added service account to editors group"
+    --parent-id "${NEBIUS_STATE_GROUP_ID}" \
+    --member-id "${NEBIUS_SA_ID}") || return
+  echo "Added service account to state bucket group"
 else
-  echo "Service account is already a member of editors group"
+  echo "Service account is already a member of state bucket group"
 fi
 
 # Nebius service account access key
@@ -170,7 +186,7 @@ else
 fi
 NEBIUS_SA_ACCESS_KEY_ID=$(nebius iam v2 access-key create \
   --parent-id "${NEBIUS_PROJECT_ID}" \
-  --name "k8s-training-tfstate-$(date +%s)" \
+  --name "tfstate-${TF_VAR_cluster_name}-$(date +%s)" \
   --account-service-account-id "${NEBIUS_SA_ID}" \
   --description 'Temporary Object Storage Access for Terraform' \
   --expires-at "${EXPIRATION_DATE}" \
