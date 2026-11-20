@@ -530,11 +530,13 @@ Open browser to newly created URL with username “admin” and password from ou
 
 ### Output compatibility
 
-The module delivers the Observability bearer token directly to Grafana.
-The `grafana_service_account` output still exposes `id`, `access_key_id` and
-`secret_access_key`. Built-in Grafana needs no migration. If another
-application reads the removed `access_token` field, migrate it before upgrading
-the stack that publishes this output.
+Grafana authenticates datasource queries with the Observability bearer token
+issued by the Nebius CLI. The module retains a separate IAM access key,
+`grafana_key`, for callers that use the AWS-compatible credentials in the
+`grafana_service_account` output (`access_key_id` and `secret_access_key`).
+The `id` field still identifies the service account. Built-in Grafana needs
+no migration. If another application reads the removed `access_token` field,
+migrate it before upgrading the stack that publishes this output.
 
 #### Migrating a token consumer
 
@@ -596,6 +598,13 @@ the stack that publishes this output.
 Use a separate Terraform checkout for each deployment. Workspaces in the same
 checkout share the Grafana token filenames. Rotation and destroy use the files
 in the current directory and could revoke another deployment's key.
+
+The token generator tracks the IAM access key's resource ID in
+`triggers_replace`. Replacing the generator rotates the Observability token
+and keeps the IAM access key. Forcing replacement of `grafana_key` itself
+under its existing name fails. The generator's `create_before_destroy` also
+applies to its IAM key dependency, so Terraform requests the same name while
+the old key still owns it. IAM returns `AlreadyExists` before rotation begins.
 
 Normal Terraform plans do not rotate the key. To request one intentional
 rotation, create and review a saved plan that explicitly replaces only the
