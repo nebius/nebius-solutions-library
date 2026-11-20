@@ -191,6 +191,18 @@ def main():
             check=True,
         )
 
+        # The last apply still has a pending previous key. Check Terraform's
+        # teardown before another test can issue a key in the same directory.
+        credential_files = (
+            "grafana_access_token.txt",
+            "grafana_access_token.metadata.json",
+            "grafana_access_token.previous.txt",
+            "grafana_access_token.previous.metadata.json",
+        )
+        retained = [name for name in credential_files if (fixture / name).exists()]
+        if retained:
+            raise RuntimeError(f"Destroy left Grafana credential files behind: {retained}")
+
         upgrade_log = fixture / "upgrade-cli.log"
         subprocess.run(
             [terraform, "test", "-filter=tests/upgrade.tftest.hcl", "-no-color"],
