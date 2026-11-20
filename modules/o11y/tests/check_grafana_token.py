@@ -4,7 +4,8 @@
 The temporary fixture uses the real grafana.tf and a fake Nebius CLI. A clean
 apply proves that terraform_data creates the token file before the ephemeral
 local_command reads it and passes it to the application's write-only fields.
-Subsequent applies exercise one-shot replacement and idempotency.
+Subsequent applies exercise one-shot replacement and idempotency. A separate
+upgrade test carries existing Grafana state and a legacy token across applies.
 Requires Terraform >= 1.11.4 on PATH (or set TERRAFORM_BIN) and Git access to
 the public Marketplace chart repository.
 """
@@ -18,54 +19,6 @@ import tempfile
 
 
 MODULE = Path(__file__).resolve().parents[1]
-
-
-LEGACY_GENERATOR = """\
-terraform {
-  required_version = ">= 1.11.4"
-}
-
-resource "terraform_data" "grafana_access_token" {
-  triggers_replace = {
-    access_key_id      = "access-key"
-    service_account_id = "service-account"
-  }
-
-  provisioner "local-exec" {
-    command = "printf 'issued\\n' >> issue.log; printf 'legacy-token\\n' > token.txt"
-  }
-}
-"""
-
-
-UPGRADED_GENERATOR = """\
-terraform {
-  required_version = ">= 1.11.4"
-}
-
-resource "terraform_data" "grafana_access_token" {
-  input = {
-    token_path = "${path.root}/token.txt"
-  }
-
-  triggers_replace = {
-    access_key_id      = "access-key"
-    service_account_id = "service-account"
-  }
-
-  lifecycle {
-    create_before_destroy = true
-  }
-
-  provisioner "local-exec" {
-    command = "printf 'issued\\n' >> issue.log; printf 'replacement-token\\n' > token.txt"
-  }
-}
-
-output "token_path" {
-  value = terraform_data.grafana_access_token.output.token_path
-}
-"""
 
 
 def check_production_wiring():
@@ -101,68 +54,9 @@ def check_production_wiring():
             raise RuntimeError(f"Obsolete Grafana token wiring remains: {expression}")
 
 
-def check_apply_time_reader_upgrade(terraform):
-    """Prove that adding the apply-time output does not replace a legacy generator."""
-
-    with tempfile.TemporaryDirectory(prefix="o11y-grafana-upgrade-") as directory:
-        fixture = Path(directory)
-        configuration = fixture / "main.tf"
-        configuration.write_text(LEGACY_GENERATOR)
-
-        subprocess.run(
-            [terraform, "init", "-backend=false", "-input=false", "-no-color"],
-            cwd=fixture,
-            check=True,
-            stdout=subprocess.DEVNULL,
-        )
-        subprocess.run(
-            [terraform, "apply", "-auto-approve", "-input=false", "-no-color"],
-            cwd=fixture,
-            check=True,
-            stdout=subprocess.DEVNULL,
-        )
-
-        configuration.write_text(UPGRADED_GENERATOR)
-        plan = fixture / "upgrade.tfplan"
-        subprocess.run(
-            [terraform, "plan", f"-out={plan}", "-input=false", "-no-color"],
-            cwd=fixture,
-            check=True,
-            stdout=subprocess.DEVNULL,
-        )
-        plan_json = subprocess.run(
-            [terraform, "show", "-json", plan],
-            cwd=fixture,
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-        changes = json.loads(plan_json.stdout)["resource_changes"]
-        generator = next(
-            change
-            for change in changes
-            if change["address"] == "terraform_data.grafana_access_token"
-        )
-        if generator["change"]["actions"] != ["update"]:
-            raise RuntimeError(
-                "Adding the apply-time output must update the legacy generator in place; "
-                f"got {generator['change']['actions']}"
-            )
-
-        subprocess.run(
-            [terraform, "apply", "-input=false", "-no-color", plan],
-            cwd=fixture,
-            check=True,
-            stdout=subprocess.DEVNULL,
-        )
-        if (fixture / "issue.log").read_text().splitlines() != ["issued"]:
-            raise RuntimeError("The apply-time output unexpectedly reissued the legacy token")
-
-
 def main():
     check_production_wiring()
     terraform = os.environ.get("TERRAFORM_BIN", "terraform")
-    check_apply_time_reader_upgrade(terraform)
 
     with tempfile.TemporaryDirectory(prefix="o11y-grafana-token-") as directory:
         fixture = Path(directory)
@@ -197,6 +91,14 @@ def main():
             '  source      = "./tests/render"\n'
             '  values_yaml = local.grafana_values\n'
             '}\n'
+        )
+
+        legacy = tests / "pre-pr"
+        shutil.copytree(MODULE / "tests/grafana-token/pre-pr", legacy)
+        for filename in ("variables.tf", "versions.tf"):
+            shutil.copyfile(fixture / filename, legacy / filename)
+        shutil.copyfile(
+            MODULE / "tests/grafana-token/upgrade.tftest.hcl", tests / "upgrade.tftest.hcl"
         )
 
         binary_directory = fixture / "bin"
@@ -288,6 +190,17 @@ def main():
             env=environment,
             check=True,
         )
+
+        upgrade_log = fixture / "upgrade-cli.log"
+        subprocess.run(
+            [terraform, "test", "-filter=tests/upgrade.tftest.hcl", "-no-color"],
+            cwd=fixture,
+            env={**environment, "FAKE_NEBIUS_LOG": str(upgrade_log)},
+            check=True,
+        )
+        upgrade_calls = upgrade_log.read_text().splitlines()
+        if [line.split(":", 1)[0] for line in upgrade_calls] != ["issue", "labels", "revoke"]:
+            raise RuntimeError("Expected one legacy issue, no upgrade rotation, and one teardown revocation")
 
         calls = nebius_log.read_text().splitlines()
         issue_calls = [call for call in calls if call.startswith("issue:")]
