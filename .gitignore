@@ -41,6 +41,8 @@ terraform.rc
 
 # Local variables for the core Terraform examples; commit .example files instead.
 /k8s-training/terraform.tfvars
+/k8s-multi-region/*.tfvars
+/k8s-multi-region/*.tfvars.json
 /vm-instance/terraform.tfvars
 /dsvm/terraform.tfvars
 /bastion/terraform.tfvars
@@ -56,3 +58,8 @@ terraform.rc
 
 # Python test bytecode
 __pycache__/
+
+# Terragrunt generated units, module caches and local backend configuration.
+/k8s-multi-region/**/.terragrunt-cache/
+/k8s-multi-region/**/.terragrunt-stack/
+/k8s-multi-region/backend.hcl
