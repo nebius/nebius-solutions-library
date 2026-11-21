@@ -24,6 +24,9 @@ Each catalog entry carries:
   `container_name`.
 - `resources`, `shared_memory_size`, optional `command`, optional
   `security_context`, and extra `env`.
+- `api_key_env_names`: environment names sourced from the NGC API secret
+  (defaults to `NGC_API_KEY`). AlphaFold2-Multimer also receives
+  `NGC_CLI_API_KEY`, as required by its container.
 - `lb_group`: `protein-apps` or `cosmos`.
 - `scaling`: either fixed-replica metadata or HPA settings.
 
@@ -82,6 +85,10 @@ kept in `proxies.tf`. Existing port mappings are preserved:
 - Qwen3 Next 80B A3B Instruct: `8008`
 - ProteinMPNN: `8009`
 - RFdiffusion: `8010`
+- MAISI: `8011`
+- VISTA-3D: `8012`
+- AlphaFold2-Multimer: `8013`
+- Nemotron 3 Nano 30B A3B: `8014`
 - Metadata service: `8080`
 
 ### `cosmos` / `cosmos_lb_ip`
@@ -91,6 +98,52 @@ kept in `proxies.tf`. Existing port mappings are preserved:
 - Cosmos-Reason2-2B: `8002`
 - Cosmos-Embed1: `8003`
 - Nemotron Nano 12B v2 VL: `8004`
+
+## Additional NIMs and Hardware Requirements
+
+The four additional models are disabled by default. Enable them with catalog
+overrides such as `maisi = { enabled = true }`; all use the existing
+`protein-apps` gateway and their container's default entrypoint. Versions are
+pinned to NVIDIA's documented tags:
+
+| Catalog key | Image tag | GPU and storage requirements |
+| --- | --- | --- |
+| `alphafold2_multimer` | `nim/deepmind/alphafold2-multimer:1.0.0` | At least 32 GB GPU memory; 24 CPU cores and 128 GiB host RAM are requested. Allow at least 1.3 TB shared cache space for the full MSA databases. |
+| `maisi` | `nim/nvidia/maisi:1.0.1` | At least 60 GB GPU memory for 512³ images; allow at least 50 GB storage. |
+| `vista3d` | `nim/nvidia/vista3d:1.0.0` | At least 48 GB GPU memory; allow at least 20 GB storage. |
+| `nemotron_3_nano` | `nim/nvidia/nemotron-3-nano:1.7.0-variant` | Select a supported one-GPU profile for the installed hardware and precision; H100/H200 support single-GPU BF16 and FP8 profiles. |
+
+GPU requests express device counts, not GPU type or VRAM. Configure a compatible
+GPU node group before enabling a model. Model downloads and startup are not
+verified by the mocked Terraform tests.
+
+Evo2-40B retains its two-GPU default for H100 (80 GB). NVIDIA also supports one
+H200 (141 GB). On a compatible H200 node group, override both requests and limits:
+
+```hcl
+model_catalog = {
+  evo2_40b = {
+    enabled = true
+    resources = {
+      limits   = { "nvidia.com/gpu" = "1" }
+      requests = { "nvidia.com/gpu" = "1" }
+    }
+  }
+}
+```
+
+Qwen3 Next also retains its two-GPU default; its supported optimized H100 FP8 and
+H200 BF16 profiles require at least two GPUs. Qualify a profile before changing
+these resource requests.
+
+Hardware and image references:
+
+- [AlphaFold2-Multimer prerequisites](https://docs.nvidia.com/nim/bionemo/alphafold2-multimer/latest/prerequisites.html)
+  and [quickstart](https://docs.nvidia.com/nim/bionemo/alphafold2-multimer/latest/quickstart-guide.html).
+- [MAISI getting started](https://docs.nvidia.com/nim/medical/maisi/1.0.1/getting-started.html).
+- [VISTA-3D getting started](https://docs.nvidia.com/nim/medical/vista3d/latest/getting-started.html).
+- [LLM NIM support matrix (Qwen3 Next and Nemotron 3 Nano)](https://docs.nvidia.com/nim/large-language-models/1.15.0/supported-models.html).
+- [Evo2 prerequisites](https://docs.nvidia.com/nim/bionemo/evo2/latest/prerequisites.html).
 
 ## Shared Filesystem Requirement
 
@@ -195,6 +248,7 @@ Fixed-replica catalog entries:
 - OpenFold2, OpenFold3, Boltz2, MSA Search, Evo2-40B
 - GenMol, MolMIM, DiffDock
 - ProteinMPNN, RFdiffusion
+- AlphaFold2-Multimer, MAISI, VISTA-3D, Nemotron 3 Nano
 - Cosmos-Embed1
 - BioNeMo notebook
 
