@@ -2003,7 +2003,7 @@ variable "nccl_inspector_profiling" {
     verbose  = optional(bool)
   })
   default = {
-    enabled = false
+    enabled = true
   }
   nullable = false
 }

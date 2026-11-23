@@ -389,9 +389,10 @@ soperator_notifier = {
   # slack_webhook_url = "https://hooks.slack.com/services/X/Y/Z"
 }
 
-# Whether to enable NCCL Inspector.
+# Whether to enable NCCL Inspector: the SPANK plugin and the collector shipping its metrics.
+# A job is profiled only when it sets NCCL_INSPECTOR_ENABLE=1.
 nccl_inspector_profiling = {
-  enabled = false
+  enabled = true
   # dump_dir = "/opt/soperator-outputs/shared/nccl_profiles"
   # verbose  = false
 }
