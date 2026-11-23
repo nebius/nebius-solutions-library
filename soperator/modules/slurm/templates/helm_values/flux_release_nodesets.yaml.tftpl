@@ -314,6 +314,10 @@ nodesets:
             volumeMounts: [{ name: 'image-storage', mountPath: /volume-mount }]
             command: ["grep", ' /volume-mount ${nodeset.node_local_image_storage.spec.filesystem_type} ', "/proc/mounts"]
 
+          # SCHED-3244: never recurse into Docker or Enroot data. User workloads fill them with millions of
+          # files and paths longer than PATH_MAX, which made this container slow or crash-looping, and
+          # the recursive chmod also rewrote modes inside image layers. Only the flat Enroot layer cache
+          # is shared between users and needs its files opened up.
           - name: prepare-node-local-image-storage
             image: cr.nebius.cloud/soperator-proxy-docker-io/library/busybox@sha256:fd7dc98638c8e305f4dc34e979f1c0fdfdcaeb0fbf8fcff77ae834b6da3d7e6e
             volumeMounts: [{ name: 'image-storage', mountPath: /volume-mount }]
@@ -326,7 +330,13 @@ nodesets:
                 /volume-mount/enroot/${dir} \
               %{~ endfor ~}
                 /volume-mount/docker \
-              && chmod 777 -R /volume-mount/enroot /volume-mount/docker
+              && chmod 777 \
+                /volume-mount/enroot \
+              %{~ for dir in ["cache", "data", "runtime"] ~}
+                /volume-mount/enroot/${dir} \
+              %{~ endfor ~}
+                /volume-mount/docker \
+              && { chmod -R a+rw /volume-mount/enroot/cache || true; }
           %{~ endif ~}
       %{~ endfor ~}
   %{~ endif ~}
