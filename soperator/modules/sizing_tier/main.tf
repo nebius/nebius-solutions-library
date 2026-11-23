@@ -134,12 +134,13 @@ locals {
       XL = { memory = "512Mi", cpu = "500m" }
     }
     # Runs on: system nodes.
+    # Deployed on every cluster but idle unless jobs opt in to NCCL Inspector; no CPU limit, so it bursts when they do.
     nccl_profiles_collector = {
-      XS = { memory = "200Mi", cpu = "500m" }
-      S  = { memory = "200Mi", cpu = "500m" }
-      M  = { memory = "200Mi", cpu = "500m" }
-      L  = { memory = "256Mi", cpu = "500m" }
-      XL = { memory = "512Mi", cpu = "1000m" }
+      XS = { memory = "200Mi", cpu = "100m" }
+      S  = { memory = "200Mi", cpu = "100m" }
+      M  = { memory = "200Mi", cpu = "100m" }
+      L  = { memory = "256Mi", cpu = "100m" }
+      XL = { memory = "512Mi", cpu = "100m" }
     }
   }
 
