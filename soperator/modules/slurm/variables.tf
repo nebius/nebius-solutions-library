@@ -826,7 +826,7 @@ variable "nccl_inspector_profiling" {
     dump_dir = optional(string, "/opt/soperator-outputs/shared/nccl_profiles")
   })
   default = {
-    enabled = false
+    enabled = true
   }
   nullable = false
 }
