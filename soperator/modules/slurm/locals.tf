@@ -43,9 +43,8 @@ locals {
   }
 
   image = {
-    repository        = "cr.nebius.cloud/soperator${!var.operator_stable ? "-unstable" : ""}"
-    repository_stable = "cr.nebius.cloud/soperator"
-    tag               = var.operator_version
+    repository = "cr.nebius.cloud/soperator${!var.operator_stable ? "-unstable" : ""}"
+    tag        = var.operator_version
   }
 
   public_o11y_tsa_token_writer_source = "imds"
