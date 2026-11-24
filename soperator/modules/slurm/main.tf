@@ -197,11 +197,7 @@ resource "helm_release" "soperator_fluxcd_cm" {
           } : null
           slurmdbd_config = var.slurmdbd_config
           slurm_config    = var.slurm_accounting_config
-          resources = var.accounting_enabled ? {
-            cpu               = var.node_capacity.accounting.cpu_cores - local.resources.munge.cpu - local.resources.mariadb.cpu
-            memory            = var.node_capacity.accounting.memory_gibibytes - local.resources.munge.memory - local.resources.mariadb.memory
-            ephemeral_storage = var.node_capacity.accounting.ephemeral_storage_gibibytes - local.resources.munge.ephemeral_storage - local.resources.mariadb.ephemeral_storage
-          } : null
+          resources       = local.accounting_resources
         }
 
         controller = {
@@ -344,6 +340,13 @@ resource "helm_release" "soperator_fluxcd_cm" {
       local_file.flux_release_rendered_nodesets.content,
     ]
   })]
+
+  lifecycle {
+    precondition {
+      condition     = local.accounting_resources == null ? true : alltrue([for amount in local.accounting_resources : amount > 0])
+      error_message = "Accounting node capacity must leave positive slurmdbd CPU, memory, and ephemeral storage after MariaDB, sidecar, and rebooter reservations."
+    }
+  }
 }
 
 resource "helm_release" "soperator_fluxcd_bootstrap" {
