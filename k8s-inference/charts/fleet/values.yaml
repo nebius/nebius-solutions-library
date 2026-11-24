@@ -7,6 +7,9 @@ fleet:               # the whole `fleet:` document of fleet.yaml, merged over th
   # export retries, CPU classes) land there instead of on a GPU pool. No node is added: it is the capacity the
   # system nodes already have.
   system_reserve: { cpu: 4, memory_gib: 16 }
+  # whether tenant work may take the `system` flavor at all (docs/FLEET.md "Customer CPU pools"): false keeps every
+  # tenant off the system nodes; a GPU-free tenant workload then takes the region's customer CPU pool (`cpu_pools`)
+  tenant_system_flavor: true
 cohort: serverless2  # root cohort shared with the tenant queues (charts/tenant)
 namespaces:
   kueue: kueue-system

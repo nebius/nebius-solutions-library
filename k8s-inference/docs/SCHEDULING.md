@@ -279,7 +279,9 @@ rendered for the first class of its preference (that class's image, `prefer-<cla
 affinity). The control API's reconcile loop (every 15 s) looks at fleet runs that are still unplaced (no worker
 admitted their Workload) after the wait bound and moves each to the next class of its preference
 (`jobs.switch_class`): `<root>-r<n>` is created for the next class with the remaining preference, carrying
-`serverless2.nebius/fallback` ("rtx-pro-6000 -> l40s after 60 s without capacity"), which the operation reports as
+`serverless2.nebius/fallback` ("rtx-pro-6000 -> l40s after 60 s without capacity"); the successor's candidate clusters are
+the caller's `allowed_clusters` (else the model's regions), narrowed by the per-node fit for the NEW class, never the
+original's already-narrowed list (api 0.11.119); an explicit single-cluster restriction is never widened. The operation reports the move as
 `reason` and `resumed_from`; the original Job stays as a readable handle (status `SUPERSEDED`, its Workload
 deactivated and the Job suspended so it never admits), names its `successor`, and `GET /v1/operations/<original>`
 returns the successor's state with `requested_id`; the fleet database keeps the link past the Job's lifetime. The last class of the preference
@@ -289,6 +291,54 @@ QUEUED). Capacity that becomes free in a worse class is never taken silently: th
 A resume with `checkpoint_ref` (docs/JOBS.md "Attempts and finalization") goes through the same placement with an
 optional `gpu_class`: the new attempt gets that class's image, a fresh volume where it lands, and the pinned model
 revision (`serverless2.nebius/model-version`), never a newer definition.
+
+## Per-node fit
+
+Kueue admits a workload against a flavor's **aggregate** quota (`max_nodes` x the per-node budget of `charts/fleet`)
+and never asks whether one node holds the pod. A GPU-free run that the CPU pool's quota refuses for the moment (its
+ephemeral-storage or CPU borrowed by another run) falls through the flavor order to a GPU pool whose aggregate CPU
+covers it while no single node does (an AlphaFold 3 pipeline at 16.1 CPU on 1-GPU nodes of 14 admittable CPU), and
+its pod stays Pending for ever on an admitted workload that holds that flavor's quota. Three pieces make per-node
+fit structural (api 0.11.80, fleet chart 0.1.12):
+
+- `fit.yaml` of the fleet document (`fleet-prices`, `charts/fleet/templates/prices.yaml`): per cluster id and pool
+  label, what ONE node admits (`cpu`, `memory_gib`, `ephemeral_gib`, `gpus`, `shared_fs`), from the same helpers that
+  size the Kueue quotas with one node (`node_reserve` for GPU pools, `system_reserve` for the system and CPU pools,
+  the ephemeral share of the boot disk); `tools/check.sh` asserts it agrees with the ClusterQueues.
+- The render (`jobs.py`, `services/api/fit.py`): the pod's effective requests (main + uploader; an init container's
+  own request bounds it) must fit one node of a candidate pool. Candidates are the class's explicit `pool:` (then it
+  is a 400 when it cannot hold the pod: nothing is widened to another pool), else the GPU class pools of the run,
+  else every pool, each intersected per (cluster, pool) with what the run requires besides size: the shared
+  filesystem (`shared_fs`) and local NVMe (`pools.yaml`), so a big node without the mount is no candidate; the fit is
+  computed on the final rendered pod (after the execution profile); the eligible clusters are the run's placement
+  regions (or the pinned region's). The fitting pools
+  become `serverless2.nebius/pool In [...]`, conjunctive with the class, `shared-fs` and `local-nvme` terms (Kueue
+  assigns only a flavor whose `nodeLabels` satisfy the affinity), and the placement regions are narrowed to clusters
+  with a fitting pool. No pool anywhere: **400 `impossible shape`** at submission, naming the requests and the largest
+  candidate node; a shape that fits a pool whose quota is busy is **temporarily unavailable**: QUEUED, Kueue waits
+  (never admitted where it cannot run, never spilled). Nothing is reduced or enlarged on the caller's behalf. Without
+  `fit.yaml` (an older fleet chart) nothing changes.
+- Recovery of a run admitted before this (or by a worker whose table lagged): the control API's reconcile loop
+  (`reconciliation.unschedulable_switch`) looks at placed fleet runs whose pods are all Pending and unbound, whose
+  newest pod the scheduler has reported `Unschedulable` for `UNSCHEDULABLE_WAIT_S` (600 s), and whose assigned pool
+  (the pod's injected `serverless2.nebius/pool`) has no node that holds the pod's requests. Such a run is moved
+  exactly as a fallback is (`jobs.switch_unschedulable`): `<root>-r<n>` is created from the same input, placement,
+  class and key with the fit affinity, carrying `serverless2.nebius/recovery` ("unschedulable on north/h100-reserved-1x
+  for 1200 s: the pod needs cpu 16.1, ... ; re-placed on the pools whose node does (cpu-batch-32)") and
+  `recovered-from`; the original is fenced first (suspended, named after its successor: `SUPERSEDED`, its Workload
+  deactivated so the worker's copy and the Pending pod go), the successor is admitted on the run's ledger and created, a
+  failed create restores the original; the owner's handle, the root id and the result path stay the run's. Nothing of
+  the original ran, so nothing is lost or re-accounted. A pod whose pool CAN hold it (a pool scaling from zero, a
+  full pool) is left waiting; a started attempt is never switched; a shape no pool holds is annotated once
+  (`serverless2.nebius/unschedulable`, the operator decides); at most two such switches per root. The assigned pool
+  is judged on the admitting cluster only (the same label may be a bigger preset elsewhere). The window between the
+  reconciler's snapshot and the fence is bounded from both sides: the pods are re-read immediately before the fence
+  (a binding meanwhile stops the switch, nothing fenced) and once more after it (a binding in the last instants is
+  recorded on the original, `serverless2.nebius/started-before-fence`, and in the successor's reason; the attempt's
+  records stay accepted).
+
+Not done here: Kueue's Topology-Aware Scheduling would make Kueue itself do per-node fit at admission; it changes the
+admission substrate and is qualified separately.
 
 ## Automatic recovery after infrastructure loss
 

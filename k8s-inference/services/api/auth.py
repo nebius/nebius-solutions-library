@@ -2,6 +2,8 @@
 caller. LiteLLM holds a best-effort mirror of the keys for its own OpenAI route (keys.py) and is never consulted here."""
 
 import asyncio
+import json
+import logging
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -9,12 +11,21 @@ from datetime import datetime, timezone
 from fastapi import Depends, HTTPException
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
+import catalog
 import config as cfg
 import db
 import keys
 from config import AUTH_CACHE_S, TENANT_NS_PREFIX
+from resilience import parse_ts
 
+log = logging.getLogger("api")
 _cache: dict[str, tuple[float, dict]] = {}
+# (budget field, spend field, the 402 reason): a key is exhausted when any spend reached its budget
+_BUDGETS = (
+    ("max_budget", "spend", "key budget exhausted"),
+    ("budget_requests", "spent_requests", "key request budget exhausted"),
+    ("budget_gpu_seconds", "spent_gpu_seconds", "key GPU-second budget exhausted"),
+)
 
 
 @dataclass
@@ -22,6 +33,11 @@ class Principal:
     key: str
     tenant: str
     info: dict
+    key_hash: str | None = None  # an operation-scoped principal (an admitted child's caller): the key's hash, no key
+
+    @property
+    def hash(self) -> str:
+        return self.key_hash or keys.key_hash(self.key)
 
     @property
     def namespace(self) -> str:
@@ -38,42 +54,70 @@ class Principal:
         identity = (
             [self.tenant, "principal", principal_id] if principal_id else [self.tenant, "key", keys.key_hash(self.key)]
         )
-        import json
-
         return keys.key_hash(json.dumps(identity, separators=(",", ":")))
 
     def public(self) -> dict:
-        i = self.info
-        exhausted = (
-            (i.get("max_budget") is not None and (i.get("spend") or 0) >= i["max_budget"])
-            or (i.get("budget_requests") is not None and (i.get("spent_requests") or 0) >= i["budget_requests"])
-            or (
-                i.get("budget_gpu_seconds") is not None and (i.get("spent_gpu_seconds") or 0) >= i["budget_gpu_seconds"]
-            )
-        )
-        legacy = (i.get("metadata") or {}).get("legacy") or {}
-        return {
-            "id": i.get("token") or i.get("key_name"),
-            "key_preview": i.get("key_name"),
-            "alias": i.get("key_alias"),
-            "tenant": self.tenant,
-            "budget": i.get("max_budget"),
-            "spend": i.get("spend", 0),
-            "models": i.get("models", []),
-            "created_at": i.get("created_at"),
-            "expires_at": i.get("expires"),
-            "status": "exhausted" if exhausted else "active",
-            "role": self.role,
-            "scopes": i.get("scopes") or [],
-            "max_concurrent": i.get("max_concurrent"),
-            "budget_requests": i.get("budget_requests"),
-            "spent_requests": i.get("spent_requests") or 0,
-            "budget_gpu_seconds": i.get("budget_gpu_seconds"),
-            "spent_gpu_seconds": i.get("spent_gpu_seconds") or 0,
-            "rate_limit": i.get("rate_limit"),
-            "principal_id": legacy.get("principal_id"),
-            "legacy": legacy or None,
-        }
+        return key_view(self.info, self.tenant)
+
+
+def _exhausted(i: dict) -> str | None:
+    """The reason a key record has used up one of its budgets (money, requests, GPU seconds); None while it has not."""
+    return next(
+        (why for budget, spent, why in _BUDGETS if i.get(budget) is not None and (i.get(spent) or 0) >= i[budget]), None
+    )
+
+
+def exhausted(i: dict) -> bool:
+    return _exhausted(i) is not None
+
+
+def key_view(i: dict, tenant: str, admin: bool = False) -> dict:
+    """A key record as a caller may see it (docs/API.md "Keys"): the safe limit and usage fields (limits_view), never
+    the hash, the raw metadata or a secret. The caller's own view (`GET /v1/keys/me`): `id` is the key's token, with
+    its imported `legacy` block. The admin's view (`admin=True`: `GET /v1/keys`, the fleet listing, the create and
+    update answers): `id` is the alias, `blocked` and a `status` that says `blocked` for a retained blocked key (an
+    imported record with unknown scopes, or a blocked one), and the key's run usage from the ledger."""
+    legacy = (i.get("metadata") or {}).get("legacy") or {}
+    blocked = admin and bool(i.get("blocked"))
+    out = {
+        "id": i.get("key_alias") if admin else (i.get("token") or i.get("key_name")),
+        "key_preview": i.get("key_name"),
+        "alias": i.get("key_alias"),
+        "tenant": tenant,
+        "budget": i.get("max_budget"),
+        "spend": i.get("spend", 0),
+        "models": i.get("models", []),
+        "created_at": i.get("created_at"),
+        "expires_at": i.get("expires"),
+        "status": "blocked" if blocked else ("exhausted" if exhausted(i) else "active"),
+        **({"blocked": blocked} if admin else {}),
+        "role": (i.get("metadata") or {}).get("role") or "user",
+        **limits_view(i),
+        **({} if admin else {"legacy": legacy or None}),
+    }
+    if admin and db.enabled() and i.get("token"):
+        try:
+            out["usage"] = keys.run_usage(i["token"])
+        except Exception as e:  # noqa: BLE001 - the listing never fails on the usage figures
+            log.warning("key %s: run usage unavailable: %s", i.get("key_alias"), e)
+    return out
+
+
+def limits_view(i: dict) -> dict:
+    """The safe limit and usage fields of a key record (docs/API.md "Keys"): scopes, concurrency, the request and
+    GPU-second budgets with their spend, the rate limit and the stable principal id. Never the hash, the raw metadata
+    or a secret. Shared by the caller's own view (`GET /v1/keys/me`) and the admin listing (`GET /v1/keys`)."""
+    legacy = (i.get("metadata") or {}).get("legacy") or {}
+    return {
+        "scopes": i.get("scopes") or [],
+        "max_concurrent": i.get("max_concurrent"),
+        "budget_requests": i.get("budget_requests"),
+        "spent_requests": i.get("spent_requests") or 0,
+        "budget_gpu_seconds": i.get("budget_gpu_seconds"),
+        "spent_gpu_seconds": i.get("spent_gpu_seconds") or 0,
+        "rate_limit": i.get("rate_limit"),
+        "principal_id": legacy.get("principal_id"),
+    }
 
 
 async def key_info(key: str) -> dict:
@@ -104,10 +148,8 @@ async def _principal(authorization: str, allow_router: bool = False) -> Principa
     info = await key_info(key)
     if info.get("blocked"):
         raise HTTPException(403, "key is blocked")
-    if info.get("expires"):
-        expiry = datetime.fromisoformat(info["expires"].replace("Z", "+00:00"))
-        if (expiry if expiry.tzinfo else expiry.replace(tzinfo=timezone.utc)) <= datetime.now(timezone.utc):
-            raise HTTPException(403, "key expired")
+    if info.get("expires") and parse_ts(info["expires"]) <= datetime.now(timezone.utc):
+        raise HTTPException(403, "key expired")
     meta = info.get("metadata") or {}
     if not meta.get("tenant"):
         raise HTTPException(403, "key is not bound to a tenant")
@@ -126,20 +168,17 @@ async def principal(credentials: HTTPAuthorizationCredentials | None = Depends(b
 
 def check_budget(p: Principal) -> None:
     """The cached view (a fast refusal); `keys.admit` holds the exact, transactional check at admission."""
-    i = p.info
-    if i.get("max_budget") is not None and (i.get("spend") or 0) >= i["max_budget"]:
-        raise HTTPException(402, "key budget exhausted")
-    if i.get("budget_requests") is not None and (i.get("spent_requests") or 0) >= i["budget_requests"]:
-        raise HTTPException(402, "key request budget exhausted")
-    if i.get("budget_gpu_seconds") is not None and (i.get("spent_gpu_seconds") or 0) >= i["budget_gpu_seconds"]:
-        raise HTTPException(402, "key GPU-second budget exhausted")
+    if why := _exhausted(p.info):
+        raise HTTPException(402, why)
 
 
-def check_scope(p: Principal, scope: str) -> None:
-    """A key with scopes may do only what they name (keys.SCOPES); a key without scopes may do everything of its role."""
+def check_scope(p: Principal, scope: str | tuple[str, ...]) -> None:
+    """A key with scopes may do only what they name (keys.SCOPES); a key without scopes may do everything of its role.
+    A tuple: any one of them suffices."""
     scopes = p.info.get("scopes") or []
-    if scopes and scope not in scopes:
-        raise HTTPException(403, f"key scope {scope} required")
+    wanted = scope if isinstance(scope, tuple) else (scope,)
+    if scopes and not any(w in scopes for w in wanted):
+        raise HTTPException(403, f"key scope {' or '.join(wanted)} required")
 
 
 def check_model(p: Principal, model: str) -> None:
@@ -163,9 +202,13 @@ def scoped(*scopes: str):
     return dependency
 
 
-def authorize(p: Principal, model: str, scope: str, *, budget: bool = False) -> None:
-    """Shared model policy for API invokes and the model gateway's authorization hook."""
-    check_model(p, model)
+def authorize(
+    p: Principal, model: str, scope: str | tuple[str, ...], *, budget: bool = False, model_check: bool = True
+) -> None:
+    """Shared model policy for API invokes and the model gateway's authorization hook. `model_check=False` only for a
+    delegated stage (app._require_delegation verified the delegation first)."""
+    if model_check:
+        check_model(p, model)
     if budget:
         check_budget(p)
     check_scope(p, scope)
@@ -192,8 +235,25 @@ def check_operation_owner(p: Principal, job: dict) -> None:
         # key is evidence; sharing its tenant/bucket is not.
         if ann.get(f"{cfg.LABEL}/key") != keys.key_hash(p.key):
             raise missing
-    if model and not allows_model(p, model):
+    if model and not allows_model(p, model) and not _delegated_stage(labels, ann, model):
         raise missing
+
+
+def _delegated_stage(labels: dict, ann: dict, model: str) -> bool:
+    """An owner's stage on a model the key is not granted (docs/JOBS.md "Delegated stages") stays readable by the owner:
+    the Job is a stage of a graph that declared it on this model and whose root class delegates to it."""
+    root = labels.get(f"{cfg.LABEL}/stage-root")
+    stage = ann.get(f"{cfg.LABEL}/stage")
+    if not root or not stage or not db.enabled():
+        return False
+    g = keys.graph_of(root)
+    if not g or (g.get("models") or {}).get(stage) != model:
+        return False
+    record = keys.operation_owner(root)
+    if not record:
+        return False
+    root_model = catalog.get(record[2])
+    return bool(root_model and model in (root_model.get("delegates") or []))
 
 
 def may_read_operation(p: Principal, job: dict) -> bool:
@@ -209,4 +269,17 @@ def may_read_operation(p: Principal, job: dict) -> bool:
 def admin(p: Principal = Depends(principal)) -> Principal:
     if (p.info.get("metadata") or {}).get("role") != "admin":
         raise HTTPException(403, "endpoint scaling and key management need a key with metadata.role=admin")
+    return p
+
+
+FLEET_ROLE = "fleet"  # the fleet operator (docs/API.md "Fleet operators"): tenants, their keys and usage, nothing else
+
+
+def fleet_operator(p: Principal = Depends(principal)) -> Principal:
+    """A fleet operator key (`metadata.role=fleet`, minted only by the fleet's own bootstrap: `python -m keys
+    bootstrap` with role fleet, never by a tenant admin or an import): the explicit cross-tenant surface under
+    `/v1/fleet/tenants`. A tenant admin's authority is untouched (it is not a fleet operator and the fleet operator
+    is not a tenant admin: `admin` refuses it)."""
+    if p.role != FLEET_ROLE:
+        raise HTTPException(403, "fleet-wide tenant and key management needs a key with metadata.role=fleet")
     return p

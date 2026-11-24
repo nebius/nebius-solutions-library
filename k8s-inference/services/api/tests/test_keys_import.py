@@ -149,9 +149,20 @@ def test_run_admission_reserves_and_the_gateway_counts_one_logical_call(client, 
     assert c.get("/internal/authorize/llm-example", headers=H).status_code == 200
     assert [x[0] for x in fake_keys.calls] == ["admit", "release"] and fake_keys.calls[0][1].startswith("gw-")
     fake_keys.calls.clear()
-    token = hmac.new(b"sk-router", keys.key_hash("sk-good").encode(), hashlib.sha256).hexdigest()
-    assert c.get("/internal/authorize/llm-example", headers={**H, appmod.ADMITTED_HEADER: token}).status_code == 200
+    # the API's own admitted call: the token binds the key, the model and the admission the API holds (a `sync-…`
+    # reservation on the key); the hook finds the reservation and counts nothing
+    fake_keys.admit(keys.key_hash("sk-good"), "sync-test", "demo")
+    fake_keys.calls.clear()
+    token = hmac.new(
+        b"sk-router", f"{keys.key_hash('sk-good')}:llm-example:sync-test".encode(), hashlib.sha256
+    ).hexdigest()
+    admitted = {**H, appmod.ADMITTED_HEADER: token, appmod.OPERATION_HEADER: "sync-test"}
+    assert c.get("/internal/authorize/llm-example", headers=admitted).status_code == 200
     assert fake_keys.calls == []
+    legacy = hmac.new(b"sk-router", keys.key_hash("sk-good").encode(), hashlib.sha256).hexdigest()
+    assert c.get("/internal/authorize/llm-example", headers={**H, appmod.ADMITTED_HEADER: legacy}).status_code == 200
+    assert [x[0] for x in fake_keys.calls] == ["admit", "release"]  # the key-only token of old releases: a direct call
+    fake_keys.calls.clear()
     assert c.get("/internal/authorize/llm-example", headers={**H, appmod.ADMITTED_HEADER: "forged"}).status_code == 200
     assert [x[0] for x in fake_keys.calls] == ["admit", "release"]  # a wrong token counts
 

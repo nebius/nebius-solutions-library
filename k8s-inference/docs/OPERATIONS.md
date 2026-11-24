@@ -17,7 +17,7 @@ your projects is touched; every identity below is created by the cloud stage and
 | SA auth key (JWT, no expiry) | Secret `ops/nebius-sa`, key `<region>.json`, written by the platform stage (`stack/platform/secrets.tf`) | mounted at `/var/run/nebius/<region>.json`; `ops-login.sh` turns every such file into a CLI profile `sa-<region>` and a registry credential helper for that region (tokens minted per call, nothing expires) |
 | SA auth keys of every GPU region's project (the same ops identities) | Secret `kueue-system/price-feed-nebius-sa` on the control cluster, key `<region>.json` per region (`stack/platform/secrets.tf`) | mounted at `/etc/nebius` in the dispatcher and its price feed; `services/dispatcher/nebius_cli.py` makes the same `sa-<region>` profiles; the dispatcher raises an InfiniBand pool's node-group floor in that region's project while a multi-node run waits (docs/SCHEDULING.md "InfiniBand pools grow on demand"), the price feed asks the calculator |
 | S3 access key of the hub ops SA | Secret `monitoring/cost-export-s3` (`ACCESS_KEY_ID`, `ACCESS_SECRET_KEY`), the daily cost report | bucket policy on the fleet's backups bucket (`<fleet>-backups`): the ops group may write there |
-| Image cache credentials (with the cache, `images.cache.enabled`) | a static Container Registry key of the hub ops SA, issued once per operator by `stack/scripts/registry-static-key.sh` and cached under `stack/.secrets/` (gitignored); Secret `registry/zot-sync-credentials` | docs/IMAGES.md; without the cache neither exists |
+| Image cache credentials (with the cache, `images.cache.enabled`) | a static Container Registry key of the hub ops SA, issued once per fleet by the operator with `stack/scripts/registry-static-key.sh` and kept in the operator's environment (`secrets.registry_key_env`, default `REGISTRY_STATIC_KEY`, like the NGC key: `stack.sh` refuses to plan while it is unset); Secret `registry/zot-sync-credentials`, the same value on every cluster | docs/IMAGES.md; without the cache neither exists; a Terraform plan never issues a key |
 | Registry push/pull from the ops image | the SA token (`Username: iam`) through the docker credential helper `docker-credential-nebius-sa` inside the image | a fresh token per registry request: no 40-minute expiry |
 | LiteLLM master key, Grafana admin password, the database password | `random_password` resources of the cloud stage, in the state bucket (sensitive outputs) and in the clusters' Secrets | `./stack.sh output platform <id>` prints them |
 
@@ -32,7 +32,7 @@ There are no rotation CronJobs in this form: every credential is a Terraform res
 | ops service-account key of a project | `-replace='nebius_iam_v1_auth_public_key.ops["<project>"]'` on the cloud stage, then `apply platform` on the clusters of that project |
 | the fleet database's password | `-replace=random_password.database` on the cloud stage (check the plan first: the managed cluster's bootstrap user must update in place, not be replaced), then `apply platform control` rewrites the `database` Secrets; restart `api` and `litellm` |
 | MultiKueue token of a worker | on the worker `./stack.sh tf platform <id> -- apply -replace='kubernetes_secret_v1.sa_token["multikueue"]'`, then `apply platform control` |
-| the image cache's registry static key | delete `stack/.secrets/<name>-registry-key.json`, re-apply platform on every cluster, retire the old key with `nebius iam static-key delete` |
+| the image cache's registry static key | `stack/scripts/registry-static-key.sh --rotate` (issues a new key, prints the `export REGISTRY_STATIC_KEY=…` line and the old key's id), put the new value in the environment, `apply platform` on every cluster, then retire the old key with `nebius iam static-key delete <old id>` |
 | tenant S3 keys | `./stack.sh tf cloud -- apply -replace='module.tenant_region["<tenant>/<region>"].nebius_iam_v2_access_key.tenant'`, then `apply platform` on that region's cluster and on the control cluster (the hub region's key is in every cluster's `s3-fleet` Secret: re-apply everywhere after rotating it) |
 | the fleet's router key (`api/router-key`) | `./stack.sh tf platform control -- apply -replace='random_password.router_key[0]'`, then `kubectl -n api rollout restart deployment/api` (the API upserts the new hash at start and re-registers every LiteLLM group with it) |
 | a tenant key of `terraform.tfvars` | `./stack.sh tf platform control -- apply -replace='random_password.key["<tenant>-<name>"]'`: the bootstrap Job replaces the value in place (same alias, spend kept) |
@@ -358,6 +358,38 @@ One `regions.<name>` block (project, subnet, allowed CIDRs, pools), then `./stac
 adds the cluster and the tenants' buckets there, the platform stage follows on it, and the control cluster's MultiKueue gains
 the worker (docs/FLEET.md "Change recipes"). The platform images need no per-region copy: the new cluster's
 cache fetches them from the source registry on first use.
+
+## Repair a run admitted on an unmounted flavor
+
+A run that mounts the shared filesystem but was admitted, before filesystem-aware placement (api 0.11.72, fleet chart
+0.1.11), on the `system` flavor of a system pool without the mount sits in `FailedMount`; its pod never started, its
+volume is untouched, its lineage and graph are intact. Existing Jobs do not gain the new affinity from a rollout.
+Two ways keep the same operation (no resume, no new root):
+
+1. **Equip the pool the Job is pinned to (the safe path):** `regions.<r>.weights_filesystem.mount_on_system = true`
+   attaches and mounts the filesystem on the region's system pool (the cloud stage changes the node group's cloud-init
+   and attachment; the provider replaces its nodes one at a time, the platform add-ons move; the system nodes then also
+   carry the snapshot-store label). The pending pod schedules on a replaced node and runs; nothing on the Job changes.
+   Review the plan before applying: a system-pool replacement is a controlled rolling of two nodes.
+2. **Patch the suspended Job's scheduling directives (only if the cluster allows it):** Kubernetes mutates a Job's
+   node affinity, node selector and tolerations only while the Job is suspended, in a request that changes nothing
+   else, and only when the cluster enables that mutation (check with a server-side dry run of the patch on a suspended
+   Job before relying on it). If allowed: deactivate the Kueue Workload (`kubectl -n tenant-<t> patch workload <wl>
+   --type merge -p '{"spec":{"active":false}}'`, wait for `job.spec.suspend: true`), add the affinity
+   `serverless2.nebius/shared-fs In [true]` to the Job's pod template, let Kueue recreate the Workload (delete the
+   Workload object, never the Job, if it keeps the old pod set), then reactivate. Kueue re-admits against the labelled
+   flavors; a new pod of the same operation runs.
+The static PVs keep no node affinity (immutable once created; the flavor label is the guard for new runs).
+
+## Saved plans
+
+`./stack.sh tf platform <id> -- plan -out=<file>` then, after review, `./stack.sh tf platform <id> -- apply <file>`.
+The IAM token is an ephemeral input (`stack/platform/config.tf` `iam_token`): a plan file never contains it, and the
+apply takes the token `stack.sh` exports at apply time, so a plan reviewed for longer than a token's lifetime still
+applies with a fresh token (before api 0.11.85's stack change the token was frozen into the plan and Terraform
+ignored the environment at apply: "Ignoring variable when applying a saved plan", then every Helm write failed with
+the expired token). Everything else in a saved plan is frozen as usual: the cloud state read, the chart values, the
+secret inputs (`secrets.*_env`, sensitive but not ephemeral: they are part of the plan's resource data).
 
 ## Patching
 

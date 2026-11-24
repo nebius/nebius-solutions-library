@@ -137,11 +137,11 @@ def test_removed_variants_diff_follows_object_names_and_litellm_ids():
     kube_region = kube.cluster_region
     kube.fleet, kube.cluster_region = (lambda: VARIANT_FLEET), (lambda cid: "eu-north1" if cid == "hub" else cid)
     try:
-        before = models.to_entry(VARIANT_SPEC)
+        before = models.definition(VARIANT_SPEC)
         spec = copy.deepcopy(VARIANT_SPEC)
         spec["deployments"]["eu-north1"]["variants"] = spec["deployments"]["eu-north1"]["variants"][:1]
         spec["routing"] = {"field": "tier", "map": {"fast": "reserved"}, "default": "priority"}
-        after = models.to_entry(spec)
+        after = models.definition(spec)
         assert models.removed_variants(before, after, "hub") == (
             {"chat-spot", "chat-cheap"},
             ["chat--hub--spot", "chat--hub--cheap"],
@@ -150,7 +150,7 @@ def test_removed_variants_diff_follows_object_names_and_litellm_ids():
         # the first variant keeps the model's own object name and LiteLLM id, whatever it is called
         spec["deployments"]["eu-north1"]["variants"] = [{"name": "spot", "pool": "h100-spot-1x", "min": 0, "max": 4}]
         spec["routing"] = {"field": "tier", "map": {"fast": "spot"}, "default": "priority"}
-        assert models.removed_variants(before, models.to_entry(spec), "hub") == (
+        assert models.removed_variants(before, models.definition(spec), "hub") == (
             {"chat-spot", "chat-cheap"},
             ["chat--hub--spot", "chat--hub--cheap"],
         )
@@ -177,6 +177,7 @@ def test_operation_list_and_replays_report_from_the_durable_records(client, monk
     queried = []
     monkeypatch.setattr(attempts, "enabled", lambda: True)
     monkeypatch.setattr(attempts, "_marks", lambda operation: None)
+    monkeypatch.setattr(attempts, "mark_successor", lambda operation, successor: None)
     monkeypatch.setattr(attempts, "for_operation", lambda root: rows if root == op else [])
     monkeypatch.setattr(attempts, "for_operations", lambda roots: queried.append(set(roots)) or {op: rows})
     monkeypatch.setattr(attempts, "marks_for", lambda names: queried.append(set(names)) or {op: (5, None, None)})

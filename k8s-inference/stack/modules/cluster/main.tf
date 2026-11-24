@@ -63,7 +63,7 @@ resource "nebius_mk8s_v1_node_group" "system" {
     drain_timeout   = "300s"
   }
   template = {
-    metadata             = { labels = merge({ "serverless2.nebius/pool" = "system" }, local.snapshot_store_labels) }
+    metadata             = { labels = merge({ "serverless2.nebius/pool" = "system", "serverless2.nebius/shared-fs" = var.weights_filesystem.enabled && var.weights_filesystem.mount_on_system ? "true" : "false" }, local.snapshot_store_labels) }
     boot_disk            = { size_gibibytes = 128, type = "NETWORK_SSD" }
     network_interfaces   = [{ subnet_id = data.nebius_vpc_v1_subnet.target.id }]
     os                   = "ubuntu24.04"
@@ -114,8 +114,9 @@ resource "nebius_mk8s_v1_node_group" "gpu" {
   }
   template = {
     metadata = { labels = merge({
-      "serverless2.nebius/pool"     = each.key
-      "serverless2.nebius/capacity" = each.value.capacity.type == "spot" ? "spot" : (each.value.capacity.type == "reserved" ? "reserved" : "on-demand")
+      "serverless2.nebius/pool"      = each.key
+      "serverless2.nebius/capacity"  = each.value.capacity.type == "spot" ? "spot" : (each.value.capacity.type == "reserved" ? "reserved" : "on-demand")
+      "serverless2.nebius/shared-fs" = var.weights_filesystem.enabled ? "true" : "false" # the filesystem is attached and mounted on every GPU pool
       }, each.value.local_nvme && each.value.local_nvme_mode == "kubelet-ephemeral" ? {
       "serverless2.nebius/local-nvme" = "true" # scratch: local-nvme runs and NVMe-preferring endpoints select it
       } : {}, each.value.interconnect == "infiniband" ? {
@@ -177,14 +178,21 @@ resource "nebius_mk8s_v1_node_group" "cpu" {
   }
   template = {
     metadata = { labels = merge({
-      "serverless2.nebius/pool"     = each.key
-      "serverless2.nebius/capacity" = "on-demand"
+      "serverless2.nebius/pool"      = each.key
+      "serverless2.nebius/capacity"  = "on-demand"
+      "serverless2.nebius/shared-fs" = each.value.shared_filesystem && var.weights_filesystem.enabled ? "true" : "false"
     }, each.value.labels) }
-    taints               = [{ key = "serverless2.nebius/cpu-pool", value = "present", effect = "NO_SCHEDULE" }]
-    boot_disk            = { size_gibibytes = each.value.boot_disk_gib, type = "NETWORK_SSD" }
-    network_interfaces   = [{ subnet_id = data.nebius_vpc_v1_subnet.target.id }]
-    os                   = "ubuntu24.04"
-    cloud_init_user_data = local.system_cloud_init
+    taints             = [{ key = "serverless2.nebius/cpu-pool", value = "present", effect = "NO_SCHEDULE" }]
+    boot_disk          = { size_gibibytes = each.value.boot_disk_gib, type = "NETWORK_SSD" }
+    network_interfaces = [{ subnet_id = data.nebius_vpc_v1_subnet.target.id }]
+    os                 = "ubuntu24.04"
+    # the shared weights filesystem, attached and mounted at /mnt/weights like on a GPU pool (docs/FLEET.md "CPU pools"):
+    # a run class's `weights`/`data`, the shared checkpoints and the restricted assets need it on the node; off per pool
+    # with shared_filesystem = false (a pool for runs that read nothing shared)
+    # with the image cache: the registry bootstrap at boot (docs/IMAGES.md "The setting at boot"), as on a GPU pool; without it the
+    # plain system cloud-init (plus the shared-filesystem mount when the pool has it)
+    cloud_init_user_data = var.image_cache.enabled ? local.cpu_batch_cloud_init[each.key] : (each.value.shared_filesystem && var.weights_filesystem.enabled ? local.cpu_pool_cloud_init : local.system_cloud_init)
+    filesystems          = each.value.shared_filesystem && var.weights_filesystem.enabled ? local.weights_fs_attachment : null
     reservation_policy   = { policy = "FORBID" }
     resources            = { platform = each.value.platform, preset = each.value.preset }
     service_account_id   = nebius_iam_v1_service_account.nodepull.id
@@ -259,6 +267,9 @@ locals {
     "runcmd:",
     " - sysctl --system",
   ])
+  # CPU pools with the shared filesystem: the system cloud-init plus the mount step the GPU pools run (no snapshot directory)
+  cpu_pool_cloud_init = join("\n", concat([local.system_cloud_init], local.weights_fs_runcmd))
+
   snapshot_system_cloud_init = join("\n", concat(
     [local.system_cloud_init],
     var.weights_filesystem.mount_on_system ? concat(local.weights_fs_runcmd, local.snapshot_fs_runcmd) : [],
@@ -282,6 +293,58 @@ locals {
     "[host.\"http://127.0.0.1:${var.image_cache.node_port}\"]",
     "  capabilities = [\"pull\", \"resolve\"]",
   ])
+  # The registry bootstrap a fresh node needs BEFORE its first pull (docs/IMAGES.md "The setting at boot"): the containerd
+  # drop-in, the mirror file for the logical host (the Zot NodePort on the node's loopback: valid before Spegel runs; Spegel
+  # rewrites it with its peers later), the unlimited memlock on the runtime, and the marker that makes the node-config
+  # DaemonSet a no-op. One fragment for GPU pools and for the CPU batch pools (which scale from zero and otherwise met
+  # their first workload pull between node Ready and Spegel's hosts.toml: "server misbehaving" on the logical host).
+  registry_bootstrap_write_files = var.image_cache.enabled ? concat(
+    [
+      " - path: /etc/containerd/conf.d/serverless2-registry.toml",
+      "   content: |",
+    ],
+    [for l in split("\n", local.containerd_registry_dropin) : "     ${l}"],
+    [
+      " - path: /etc/containerd/certs.d/${var.image_cache.host}/hosts.toml",
+      "   content: |",
+    ],
+    [for l in split("\n", local.containerd_hosts_toml) : "     ${l}"],
+  ) : []
+  memlock_write_files = [
+    # Unlimited memlock on the container runtime: RDMA memory registration (NCCL over InfiniBand) is bounded by
+    # RLIMIT_MEMLOCK (8 MiB on the node image); lifted on the containerd unit, every container inherits it and
+    # multi-node runs need no CAP_IPC_LOCK (docs/JOBS.md "Multi-node runs"). On a CPU pool it only spares the
+    # node-config DaemonSet its post-Ready containerd restart (the DaemonSet writes the same file otherwise).
+    " - path: /etc/systemd/system/containerd.service.d/serverless2-memlock.conf",
+    "   content: |",
+    "     [Service]",
+    "     LimitMEMLOCK=infinity",
+  ]
+  registry_bootstrap_runcmd = concat(var.image_cache.enabled ? [
+    " - mkdir -p /etc/containerd/certs.d",
+    " - grep -q '^imports' /etc/containerd/config.toml || sed -i '1a imports = [\"/etc/containerd/conf.d/*.toml\"]' /etc/containerd/config.toml",
+    " - touch /etc/containerd/certs.d/.serverless2-containerd-restarted",
+    ] : [], [
+    " - systemctl daemon-reload",
+    " - systemctl restart containerd",
+  ])
+  # CPU batch pools (never the system pool: its node group keeps the plain system cloud-init): the system fragment's
+  # sysctl, the registry bootstrap and the memlock drop-in, the mount of the shared filesystem when the pool has it
+  cpu_batch_cloud_init = { for pn, p in var.cpu_pools : pn => join("\n", concat(
+    [
+      "#cloud-config",
+      "write_files:",
+      " - path: /etc/sysctl.d/90-serverless2.conf",
+      "   content: |",
+      "     fs.inotify.max_user_instances = 8192",
+      "     fs.inotify.max_user_watches = 1048576",
+    ],
+    local.registry_bootstrap_write_files,
+    local.memlock_write_files,
+    ["runcmd:", " - sysctl --system"],
+    local.registry_bootstrap_runcmd,
+    p.shared_filesystem && var.weights_filesystem.enabled ? local.weights_fs_runcmd : [],
+  )) }
   gpu_settings = { for pn, p in var.gpu_pools : pn => merge(
     var.gpu_operator ? {} : { drivers_preset = p.driver_preset },
     p.interconnect == "infiniband" ? { dra = true } : {}
@@ -291,40 +354,16 @@ locals {
       "#cloud-config",
       "write_files:",
     ],
-    var.image_cache.enabled ? concat(
-      [
-        " - path: /etc/containerd/conf.d/serverless2-registry.toml",
-        "   content: |",
-      ],
-      [for l in split("\n", local.containerd_registry_dropin) : "     ${l}"],
-      [
-        " - path: /etc/containerd/certs.d/${var.image_cache.host}/hosts.toml",
-        "   content: |",
-      ],
-      [for l in split("\n", local.containerd_hosts_toml) : "     ${l}"],
-    ) : [],
+    local.registry_bootstrap_write_files,
     [
       " - path: /etc/sysctl.d/90-serverless2.conf",
       "   content: |",
       "     fs.inotify.max_user_instances = 8192",
       "     fs.inotify.max_user_watches = 1048576",
-      # Unlimited memlock on the container runtime: RDMA memory registration (NCCL over InfiniBand) is bounded by
-      # RLIMIT_MEMLOCK (8 MiB on the node image); lifted on the containerd unit, every container
-      # inherits it and multi-node runs need no CAP_IPC_LOCK (docs/JOBS.md "Multi-node runs").
-      " - path: /etc/systemd/system/containerd.service.d/serverless2-memlock.conf",
-      "   content: |",
-      "     [Service]",
-      "     LimitMEMLOCK=infinity",
-      "runcmd:",
-      " - sysctl --system",
-      ], var.image_cache.enabled ? [
-      " - mkdir -p /etc/containerd/certs.d",
-      " - grep -q '^imports' /etc/containerd/config.toml || sed -i '1a imports = [\"/etc/containerd/conf.d/*.toml\"]' /etc/containerd/config.toml",
-      " - touch /etc/containerd/certs.d/.serverless2-containerd-restarted",
-      ] : [], [
-      " - systemctl daemon-reload",
-      " - systemctl restart containerd",
     ],
+    local.memlock_write_files,
+    ["runcmd:", " - sysctl --system"],
+    local.registry_bootstrap_runcmd,
     local.weights_fs_runcmd,
   ))
 }

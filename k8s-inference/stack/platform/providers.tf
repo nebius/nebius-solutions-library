@@ -1,10 +1,11 @@
 # Stage 2, platform: everything inside ONE cluster (`-var target=<cluster id>`, one state per cluster): the
 # releases and manifests, the tenants and their keys (tenants.tf). The
 # cluster's endpoint and CA come from the cloud state; authentication is the IAM token stack.sh takes from the
-# Nebius CLI (`nebius iam get-access-token`) and passes as the sensitive variable `iam_token`. It configures
-# the Kubernetes, Helm and kubectl providers only: provider configuration is never written to
-# the state, and no resource takes the token as an input (the local-exec provisioners read NEBIUS_IAM_TOKEN
-# from the environment, stack/scripts/kube.sh).
+# Nebius CLI (`nebius iam get-access-token`) and passes as the ephemeral, sensitive variable `iam_token`. It
+# configures the Kubernetes, Helm and kubectl providers only: provider configuration is never written to the state,
+# an ephemeral variable is never written to a saved plan either (a saved plan applied later takes the token the
+# environment holds at apply time), and no resource takes the token as an input (the local-exec provisioners read
+# NEBIUS_IAM_TOKEN from the environment, stack/scripts/kube.sh).
 
 data "terraform_remote_state" "cloud" {
   backend = "s3"

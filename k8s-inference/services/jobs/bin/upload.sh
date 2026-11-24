@@ -12,7 +12,10 @@
 # the sandbox's pause (the kubelet does not refresh the status of a terminating pod, so after a
 # SIGTERM the API alone would leave us waiting until the grace period's SIGKILL). On SIGTERM
 # (preemption, cancel) it uploads what exists at once, then waits for main to finish its own
-# SIGTERM handling (checkpoint) and uploads again.
+# SIGTERM handling (checkpoint) and uploads again. Outside a termination, once main's processes
+# are gone the exit code is waited for without bound (a log line every minute): the kubelet may
+# post the terminated state minutes after the process ended, and the pod cannot end before this
+# container does, so giving up would only record a completed attempt as interrupted.
 set -uo pipefail
 : "${POD_NAME:?POD_NAME must be set}"
 # UPLOAD_MODE=record (application-managed I/O, docs/JOBS.md "Execution options"): no bucket, no credentials; only the
@@ -21,7 +24,7 @@ MODE="${UPLOAD_MODE:-sync}"; EXPORT=""; OUTPUT_PREFIX="${OUTPUT_PREFIX:-}"; ACK=
 API="https://${KUBERNETES_SERVICE_HOST}:${KUBERNETES_SERVICE_PORT}"
 TOKEN_FILE=/var/run/secrets/kubernetes.io/serviceaccount/token; TOKEN=$(cat "$TOKEN_FILE"); CA=/var/run/secrets/kubernetes.io/serviceaccount/ca.crt
 POD_URL="$API/api/v1/namespaces/$POD_NAMESPACE/pods/$POD_NAME"
-MAIN="${MAIN_CONTAINER:-main}"; EXIT=""; POD="{}"; SEEN=0
+MAIN="${MAIN_CONTAINER:-main}"; EXIT=""; POD="{}"; SEEN=0; DIGEST_SEEN=0
 
 pod() { TOKEN=$(cat "$TOKEN_FILE"); POD=$(curl -sS --cacert "$CA" -H "Authorization: Bearer $TOKEN" "$POD_URL" 2>/dev/null || echo '{}'); }
 field() { jq -r --arg m "$MAIN" "$1" <<<"$POD"; }
@@ -53,41 +56,49 @@ record() {   # $1 = status; the attempt as the uploader sees it now (main may st
   pool=$(field '.spec.nodeSelector["serverless2.nebius/pool"] // empty')
   image=$(field '.spec.containers[]? | select(.name==$m) | .image // empty')
   digest=$(field '.status.containerStatuses[]? | select(.name==$m) | .imageID // empty')
+  [ -n "$digest" ] && DIGEST_SEEN=1   # the exact runtime digest is on record from this record on
   # the application's finalization record (docs/JOBS.md "Attempts and finalization"): RESULT.json next to the
   # outputs names the committed result and checkpoint; without it an application-managed run is not delivered.
   # CHECKPOINT.json ({"checkpoint_ref": ..., "generation": N}) is the live pointer the application publishes while it
   # runs; the acknowledged pointer is written back to CHECKPOINT.ack.json
-  local result="" ckpt="" gen=""
+  local result="" ckpt="" gen="" cap=""
   if [ -f /work/RESULT.json ]; then
     result=$(jq -r '.result_ref // empty' /work/RESULT.json 2>/dev/null); ckpt=$(jq -r '.checkpoint_ref // empty' /work/RESULT.json 2>/dev/null)
+    cap=$(jq -c '.capture // empty' /work/RESULT.json 2>/dev/null)   # the caller's capture manifest (docs/JOBS.md "Endpoint children")
   fi
   if [ -z "$ckpt" ] && [ -f /work/CHECKPOINT.json ]; then
     ckpt=$(jq -r '.checkpoint_ref // empty' /work/CHECKPOINT.json 2>/dev/null); gen=$(jq -r '.generation // empty' /work/CHECKPOINT.json 2>/dev/null)
   fi
-  mkdir -p /work/attempts
+  # the record goes next to the outputs; a volume this container cannot write (a misconfigured claim) must not stop
+  # the record from reaching the API: it is kept under /tmp then and the upload step reports the volume
+  REC=/work/attempts
+  if ! mkdir -p "$REC" 2>/dev/null || ! [ -w "$REC" ]; then REC=/tmp/attempts; mkdir -p "$REC"; echo "WARN: /work is not writable by the uploader; records kept under $REC"; fi
   [ "$1" = started ] && ended="" || ended="${ended:-$(date -u +%FT%TZ)}"   # a start record has no end yet
   jq -cn --arg op "$OPERATION" --arg pod "$POD_NAME" --arg node "$node" --arg pool "$pool" --arg st "$1" --argjson exit "${EXIT:-null}" \
     --argjson gpus "${GPUS:-0}" --arg cls "${GPU_CLASS:-}" --arg s "$started" --arg e "$ended" --arg img "$image" --arg dg "$digest" \
     --arg exp "${EXPORT:-}" --arg res "$result" --arg ck "$ckpt" --arg gen "$gen" --arg mode "$([ "$MODE" = record ] && echo application || echo managed)" \
+    --arg opmode "${OPERATION_MODE:-}" --arg model "${MODEL:-}" --arg cap "$cap" \
     '{operation:$op,pod:$pod,node:$node,pool:$pool,status:$st,exit_code:$exit,gpus:$gpus,gpu_class:$cls,started_at:$s,ended_at:$e,
       image:$img,image_digest:$dg,io_mode:$mode} + (if $exp != "" then {export:$exp} else {} end)
+      + (if $cap != "" then {capture:($cap|fromjson)} else {} end)
+      + (if $opmode != "" then {mode:$opmode} else {} end) + (if $model != "" then {model:$model} else {} end)
       + (if $res != "" then {result_ref:$res} else {} end) + (if $ck != "" then {checkpoint_ref:$ck} else {} end)
-      + (if $gen != "" then {checkpoint_generation:($gen|tonumber)} else {} end)' > "/work/attempts/$POD_NAME.json"
+      + (if $gen != "" then {checkpoint_generation:($gen|tonumber)} else {} end)' > "$REC/$POD_NAME.json"
   # the durable copy: the fleet API keeps attempts in its database (fenced by epoch; a stale pod gets 409). A terminal
   # record is retried; ACK holds the last HTTP status (200 = acknowledged; the work volume is released only then)
   ACK=""
   if [ -n "${API_URL:-}" ]; then
     local tries=1; [ "$1" = started ] || tries=4
     for i in $(seq 1 $tries); do
-      ACK=$(curl -sS -m 20 -o /work/attempts/.ack.json -w "%{http_code}" -X POST "$API_URL/internal/attempts" \
-        -H "Authorization: Bearer $(cat "$TOKEN_FILE")" -H "Content-Type: application/json" --data-binary "@/work/attempts/$POD_NAME.json" 2>/dev/null || echo 000)
+      ACK=$(curl -sS -m 20 -o "$REC/.ack.json" -w "%{http_code}" -X POST "$API_URL/internal/attempts" \
+        -H "Authorization: Bearer $(cat "$TOKEN_FILE")" -H "Content-Type: application/json" --data-binary "@$REC/$POD_NAME.json" 2>/dev/null || echo 000)
       echo "attempt record $1 -> API $ACK"
       case "$ACK" in 200|409) break ;; esac
       [ "$i" -lt "$tries" ] && { sleep 20 & wait $!; }
     done
     if [ "$ACK" = 200 ] && [ -n "$gen" ]; then
       jq -c --arg g "$gen" '{generation:($g|tonumber), epoch:.epoch, checkpoint_ref:.checkpoint_ref, revision:.revision, acknowledged_at:(now|todate)}' \
-        /work/attempts/.ack.json > /work/CHECKPOINT.ack.json.tmp 2>/dev/null && mv /work/CHECKPOINT.ack.json.tmp /work/CHECKPOINT.ack.json
+        "$REC/.ack.json" > /work/CHECKPOINT.ack.json.tmp 2>/dev/null && mv /work/CHECKPOINT.ack.json.tmp /work/CHECKPOINT.ack.json
     fi
   fi
 }
@@ -103,12 +114,17 @@ upload() {   # $1 = status
   local st="$1"                                 # the positional parameters are replaced below (UPLOAD_EXCLUDES)
   cd /work || return
   record "$st"
-  if [ "$MODE" = record ]; then EXPORT="n/a"; record "$st"; echo "RECORD $(date -u +%FT%TZ) status=$st (application-managed I/O: nothing exported)"; return; fi
+  if [ "$MODE" = record ]; then
+    # application-managed I/O: the run (or the endpoint caller, docs/API.md "Endpoint calls") delivered its own output;
+    # RESULT.json may say how that went (export: succeeded | failed), else the platform exported nothing (n/a)
+    EXPORT=$(jq -r '.export // "n/a"' /work/RESULT.json 2>/dev/null || echo n/a); [ -n "$EXPORT" ] || EXPORT="n/a"
+    record "$st"; echo "RECORD $(date -u +%FT%TZ) status=$st export=$EXPORT (application-managed I/O)"; return
+  fi
   # multi-node runs (UPLOAD_SCOPE=rank0, docs/JOBS.md): every pod records its attempt, only rank 0 publishes the
   # results and STATUS.json (the ranks share nothing under /work; outputs are written by rank 0 by convention)
   if [ "${UPLOAD_SCOPE:-all}" = rank0 ] && [ "${NODE_RANK:-0}" != 0 ]; then
     echo "RECORD $(date -u +%FT%TZ) rank=$NODE_RANK status=$st -> $OUTPUT_PREFIX/attempts/$POD_NAME.json"
-    aws s3 cp "/work/attempts/$POD_NAME.json" "${OUTPUT_PREFIX%/}/attempts/$POD_NAME.json" --no-progress 2>&1 | tail -n 2
+    aws s3 cp "${REC:-/work/attempts}/$POD_NAME.json" "${OUTPUT_PREFIX%/}/attempts/$POD_NAME.json" --no-progress 2>&1 | tail -n 2
     return
   fi
   echo "UPLOAD START $(date -u +%FT%TZ) status=$st -> $OUTPUT_PREFIX"
@@ -124,7 +140,7 @@ upload() {   # $1 = status
   set +f
   if [ "$rc" = 0 ]; then EXPORT=succeeded; else EXPORT=failed; echo "UPLOAD FAILED $(date -u +%FT%TZ) rc=$rc: the volume is kept, retry the export (POST /v1/operations/$OPERATION:export)"; fi
   record "$st"                                  # the record now says how the export went (and reaches the API)
-  aws s3 cp "/work/attempts/$POD_NAME.json" "${OUTPUT_PREFIX%/}/attempts/$POD_NAME.json" --no-progress 2>&1 | tail -n 1
+  aws s3 cp "${REC:-/work/attempts}/$POD_NAME.json" "${OUTPUT_PREFIX%/}/attempts/$POD_NAME.json" --no-progress 2>&1 | tail -n 1
   # STATUS.json is published last: its presence with export=succeeded is the durable-delivery marker
   printf '{"operation":"%s","attempt_pod":"%s","status":"%s","export":"%s","exit_code":%s,"finished_at":"%s"}\n' \
     "$OPERATION" "$POD_NAME" "$st" "$EXPORT" "${EXIT:-null}" "$(date -u +%FT%TZ)" > STATUS.json
@@ -132,10 +148,10 @@ upload() {   # $1 = status
   echo "UPLOAD END $(date -u +%FT%TZ) export=$EXPORT"
 }
 # shellcheck disable=SC2317,SC2329 # invoked by the TERM trap (diagnostic varies by ShellCheck version)
-on_term() { echo "SIGTERM $(date -u +%FT%TZ): partial upload, then waiting for $MAIN to end"; EXIT=""; upload interrupted; }
+on_term() { echo "SIGTERM $(date -u +%FT%TZ): partial upload, then waiting for $MAIN to end"; TERMINATING=1; EXIT=""; upload interrupted; }
 trap on_term TERM
 
-gone=0
+gone=0; TERMINATING=""
 while true; do
   pod
   EXIT=$(field '.status.containerStatuses[]? | select(.name==$m) | .state.terminated.exitCode // empty')
@@ -145,29 +161,60 @@ while true; do
       # the attempt is on record from its first second: a node that dies without warning (a stopped spot VM
       # sends no SIGTERM, measured on a B300 spot node) leaves this "started" record, which the
       # replacement attempt's upload of /work/attempts carries to the bucket; the copy here is best-effort
+      # the kubelet reports main's runtime image digest (imageID) seconds after the start, sometimes after this
+      # container already runs: wait for it, bounded, so the start record carries the exact digest the attempt runs
+      # (docs/JOBS.md "Attempts and finalization"); a digest that appears later is republished below
+      for _ in $(seq 1 "${DIGEST_WAIT_POLLS:-15}"); do
+        [ -n "$(field '.status.containerStatuses[]? | select(.name==$m) | .imageID // empty')" ] && break
+        sleep 2 & wait $!; pod
+      done
       record started
-      [ "$MODE" = record ] || aws s3 cp "/work/attempts/$POD_NAME.json" "${OUTPUT_PREFIX%/}/attempts/$POD_NAME.json" --no-progress > /dev/null 2>&1 || true
+      [ "$MODE" = record ] || aws s3 cp "${REC:-/work/attempts}/$POD_NAME.json" "${OUTPUT_PREFIX%/}/attempts/$POD_NAME.json" --no-progress > /dev/null 2>&1 || true
     fi
     SEEN=1; gone=0
     checkpoint_changed && record started     # the live pointer, fenced and acknowledged through the API
+    if [ "$DIGEST_SEEN" = 0 ] && [ -n "$(field '.status.containerStatuses[]? | select(.name==$m) | .imageID // empty')" ]; then
+      record started                         # the digest arrived after the start record: published once, same attempt
+    fi
   elif [ "$SEEN" = 1 ]; then
     gone=$((gone + 1))                        # main's processes are gone; the kubelet can take a while to post the exit code
-    if [ "$gone" -ge "${EXIT_CODE_POLLS:-40}" ]; then
-      echo "$MAIN ended, exit code not reported by the API after $gone polls; last status: $(field '.status.containerStatuses[]? | select(.name==$m) | .state' | tr -d '\n' | cut -c1-200)"
+    if [ -n "$TERMINATING" ] && [ "$gone" -ge 5 ]; then
+      # a terminating pod gets no fresh container status from the kubelet: a short look for an exit code posted
+      # before the SIGTERM, then the interrupted record (the grace period's SIGKILL must not take the upload)
+      echo "$MAIN ended during the termination, exit code not reported by the API; last status: $(field '.status.containerStatuses[]? | select(.name==$m) | .state' | tr -d '\n' | cut -c1-200)"
       EXIT=""; break
     fi
-    sleep 3 & wait $!; continue
+    if [ -z "$TERMINATING" ] && [ $((gone % 20)) = 0 ]; then
+      echo "$MAIN ended, waiting for the API to report its exit code ($gone polls); last status: $(field '.status.containerStatuses[]? | select(.name==$m) | .state' | tr -d '\n' | cut -c1-200)"
+    fi
+    sleep "$(( ${POLL_SECONDS:-10} < 3 ? ${POLL_SECONDS:-10} : 3 ))" & wait $!; continue
   fi
   sleep "${POLL_SECONDS:-10}" & wait $!      # interruptible by the trap
 done
 if [ "$EXIT" = "0" ]; then
   upload succeeded
-  # the work volume goes only once delivery is durable: the export verified (managed) or RESULT.json present
-  # (application), and the API acknowledged the final record when there is an API (else the bucket record stands)
+  # the work volume goes only once delivery is durable: the export verified (managed), or RESULT.json present and not
+  # reporting a failed export (application: a caller whose S3 delivery failed writes export=failed with the capture
+  # kept for the transfer-only retry; that volume must stay), and the API acknowledged the final record when there
+  # is an API (else the bucket record stands). The record itself was acknowledged either way: an acknowledged
+  # "export failed" is not a delivery.
   delivered=false
-  if [ "$MODE" = record ]; then [ -f /work/RESULT.json ] && delivered=true; else [ "$EXPORT" = succeeded ] && delivered=true; fi
+  if [ "$MODE" = record ]; then
+    [ -f /work/RESULT.json ] && jq -e '(.export // "n/a") != "failed"' /work/RESULT.json > /dev/null 2>&1 && delivered=true
+  else
+    [ "$EXPORT" = succeeded ] && delivered=true
+  fi
   if [ -n "${API_URL:-}" ] && [ "$ACK" != 200 ]; then delivered=false; fi
-  if [ -n "${PVC_NAME:-}" ] && [ "${KEEP_PVC:-false}" != "true" ] && [ "$delivered" = true ]; then
+  if [ "${SCRATCH:-}" = shared ]; then
+    # a durable endpoint call on the tenant's shared scratch (scratch.sh): the leaf is emptied only with the delivery
+    # acknowledged by the API and the capture proven intact (manifest, hash, RESULT.json); anything else keeps it
+    # (export retry, recovery, retention), exactly as a kept volume; the shared claim is never deleted
+    if [ "$delivered" = true ] && [ "${KEEP_SCRATCH:-false}" != "true" ] && /usr/local/bin/scratch.sh proof /work; then
+      /usr/local/bin/scratch.sh cleanup /work 10001 || echo "scratch leaf ${SCRATCH_LEAF:-?} kept: cleanup refused (see above)"
+    else
+      echo "scratch leaf ${SCRATCH_LEAF:-?} kept: delivery not proven/acknowledged (export=$EXPORT ack=$ACK result=$([ -f /work/RESULT.json ] && echo yes || echo no)); POST /v1/operations/$OPERATION:export retries the delivery"
+    fi
+  elif [ -n "${PVC_NAME:-}" ] && [ "${KEEP_PVC:-false}" != "true" ] && [ "$delivered" = true ]; then
     curl -sS -o /dev/null -w "pvc delete %{http_code}\n" --cacert "$CA" -H "Authorization: Bearer $TOKEN" -X DELETE \
       "$API/api/v1/namespaces/$POD_NAMESPACE/persistentvolumeclaims/$PVC_NAME"
   elif [ -n "${PVC_NAME:-}" ]; then
