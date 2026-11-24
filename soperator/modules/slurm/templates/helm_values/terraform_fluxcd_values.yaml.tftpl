@@ -645,7 +645,7 @@ resources:
                 %{~ endif ~}
                 slurmdbd:
                   resources:
-                    cpu: ${slurm_cluster.nodes.accounting.resources.cpu * 1000}m
+                    cpu: ${format("%.0f", slurm_cluster.nodes.accounting.resources.cpu * 1000)}m
                     memory: ${slurm_cluster.nodes.accounting.resources.memory}Gi
                     ephemeralStorage: ${slurm_cluster.nodes.accounting.resources.ephemeral_storage}Gi
                 munge:
