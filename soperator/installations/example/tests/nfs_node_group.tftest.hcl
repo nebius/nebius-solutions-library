@@ -47,8 +47,6 @@ variables {
   nfs_in_k8s = {
     enabled = true
     spec = {
-      version         = "1.2.0"
-      use_stable_repo = true
       size_gibibytes  = 3720
       disk_type       = "NETWORK_SSD_IO_M3"
       filesystem_type = "ext4"
@@ -132,6 +130,28 @@ run "enabled_requires_node_group" {
   variables {
     nfs_in_k8s = merge(var.nfs_in_k8s, {
       spec = merge(var.nfs_in_k8s.spec, { node_group = null })
+    })
+  }
+
+  plan_options {
+    target = [
+      terraform_data.check_slurm_nodeset,
+      module.k8s.nebius_mk8s_v1_node_group.nfs,
+      module.slurm.helm_release.soperator_fluxcd_cm,
+    ]
+  }
+
+  expect_failures = [var.nfs_in_k8s]
+}
+
+# The NFS server version and registry come with the Soperator release. Pins copied from an older
+# recipe must fail loudly: Terraform would otherwise drop them without a word.
+run "rejects_version_pin" {
+  command = plan
+
+  variables {
+    nfs_in_k8s = merge(var.nfs_in_k8s, {
+      spec = merge(var.nfs_in_k8s.spec, { version = "1.2.0" })
     })
   }
 

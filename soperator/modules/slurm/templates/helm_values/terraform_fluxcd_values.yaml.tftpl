@@ -12,7 +12,7 @@ resources:
         helmRepository:
           interval: 15m
           nfsServer:
-            url: ${soperator_helm_repo_nfs}
+            url: ${soperator_helm_repo}
           soperator:
             url: ${soperator_helm_repo}
           kruise:
@@ -1043,11 +1043,10 @@ resources:
         nfsServer:
           enabled: ${slurm_cluster.nfs_in_k8s.enabled}
           %{~ if slurm_cluster.nfs_in_k8s.enabled ~}
-          version: ${slurm_cluster.nfs_in_k8s.version}
+          # The chart version and the image tag come from the soperator-fluxcd release.
           overrideValues:
             image:
-              repository: ${soperator_image_repo_nfs}/nfs-server
-              tag: ${slurm_cluster.nfs_in_k8s.version}
+              repository: ${soperator_image_repo}/nfs-server
             nameOverride: nfs-server
             nfs:
               sharedDirectory: "/exported"

@@ -98,8 +98,6 @@ run "nfs_on_k8s_with_weka_jail" {
     nfs_in_k8s = {
       enabled = true
       spec = {
-        version         = "1.2.0"
-        use_stable_repo = true
         size_gibibytes  = 40 * 93
         disk_type       = "NETWORK_SSD_IO_M3"
         filesystem_type = "ext4"
@@ -183,8 +181,6 @@ run "nfs_on_k8s_with_weka_jail_submount" {
     nfs_in_k8s = {
       enabled = true
       spec = {
-        version         = "1.2.0"
-        use_stable_repo = true
         size_gibibytes  = 40 * 93
         disk_type       = "NETWORK_SSD_IO_M3"
         filesystem_type = "ext4"
