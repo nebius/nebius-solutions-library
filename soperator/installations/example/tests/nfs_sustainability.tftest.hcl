@@ -77,8 +77,6 @@ run "nfs_on_k8s_is_prohibited_for_cluster_size_l" {
     nfs_in_k8s = {
       enabled = true
       spec = {
-        version         = "1.2.0"
-        use_stable_repo = true
         size_gibibytes  = 93
         disk_type       = "NETWORK_SSD_IO_M3"
         filesystem_type = "ext4"
@@ -140,8 +138,6 @@ run "nfs_on_k8s_is_prohibited_for_cluster_size_xl" {
     nfs_in_k8s = {
       enabled = true
       spec = {
-        version         = "1.2.0"
-        use_stable_repo = true
         size_gibibytes  = 93
         disk_type       = "NETWORK_SSD_IO_M3"
         filesystem_type = "ext4"

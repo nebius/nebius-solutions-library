@@ -542,12 +542,15 @@ resource "terraform_data" "check_nfs" {
 }
 
 variable "nfs_in_k8s" {
-  description = "In-cluster NFS server and its dedicated single-node Kubernetes node group."
+  description = "In-cluster NFS server and its dedicated single-node Kubernetes node group. The NFS server version comes with the Soperator release."
   type = object({
     enabled = bool
     spec = optional(object({
-      version         = string
-      use_stable_repo = bool
+      # No longer supported. Declared only so that tfvars from older recipes fail with an explanation
+      # instead of having these values silently dropped.
+      version         = optional(string)
+      use_stable_repo = optional(bool)
+
       size_gibibytes  = number
       disk_type       = string
       filesystem_type = string
@@ -571,6 +574,16 @@ variable "nfs_in_k8s" {
   })
   default = {
     enabled = false
+  }
+
+  validation {
+    condition     = try(var.nfs_in_k8s.spec.version, null) == null
+    error_message = "nfs_in_k8s.spec.version is no longer supported: the NFS server version comes with the Soperator release. Remove it from your tfvars. If you need a specific version, set nfsServer.version in the soperator-fluxcd-values ConfigMap."
+  }
+
+  validation {
+    condition     = try(var.nfs_in_k8s.spec.use_stable_repo, null) == null
+    error_message = "nfs_in_k8s.spec.use_stable_repo is no longer supported: the NFS server is pulled from the same registry as Soperator, see slurm_operator_stable. Remove it from your tfvars."
   }
 
   validation {
