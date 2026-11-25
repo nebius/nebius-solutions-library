@@ -1488,9 +1488,9 @@ variable "slurm_nodeset_login" {
     size               = number
     node_group_enabled = optional(bool, true)
     autoscaling = optional(object({
-      enabled                           = bool
+      enabled                           = optional(bool, false)
       min_size                          = optional(number, 1)
-      max_size                          = optional(number, 4)
+      max_size                          = optional(number, 10)
       target_cpu_utilization_percentage = optional(number, 70)
     }))
     resource = optional(object({
