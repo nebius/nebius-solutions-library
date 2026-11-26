@@ -54,6 +54,7 @@ locals {
 
   otel_collectors_yaml = templatefile("${path.module}/templates/helm_values/opentelemetry.yaml.tftpl", {
     enabled           = var.telemetry_enabled
+    pod_monitor       = local.prometheus_crds_enabled
     public_enabled    = var.public_o11y_enabled
     version           = var.opentelemetry_collector_version
     cluster_name      = var.cluster_name

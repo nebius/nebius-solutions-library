@@ -98,6 +98,8 @@ ncclProfiles:
                       - otlp_http/victoriametrics
   collector:
     values:
+      podMonitor:
+        enabled: ${pod_monitor}
       resources:
         requests:
           memory: ${resources.memory}

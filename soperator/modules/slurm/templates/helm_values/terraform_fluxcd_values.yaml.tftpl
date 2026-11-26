@@ -936,6 +936,8 @@ resources:
           timeout: 5m
           version: ${operator_version}
           values:
+            serviceMonitor:
+              enabled: ${prometheus_crds_enabled}
             controllerManager:
               manager:
                 env:
@@ -1043,7 +1045,7 @@ resources:
             monitoring:
               enabled: true
               serviceMonitor:
-                enabled: true
+                enabled: ${prometheus_crds_enabled}
             %{~ endif ~}
           %{~ endif ~}
         tailscale:

@@ -45,6 +45,10 @@ resource "terraform_data" "wait_for_slurm_cluster_available" {
   }
 }
 
+locals {
+  prometheus_crds_enabled = var.telemetry_enabled && var.prometheus_crds_enabled
+}
+
 resource "helm_release" "soperator_fluxcd_cm" {
   name       = "terraform-fluxcd-values"
   repository = local.helm.repository.raw
@@ -92,7 +96,7 @@ resource "helm_release" "soperator_fluxcd_cm" {
     k8up_version             = var.k8up_version
     mariadb_operator_version = var.mariadb_operator_version
     otel_collectors_yaml     = local.otel_collectors_yaml
-    prometheus_crds_enabled  = var.telemetry_enabled && var.prometheus_crds_enabled
+    prometheus_crds_enabled  = local.prometheus_crds_enabled
     prometheus_crds_version  = var.prometheus_crds_version
     vmstack_version          = var.vmstack_version
     vmstack_crds_version     = var.vmstack_crds_version
@@ -101,6 +105,7 @@ resource "helm_release" "soperator_fluxcd_cm" {
     nccl_inspector_profiling = var.nccl_inspector_profiling
 
     nccl_profiles = templatefile("${path.module}/templates/helm_values/nccl_profiles.yaml.tftpl", {
+      pod_monitor       = local.prometheus_crds_enabled
       profiling         = var.nccl_inspector_profiling
       delete_after_read = var.opentelemetry_delete_jail_logs_after_read
       queue             = local.otel_local_queue

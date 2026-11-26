@@ -542,7 +542,7 @@ module "nvidia_operator_gpu" {
   parent_id  = data.nebius_iam_v1_project.this.id
 
   enable_dcgm_exporter        = var.dcgm_exporter_enabled == false && var.telemetry_enabled
-  enable_dcgm_service_monitor = var.dcgm_exporter_enabled == false && var.telemetry_enabled
+  enable_dcgm_service_monitor = var.dcgm_exporter_enabled == false && var.telemetry_enabled && var.prometheus_crds_enabled
   relabel_dcgm_exporter       = var.telemetry_enabled
 
 }

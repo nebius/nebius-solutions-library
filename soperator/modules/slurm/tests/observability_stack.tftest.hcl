@@ -15,6 +15,7 @@ variables {
   accounting_enabled         = true
   telemetry_enabled          = true
   backups_config             = null
+  nfs_in_k8s                 = { enabled = true, size_gibibytes = 93, threads = 8 }
   node_count = {
     controller = 1
     login      = 1
@@ -67,6 +68,20 @@ run "private_metrics_and_persistent_logs" {
     condition     = [for resource in yamldecode(helm_release.soperator_fluxcd_cm.values[0]).resources : resource.metadata.name] == ["terraform-fluxcd-values"]
     error_message = "A persistent installation without a notifier must create only the umbrella inputs."
   }
+
+  assert {
+    condition = (
+      alltrue([
+        for collector in ["logs", "jailLogs", "events"] :
+        yamldecode(yamldecode(helm_release.soperator_fluxcd_cm.values[0]).resources[0].data["values.yaml"]).observability.opentelemetry[collector].values.podMonitor.enabled
+      ]) &&
+      yamldecode(yamldecode(helm_release.soperator_fluxcd_cm.values[0]).resources[0].data["values.yaml"]).observability.ncclProfiles.collector.values.podMonitor.enabled &&
+      yamldecode(yamldecode(helm_release.soperator_fluxcd_cm.values[0]).resources[0].data["values.yaml"]).soperator.values.serviceMonitor.enabled &&
+      yamldecode(yamldecode(helm_release.soperator_fluxcd_cm.values[0]).resources[0].data["values.yaml"]).nfsServer.values.monitoring.enabled &&
+      yamldecode(yamldecode(helm_release.soperator_fluxcd_cm.values[0]).resources[0].data["values.yaml"]).nfsServer.values.monitoring.serviceMonitor.enabled
+    )
+    error_message = "With Prometheus CRDs installed, all four collectors, the operator and NFS must expose their monitors."
+  }
 }
 
 run "telemetry_without_prometheus_crds" {
@@ -87,6 +102,20 @@ run "telemetry_without_prometheus_crds" {
       !yamldecode(yamldecode(helm_release.soperator_fluxcd_cm.values[0]).resources[0].data["values.yaml"]).soperator.values.controllerManager.manager.env.isPrometheusCrdInstalled
     )
     error_message = "Disabling the Prometheus CRDs must disable the release and operator discovery while keeping telemetry enabled."
+  }
+
+  assert {
+    condition = (
+      alltrue([
+        for collector in ["logs", "jailLogs", "events"] :
+        !yamldecode(yamldecode(helm_release.soperator_fluxcd_cm.values[0]).resources[0].data["values.yaml"]).observability.opentelemetry[collector].values.podMonitor.enabled
+      ]) &&
+      !yamldecode(yamldecode(helm_release.soperator_fluxcd_cm.values[0]).resources[0].data["values.yaml"]).observability.ncclProfiles.collector.values.podMonitor.enabled &&
+      !yamldecode(yamldecode(helm_release.soperator_fluxcd_cm.values[0]).resources[0].data["values.yaml"]).soperator.values.serviceMonitor.enabled &&
+      yamldecode(yamldecode(helm_release.soperator_fluxcd_cm.values[0]).resources[0].data["values.yaml"]).nfsServer.values.monitoring.enabled &&
+      !yamldecode(yamldecode(helm_release.soperator_fluxcd_cm.values[0]).resources[0].data["values.yaml"]).nfsServer.values.monitoring.serviceMonitor.enabled
+    )
+    error_message = "A cluster without Prometheus CRDs must keep the NFS exporter enabled and omit PodMonitor and ServiceMonitor resources."
   }
 }
 

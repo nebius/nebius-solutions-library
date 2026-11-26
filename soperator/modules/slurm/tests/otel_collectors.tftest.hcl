@@ -103,3 +103,42 @@ run "private_logs_do_not_require_cloud_credentials" {
     error_message = "Both jail receivers must tail new files and leave them on disk when deletion is disabled."
   }
 }
+
+run "batch_min_above_default_max" {
+  command = plan
+  variables {
+    opentelemetry_batch = { send_batch_size = 8000 }
+  }
+  plan_options {
+    target = [helm_release.soperator_fluxcd_cm]
+  }
+  expect_failures = [var.opentelemetry_batch]
+}
+
+run "batch_max_below_default_min" {
+  command = plan
+  variables {
+    opentelemetry_batch = { send_batch_max_size = 1000 }
+  }
+  plan_options {
+    target = [helm_release.soperator_fluxcd_cm]
+  }
+  expect_failures = [var.opentelemetry_batch]
+}
+
+run "larger_batch_with_explicit_maximum" {
+  command = plan
+  variables {
+    opentelemetry_batch = { send_batch_size = 8000, send_batch_max_size = 10000 }
+  }
+  plan_options {
+    target = [helm_release.soperator_fluxcd_cm]
+  }
+  assert {
+    condition = (
+      local.otel_local_queue.batch.min_size == 8000 &&
+      local.otel_local_queue.batch.max_size == 10000
+    )
+    error_message = "The local exporter must preserve both explicitly configured batch bounds."
+  }
+}

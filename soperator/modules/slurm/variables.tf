@@ -653,12 +653,14 @@ variable "opentelemetry_batch" {
 
   validation {
     condition = (
-      var.opentelemetry_batch == null ||
-      var.opentelemetry_batch.send_batch_size == null ||
-      var.opentelemetry_batch.send_batch_max_size == null ||
-      var.opentelemetry_batch.send_batch_max_size >= var.opentelemetry_batch.send_batch_size
+      coalesce(try(var.opentelemetry_batch.send_batch_max_size, null), 5000) >=
+      coalesce(try(var.opentelemetry_batch.send_batch_size, null), 2000)
     )
-    error_message = "opentelemetry_batch.send_batch_max_size must be greater than or equal to send_batch_size when both are set."
+    error_message = format(
+      "Effective opentelemetry_batch.send_batch_max_size (%s) must be greater than or equal to send_batch_size (%s).",
+      coalesce(try(var.opentelemetry_batch.send_batch_max_size, null), 5000),
+      coalesce(try(var.opentelemetry_batch.send_batch_size, null), 2000),
+    )
   }
 }
 

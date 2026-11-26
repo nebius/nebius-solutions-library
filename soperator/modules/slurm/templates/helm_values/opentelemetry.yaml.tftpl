@@ -33,6 +33,8 @@ ${name}:
       valuesKey: values.yaml
 %{ endif ~}
   values:
+    podMonitor:
+      enabled: ${pod_monitor}
     resources:
       requests:
         memory: ${jsonencode(sizes[collector.sizing_key].memory)}

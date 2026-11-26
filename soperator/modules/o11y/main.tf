@@ -183,7 +183,8 @@ EOT
 
 resource "terraform_data" "opentelemetry_collector_cm" {
   depends_on = [
-    terraform_data.o11y_static_key_secret
+    terraform_data.o11y_static_key_secret,
+    terraform_data.opentelemetry_collector_cm_cleanup,
   ]
 
   triggers_replace = {
@@ -212,15 +213,15 @@ resource "terraform_data" "opentelemetry_collector_cm" {
     working_dir = path.root
     interpreter = ["/bin/bash", "-c"]
     command     = <<EOT
-set -e
+set -eo pipefail
 
 NEBIUS_IAM_TOKEN_BKP=$NEBIUS_IAM_TOKEN
 unset NEBIUS_IAM_TOKEN
-export NEBIUS_IAM_TOKEN=$(nebius --profile ${self.triggers_replace.o11y_profile} iam get-access-token)
+NEBIUS_IAM_TOKEN=$(nebius --profile ${self.triggers_replace.o11y_profile} iam get-access-token)
+export NEBIUS_IAM_TOKEN
 O11Y_PROJECT_NAME="${self.triggers_replace.o11y_resources_name}-${self.triggers_replace.region}"
 
-PROJECT_ID=$(nebius iam project get-by-name --parent-id ${self.triggers_replace.o11y_iam_tenant_id} --name "$O11Y_PROJECT_NAME" --format json | jq -r .metadata.id)
-O11YWORKSPACE_ID=$(echo "$PROJECT_ID" | sed 's#project-#o11yworkspace-#')
+PROJECT_ID=$(nebius iam project get-by-name --parent-id ${self.triggers_replace.o11y_iam_tenant_id} --name "$O11Y_PROJECT_NAME" --format json | jq -er '.metadata.id | strings | select(length > 0)')
 
 export NEBIUS_IAM_TOKEN=$NEBIUS_IAM_TOKEN_BKP
 
@@ -244,10 +245,23 @@ data:
 EOF
 EOT
   }
+}
+
+# The writer reapplies the ConfigMap in place. Only its Kubernetes identity
+# determines when the object must be deleted.
+resource "terraform_data" "opentelemetry_collector_cm_cleanup" {
+  triggers_replace = {
+    k8s_cluster_context = var.k8s_cluster_context
+    configmap_name      = var.opentelemetry_collector_cm
+  }
 
   provisioner "local-exec" {
     when    = destroy
-    command = "kubectl --context \"$K8S_CLUSTER_CONTEXT\" --namespace flux-system delete configmap \"$CONFIGMAP_NAME\" --ignore-not-found"
+    command = <<-EOT
+      if ! kubectl --context "$K8S_CLUSTER_CONTEXT" --namespace flux-system --request-timeout=10s delete configmap "$CONFIGMAP_NAME" --ignore-not-found --wait=false; then
+        echo "WARNING: Could not delete ConfigMap flux-system/$CONFIGMAP_NAME in context $K8S_CLUSTER_CONTEXT." >&2
+      fi
+    EOT
     environment = {
       K8S_CLUSTER_CONTEXT = self.triggers_replace.k8s_cluster_context
       CONFIGMAP_NAME      = self.triggers_replace.configmap_name
