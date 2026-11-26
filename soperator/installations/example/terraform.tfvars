@@ -19,7 +19,7 @@ iam_merge_request_url = ""
 
 # Soperator version.
 # Don't change the default value without a reason.
-slurm_operator_version = "4.1.18"
+slurm_operator_version = "5.1.0"
 
 # Whether the Soperator version is stable or not.
 # Used for selecting the container registry for pulling Helm charts and container images.

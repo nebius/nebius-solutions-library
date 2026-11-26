@@ -87,23 +87,25 @@ resource "helm_release" "soperator_fluxcd_cm" {
     apparmor_profile        = local.apparmor_profile
     enable_soperator_checks = var.enable_soperator_checks
 
-    operator_version                          = var.operator_version
-    cert_manager_version                      = var.cert_manager_version
-    k8up_version                              = var.k8up_version
-    mariadb_operator_version                  = var.mariadb_operator_version
-    opentelemetry_collector_version           = var.opentelemetry_collector_version
-    opentelemetry_batch                       = var.opentelemetry_batch
-    opentelemetry_batch_enabled               = local.opentelemetry_batch_enabled
-    opentelemetry_sending_queue               = var.opentelemetry_sending_queue
-    opentelemetry_sending_queue_enabled       = local.opentelemetry_sending_queue_enabled
-    opentelemetry_delete_jail_logs_after_read = var.opentelemetry_delete_jail_logs_after_read
-    opentelemetry_delete_jail_logs_min_age    = var.opentelemetry_delete_jail_logs_min_age
-    prometheus_crds_version                   = var.prometheus_crds_version
-    vmstack_version                           = var.vmstack_version
-    vmstack_crds_version                      = var.vmstack_crds_version
-    vmlogs_version                            = var.vmlogs_version
-    notifier                                  = var.soperator_notifier
-    nccl_inspector_profiling                  = var.nccl_inspector_profiling
+    operator_version         = var.operator_version
+    cert_manager_version     = var.cert_manager_version
+    k8up_version             = var.k8up_version
+    mariadb_operator_version = var.mariadb_operator_version
+    otel_collectors_yaml     = local.otel_collectors_yaml
+    prometheus_crds_version  = var.prometheus_crds_version
+    vmstack_version          = var.vmstack_version
+    vmstack_crds_version     = var.vmstack_crds_version
+    vmlogs_version           = var.vmlogs_version
+    notifier                 = var.soperator_notifier
+    nccl_inspector_profiling = var.nccl_inspector_profiling
+
+    nccl_profiles = templatefile("${path.module}/templates/helm_values/nccl_profiles.yaml.tftpl", {
+      profiling         = var.nccl_inspector_profiling
+      delete_after_read = var.opentelemetry_delete_jail_logs_after_read
+      queue             = local.otel_local_queue
+      resources         = local.selected_preset.nccl_profiles_collector
+      gomaxprocs        = local.otel_gomaxprocs.nccl_profiles_collector
+    })
 
     name                    = var.name
     cluster_name            = var.cluster_name
@@ -317,7 +319,6 @@ resource "helm_release" "soperator_fluxcd_cm" {
       logs_collector              = local.selected_preset.logs_collector
       jail_logs_collector         = local.selected_preset.jail_logs_collector
       events_collector            = local.selected_preset.events_collector
-      nccl_profiles_collector     = local.selected_preset.nccl_profiles_collector
       node_configurator           = local.resources.node_configurator
       soperator_main_controller   = local.resources.soperator_main_controller
       soperator_checks_controller = local.resources.soperator_checks_controller

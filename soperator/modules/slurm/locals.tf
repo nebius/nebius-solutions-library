@@ -178,25 +178,6 @@ locals {
   sizing_tier     = module.sizing.sizing_tier
   selected_preset = module.sizing.preset
 
-  opentelemetry_batch_enabled = (
-    var.opentelemetry_batch != null
-    ? anytrue([
-      var.opentelemetry_batch.timeout != null,
-      var.opentelemetry_batch.send_batch_size != null,
-      var.opentelemetry_batch.send_batch_max_size != null,
-    ])
-    : false
-  )
-
-  opentelemetry_sending_queue_enabled = (
-    var.opentelemetry_sending_queue != null
-    ? anytrue([
-      var.opentelemetry_sending_queue.size != null,
-      var.opentelemetry_sending_queue.num_consumers != null,
-    ])
-    : false
-  )
-
   namespace = {
     logs       = "logs-system"
     monitoring = "monitoring-system"

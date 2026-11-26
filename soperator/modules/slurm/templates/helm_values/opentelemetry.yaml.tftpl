@@ -1,0 +1,131 @@
+enabled: ${enabled}
+%{ for name, collector in collectors ~}
+${name}:
+%{ if name == "jailLogs" ~}
+  enabled: true
+%{ endif ~}
+%{ if name == "events" ~}
+  interval: 5m
+  timeout: 5m
+%{ endif ~}
+%{ if version != "" ~}
+  version: ${jsonencode(version)}
+%{ endif ~}
+%{ if public_enabled ~}
+  dependsOn:
+    - name: '{{ include "soperator-fluxcd.fullname" . }}-ns'
+    - name: '{{ if .Values.observability.vmLogs.enabled }}{{ include "soperator-fluxcd.fullname" . }}-vm-logs{{ end }}'
+%{ if name == "jailLogs" ~}
+    - name: '{{ if .Values.nodesets.enabled }}{{ include "soperator-fluxcd.fullname" . }}-nodesets{{ end }}'
+%{ endif ~}
+    - name: '{{ if and .Values.observability.publicEndpointEnabled (eq .Values.observability.publicEndpointTokenKind "secret") (include "soperator-fluxcd.o11yTsaTokenWriterEnabled" .) }}{{ include "soperator-fluxcd.o11yTsaTokenWriterName" . }}{{ end }}'
+  valuesFrom:
+    - kind: ConfigMap
+      name: terraform-opentelemetry-collector
+      valuesKey: collector-values.yaml
+    - kind: ConfigMap
+      name: terraform-opentelemetry-collector-${collector.suffix}
+      optional: true
+      valuesKey: values.yaml
+    - kind: ConfigMap
+      name: opentelemetry-collector-${collector.suffix}
+      optional: true
+      valuesKey: values.yaml
+%{ endif ~}
+  values:
+    resources:
+      requests:
+        memory: ${jsonencode(sizes[collector.sizing_key].memory)}
+        cpu: ${jsonencode(sizes[collector.sizing_key].cpu)}
+      limits:
+        memory: ${jsonencode(sizes[collector.sizing_key].memory)}
+    extraEnvs:
+      - name: GOMAXPROCS
+        value: ${jsonencode(gomaxprocs[collector.sizing_key])}
+%{ if name != "jailLogs" ~}
+      - name: K8S_NODE_NAME
+        valueFrom:
+          fieldRef:
+            fieldPath: spec.nodeName
+      - name: CLUSTER_NAME
+        value: ${jsonencode(cluster_name)}
+%{ endif ~}
+%{ if name == "jailLogs" ~}
+    command:
+      extraArgs:
+        - '--feature-gates=-telemetry.UseLocalHostAsDefaultMetricsAddress${delete_after_read ? ",filelog.allowFileDeletion" : ""}'
+%{ endif ~}
+%{ if public_enabled ~}
+    extraVolumes:
+%{ if name == "logs" ~}
+      - name: varlogpods
+        hostPath: {path: /var/log/pods}
+      - name: varlibdockercontainers
+        hostPath: {path: /var/lib/docker/containers}
+      - name: node-logs
+        hostPath: {path: /var/log, type: Directory}
+%{ endif ~}
+%{ if name == "jailLogs" ~}
+      - name: soperator-outputs
+        hostPath: {path: /var/log/soperator-outputs, type: DirectoryOrCreate}
+%{ endif ~}
+      - name: varlibotelcol
+        hostPath: {path: ${collector.state_directory}, type: DirectoryOrCreate}
+      - name: o11ytoken
+        secret: {secretName: o11y-writer-sa-token}
+%{ endif ~}
+%{ if public_enabled || name == "jailLogs" ~}
+    extraVolumeMounts:
+%{ if name == "logs" ~}
+      - {name: varlogpods, mountPath: /var/log/pods, readOnly: true}
+      - {name: varlibdockercontainers, mountPath: /var/lib/docker/containers, readOnly: true}
+      - {name: node-logs, mountPath: /var/nodelogs, readOnly: true}
+%{ endif ~}
+%{ if name == "jailLogs" ~}
+      - {name: soperator-outputs, mountPath: /var/log/soperator-outputs, readOnly: ${!delete_after_read}}
+%{ endif ~}
+      - {name: varlibotelcol, mountPath: ${collector.state_directory}}
+%{ if public_enabled ~}
+      - {name: o11ytoken, mountPath: /o11ytoken, readOnly: true}
+%{ endif ~}
+%{ endif ~}
+    config:
+      exporters:
+        ${collector.exporter}:
+          sending_queue:
+            ${indent(12, yamlencode(merge(local_queue, { storage = "file_storage" })))}
+%{ if public_enabled ~}
+        otlp:
+          balancer_name: round_robin
+          compression: snappy
+          retry_on_failure: {enabled: true, initial_interval: 200ms, max_elapsed_time: 0}
+          timeout: 5s
+          auth: {authenticator: bearertokenauth}
+          sending_queue:
+            ${indent(12, yamlencode(merge(public_queue, { storage = "file_storage" })))}
+      extensions:
+        bearertokenauth: {filename: /o11ytoken/accessToken}
+      service:
+        extensions: [health_check, file_storage, bearertokenauth]
+        pipelines:
+          ${collector.pipeline}:
+            exporters: [${collector.exporter}, otlp]
+%{ endif ~}
+%{ if name == "jailLogs" ~}
+      receivers:
+%{ for receiver in ["filelog", "filelog/health_checker"] ~}
+        ${receiver}:
+          start_at: ${delete_after_read ? "beginning" : "end"}
+          delete_after_read: ${delete_after_read ? "true" : "null"}
+          delete_after_read_min_age: ${delete_after_read ? jsonencode(delete_min_age) : "null"}
+%{ endfor ~}
+      processors:
+        transform:
+          log_statements:
+            - context: log
+              error_mode: ignore
+              statements:
+                - ${jsonencode(format("set(attributes[\"cluster\"], %s)", jsonencode(cluster_name)))}
+                - ${jsonencode(format("set(resource.attributes[\"region\"], %s)", jsonencode(region)))}
+%{ endif ~}
+%{ endfor ~}

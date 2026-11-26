@@ -195,6 +195,16 @@ resource "terraform_data" "opentelemetry_collector_cm" {
     iam_project_id       = var.iam_project_id
     region               = var.region
     logs_public_endpoint = local.logs_public_endpoint
+    collector_values = yamlencode({
+      config = {
+        exporters = {
+          otlp = {
+            endpoint = local.logs_public_endpoint
+            headers  = { iam-container = "$PROJECT_ID" }
+          }
+        }
+      }
+    })
   }
 
   provisioner "local-exec" {
@@ -229,7 +239,18 @@ data:
       region: ${self.triggers_replace.region}
       opentelemetry:
         publicEndpoint: ${self.triggers_replace.logs_public_endpoint}
+  collector-values.yaml: |
+    ${indent(4, trimspace(self.triggers_replace.collector_values))}
 EOF
 EOT
+  }
+
+  provisioner "local-exec" {
+    when    = destroy
+    command = "kubectl --context \"$K8S_CLUSTER_CONTEXT\" --namespace flux-system delete configmap \"$CONFIGMAP_NAME\" --ignore-not-found"
+    environment = {
+      K8S_CLUSTER_CONTEXT = self.triggers_replace.k8s_cluster_context
+      CONFIGMAP_NAME      = self.triggers_replace.configmap_name
+    }
   }
 }

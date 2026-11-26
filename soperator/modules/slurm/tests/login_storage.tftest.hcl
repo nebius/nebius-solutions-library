@@ -40,12 +40,12 @@ run "disabled_by_default" {
   }
 
   assert {
-    condition     = !can(yamldecode(yamldecode(helm_release.soperator_fluxcd_cm.values[0]).resources[0].data["values.yaml"]).slurmCluster.overrideValues.slurmNodes.login.docker)
+    condition     = !can(yamldecode(yamldecode(helm_release.soperator_fluxcd_cm.values[0]).resources[0].data["values.yaml"]).slurmCluster.values.slurmNodes.login.docker)
     error_message = "Login Docker must remain disabled without an image disk."
   }
 
   assert {
-    condition     = yamldecode(yamldecode(helm_release.soperator_fluxcd_cm.values[0]).resources[0].data["values.yaml"]).slurmCluster.overrideValues.slurmNodes.login.userIsolation.enabled
+    condition     = yamldecode(yamldecode(helm_release.soperator_fluxcd_cm.values[0]).resources[0].data["values.yaml"]).slurmCluster.values.slurmNodes.login.userIsolation.enabled
     error_message = "User isolation must preserve the chart's enabled default independently of Docker."
   }
 }
@@ -70,15 +70,15 @@ run "enabled_with_configurable_pvc" {
 
   assert {
     condition = (
-      yamldecode(yamldecode(helm_release.soperator_fluxcd_cm.values[0]).resources[0].data["values.yaml"]).slurmCluster.overrideValues.slurmNodes.login.docker.enabled &&
-      yamldecode(yamldecode(helm_release.soperator_fluxcd_cm.values[0]).resources[0].data["values.yaml"]).customConfigmaps.overrideValues.docker.enabled
+      yamldecode(yamldecode(helm_release.soperator_fluxcd_cm.values[0]).resources[0].data["values.yaml"]).slurmCluster.values.slurmNodes.login.docker.enabled &&
+      yamldecode(yamldecode(helm_release.soperator_fluxcd_cm.values[0]).resources[0].data["values.yaml"]).customConfigmaps.values.docker.enabled
     )
     error_message = "Login-only Docker must enable both the login daemon and shared jail Docker support."
   }
 
   assert {
     condition = one([
-      for mount in yamldecode(yamldecode(helm_release.soperator_fluxcd_cm.values[0]).resources[0].data["values.yaml"]).slurmCluster.overrideValues.slurmNodes.login.volumes.jailSubMounts : mount
+      for mount in yamldecode(yamldecode(helm_release.soperator_fluxcd_cm.values[0]).resources[0].data["values.yaml"]).slurmCluster.values.slurmNodes.login.volumes.jailSubMounts : mount
       if mount.name == "login-image-storage"
       ]) == {
       name      = "login-image-storage"
@@ -105,7 +105,7 @@ run "isolation_can_be_disabled_without_docker" {
   }
 
   assert {
-    condition     = !yamldecode(yamldecode(helm_release.soperator_fluxcd_cm.values[0]).resources[0].data["values.yaml"]).slurmCluster.overrideValues.slurmNodes.login.userIsolation.enabled
+    condition     = !yamldecode(yamldecode(helm_release.soperator_fluxcd_cm.values[0]).resources[0].data["values.yaml"]).slurmCluster.values.slurmNodes.login.userIsolation.enabled
     error_message = "The independent user-isolation setting must be rendered."
   }
 }

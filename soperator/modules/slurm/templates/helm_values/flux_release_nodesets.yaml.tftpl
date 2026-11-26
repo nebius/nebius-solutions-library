@@ -7,8 +7,9 @@ nodesets:
   namespace: ${namespace}
   releaseName: ${release_name}
 
-  overrideValues: %{ if length(nodesets) == 0 ~}{}
+  values: %{ if length(nodesets) == 0 ~}{}
   %{~ else }
+    clusterName: ${jsonencode(cluster_name)}
     nodesets:
       %{~ for i, nodeset in nodesets ~}
       - name: ${nodeset.name}
@@ -26,7 +27,7 @@ nodesets:
           %{~ endfor ~}
         %{~ endif ~}
         annotations:
-          slurm.nebius.ai/parental-cluster-ref: soperator
+          slurm.nebius.ai/parental-cluster-ref: ${jsonencode(cluster_name)}
 
         replicas: ${nodeset.replicas}
         maxUnavailable: ${nodeset.max_unavailable}
