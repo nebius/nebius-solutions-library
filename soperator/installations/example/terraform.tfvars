@@ -78,7 +78,7 @@ filesystem_jail_submounts = [{
 # This is a non-parallel shared filesystem and it can't be used for storing datasets or checkpoints.
 # It can be used only storing code, configs, container images, and so on.
 #
-# WARNING: Unix NFS doesn't work on huge clusters (> 1000 nodes) and can't be used there. When it's
+# WARNING: Unix NFS doesn't work on huge clusters (> 500 nodes) and can't be used there. When it's
 # disabled, the content of the "/home" directory is stored on jail.
 nfs_in_k8s = {
   enabled = true
