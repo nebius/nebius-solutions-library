@@ -92,6 +92,7 @@ resource "helm_release" "soperator_fluxcd_cm" {
     k8up_version             = var.k8up_version
     mariadb_operator_version = var.mariadb_operator_version
     otel_collectors_yaml     = local.otel_collectors_yaml
+    prometheus_crds_enabled  = var.telemetry_enabled && var.prometheus_crds_enabled
     prometheus_crds_version  = var.prometheus_crds_version
     vmstack_version          = var.vmstack_version
     vmstack_crds_version     = var.vmstack_crds_version

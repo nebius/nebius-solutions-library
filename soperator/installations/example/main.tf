@@ -724,6 +724,7 @@ module "slurm" {
   rest_enabled                    = var.slurm_rest_enabled
   accounting_enabled              = var.accounting_enabled
   telemetry_enabled               = var.telemetry_enabled
+  prometheus_crds_enabled         = var.prometheus_crds_enabled
   dcgm_exporter_enabled           = var.dcgm_exporter_enabled
   public_o11y_enabled             = var.public_o11y_enabled
   soperator_notifier              = var.soperator_notifier

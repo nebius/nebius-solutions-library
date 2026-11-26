@@ -1864,6 +1864,13 @@ variable "telemetry_enabled" {
   default     = true
 }
 
+variable "prometheus_crds_enabled" {
+  description = "Install the Prometheus Operator CRDs and enable their use by Soperator when telemetry is enabled."
+  type        = bool
+  default     = true
+  nullable    = false
+}
+
 variable "public_o11y_enabled" {
   description = "Whether to enable public observability endpoints."
   type        = bool

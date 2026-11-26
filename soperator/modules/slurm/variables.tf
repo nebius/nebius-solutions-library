@@ -4,8 +4,14 @@ variable "name" {
 }
 
 variable "operator_version" {
-  description = "Version of the Soperator."
+  description = "Soperator chart version used by the Pro recipe."
   type        = string
+  nullable    = false
+
+  validation {
+    condition     = can(regex("^(5[.][1-9][0-9]*|([6-9]|[1-9][0-9]+)[.][0-9]+)[.][0-9]+(-[0-9A-Za-z.-]+)?([+][0-9A-Za-z.-]+)?$", var.operator_version))
+    error_message = "The Pro recipe requires an Soperator chart version of 5.1.0 or later, including CI builds such as 5.1.0-r2c0d18a3. For older charts, use the matching Pro recipe."
+  }
 }
 
 variable "operator_stable" {
@@ -581,6 +587,13 @@ variable "telemetry_enabled" {
   description = "Whether to enable telemetry."
   type        = bool
   default     = true
+}
+
+variable "prometheus_crds_enabled" {
+  description = "Install the Prometheus Operator CRDs and enable their use by Soperator when telemetry is enabled."
+  type        = bool
+  default     = true
+  nullable    = false
 }
 
 variable "dcgm_exporter_enabled" {

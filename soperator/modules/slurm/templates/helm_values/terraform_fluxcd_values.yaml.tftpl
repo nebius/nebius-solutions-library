@@ -87,7 +87,7 @@ resources:
             ${indent(12, trimspace(otel_collectors_yaml))}
 
           prometheusOperator:
-            enabled: ${telemetry_enabled}
+            enabled: ${prometheus_crds_enabled}
             interval: 5m
             timeout: 5m
             %{~ if prometheus_crds_version != "" ~}
@@ -940,7 +940,7 @@ resources:
               manager:
                 env:
                   isMariadbCrdInstalled: ${accounting_enabled}
-                  isPrometheusCrdInstalled: ${telemetry_enabled}
+                  isPrometheusCrdInstalled: ${prometheus_crds_enabled}
                 resources:
                   requests:
                     memory: ${resources.soperator_main_controller.requests.memory}Gi

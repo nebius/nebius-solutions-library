@@ -5,7 +5,7 @@ mock_provider "local" {}
 variables {
   name                       = "login-storage-test"
   cluster_name               = "login-storage-test"
-  operator_version           = "5.0.0"
+  operator_version           = "5.1.0"
   iam_tenant_id              = "tenant-test"
   iam_project_id             = "project-test"
   k8s_cluster_context        = "test-context"

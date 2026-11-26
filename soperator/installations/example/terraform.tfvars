@@ -534,6 +534,9 @@ slurm_worker_sshd_config_map_ref_name = ""
 # Whether to enable telemetry.
 telemetry_enabled = true
 
+# Install the Prometheus Operator CRDs when telemetry is enabled.
+prometheus_crds_enabled = true
+
 # Whether to install soperator's dcgm-exporter chart.
 # Can be disabled on driverless setups since the GPU operator comes with its own DCGM exporter.
 dcgm_exporter_enabled = true

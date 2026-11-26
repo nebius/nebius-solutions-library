@@ -5,7 +5,7 @@ mock_provider "local" {}
 variables {
   name                       = "accounting-resources-test"
   cluster_name               = "accounting-resources-test"
-  operator_version           = "5.0.0"
+  operator_version           = "5.1.0"
   iam_tenant_id              = "tenant-test"
   iam_project_id             = "project-test"
   k8s_cluster_context        = "test-context"
@@ -53,7 +53,7 @@ run "accounting_leaves_room_for_sssd_and_rebooter" {
   assert {
     condition = yamldecode(yamldecode(helm_release.soperator_fluxcd_cm.values[0]).resources[0].data["values.yaml"]).soperator.values.controllerManager.manager.env == {
       isMariadbCrdInstalled    = var.accounting_enabled
-      isPrometheusCrdInstalled = var.telemetry_enabled
+      isPrometheusCrdInstalled = var.telemetry_enabled && var.prometheus_crds_enabled
     }
     error_message = "Operator discovery flags must match the CRDs installed by this Pro profile."
   }
@@ -149,7 +149,7 @@ run "disabled_accounting_needs_no_accounting_node" {
   assert {
     condition = yamldecode(yamldecode(helm_release.soperator_fluxcd_cm.values[0]).resources[0].data["values.yaml"]).soperator.values.controllerManager.manager.env == {
       isMariadbCrdInstalled    = var.accounting_enabled
-      isPrometheusCrdInstalled = var.telemetry_enabled
+      isPrometheusCrdInstalled = var.telemetry_enabled && var.prometheus_crds_enabled
     }
     error_message = "Operator discovery flags must match the CRDs installed by this Pro profile."
   }
@@ -221,7 +221,7 @@ run "telemetry_and_notifier_use_native_values" {
   assert {
     condition = yamldecode(yamldecode(helm_release.soperator_fluxcd_cm.values[0]).resources[0].data["values.yaml"]).soperator.values.controllerManager.manager.env == {
       isMariadbCrdInstalled    = var.accounting_enabled
-      isPrometheusCrdInstalled = var.telemetry_enabled
+      isPrometheusCrdInstalled = var.telemetry_enabled && var.prometheus_crds_enabled
     }
     error_message = "Operator discovery flags must match the CRDs installed by this Pro profile."
   }
@@ -253,8 +253,36 @@ run "telemetry_without_accounting" {
   assert {
     condition = yamldecode(yamldecode(helm_release.soperator_fluxcd_cm.values[0]).resources[0].data["values.yaml"]).soperator.values.controllerManager.manager.env == {
       isMariadbCrdInstalled    = var.accounting_enabled
-      isPrometheusCrdInstalled = var.telemetry_enabled
+      isPrometheusCrdInstalled = var.telemetry_enabled && var.prometheus_crds_enabled
     }
     error_message = "Operator discovery flags must match the CRDs installed by this Pro profile."
   }
+}
+
+run "reject_legacy_4_1_chart" {
+  command = plan
+
+  variables {
+    operator_version = "4.1.18"
+  }
+
+  plan_options {
+    target = [helm_release.soperator_fluxcd_cm]
+  }
+
+  expect_failures = [var.operator_version]
+}
+
+run "reject_legacy_5_0_chart" {
+  command = plan
+
+  variables {
+    operator_version = "5.0.12"
+  }
+
+  plan_options {
+    target = [helm_release.soperator_fluxcd_cm]
+  }
+
+  expect_failures = [var.operator_version]
 }

@@ -69,6 +69,27 @@ run "private_metrics_and_persistent_logs" {
   }
 }
 
+run "telemetry_without_prometheus_crds" {
+  command = plan
+
+  variables {
+    prometheus_crds_enabled = false
+  }
+
+  plan_options {
+    target = [helm_release.soperator_fluxcd_cm]
+  }
+
+  assert {
+    condition = (
+      yamldecode(yamldecode(helm_release.soperator_fluxcd_cm.values[0]).resources[0].data["values.yaml"]).observability.enabled &&
+      !yamldecode(yamldecode(helm_release.soperator_fluxcd_cm.values[0]).resources[0].data["values.yaml"]).observability.prometheusOperator.enabled &&
+      !yamldecode(yamldecode(helm_release.soperator_fluxcd_cm.values[0]).resources[0].data["values.yaml"]).soperator.values.controllerManager.manager.env.isPrometheusCrdInstalled
+    )
+    error_message = "Disabling the Prometheus CRDs must disable the release and operator discovery while keeping telemetry enabled."
+  }
+}
+
 run "public_metrics_with_ephemeral_volumes" {
   command = plan
 
