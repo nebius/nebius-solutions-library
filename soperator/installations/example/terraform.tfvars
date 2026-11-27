@@ -302,6 +302,13 @@ slurm_nodesets_partitions = [
 # size controls pod replicas; login VMs scale independently between 1 and 100.
 slurm_nodeset_login = {
   size = 2
+  # Pod bounds override size when enabled; the CPU target is relative to SSHD CPU requests.
+  autoscaling = {
+    enabled                           = false
+    min_size                          = 1
+    max_size                          = 10
+    target_cpu_utilization_percentage = 70
+  }
   # resource omitted -> cpu-g1/32vcpu-192gb with GB300 workers, cpu-d3/16vcpu-64gb otherwise.
   # Preset names differ per platform, so set platform and preset together, e.g.:
   # resource = { platform = "cpu-d3", preset = "32vcpu-128gb" }
