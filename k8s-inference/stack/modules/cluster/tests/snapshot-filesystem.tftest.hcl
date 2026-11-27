@@ -29,6 +29,10 @@ variables {
 run "default_preserves_system_and_batch_nodes" {
   command = plan
   assert {
+    condition     = nebius_mk8s_v1_node_group.system.template.boot_disk.size_gibibytes == 128
+    error_message = "Existing system_pool callers must retain their 128 GiB boot disk."
+  }
+  assert {
     condition     = nebius_mk8s_v1_node_group.system.template.filesystems == null
     error_message = "The default must not attach a filesystem to system nodes."
   }
@@ -49,7 +53,12 @@ run "default_preserves_system_and_batch_nodes" {
 run "shared_store_survives_gpu_scale_to_zero" {
   command = plan
   variables {
+    system_pool        = { platform = "cpu-d3", preset = "4vcpu-16gb", node_count = 2, boot_disk_gib = 512 }
     weights_filesystem = { enabled = true, size_gib = 1024, type = "NETWORK_SSD", mount_on_system = true }
+  }
+  assert {
+    condition     = nebius_mk8s_v1_node_group.system.template.boot_disk.size_gibibytes == 512 && nebius_mk8s_v1_node_group.system.template.boot_disk.type == "NETWORK_SSD" && nebius_mk8s_v1_node_group.cpu["batch"].template.boot_disk.size_gibibytes == 128
+    error_message = "An explicit system disk size must preserve the disk type and unrelated batch pool."
   }
   assert {
     condition     = length(nebius_mk8s_v1_node_group.system.template.filesystems) == 1
