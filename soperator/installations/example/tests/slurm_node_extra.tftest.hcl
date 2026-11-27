@@ -163,7 +163,7 @@ run "mixed_nodesets_preserve_extra_and_custom_features" {
 
   assert {
     condition = [
-      for nodeset in yamldecode(module.slurm.debug_flux_release_nodesets_rendered).nodesets.overrideValues.nodesets :
+      for nodeset in yamldecode(module.slurm.debug_flux_release_nodesets_rendered).nodesets.values.nodesets :
       nodeset.nodeConfig.features
       ] == [
       ["cpu_d3", "network_ssd", "custom_static", "shared_feature"],

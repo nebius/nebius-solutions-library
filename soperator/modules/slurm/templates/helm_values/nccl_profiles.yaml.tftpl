@@ -1,0 +1,175 @@
+ncclProfiles:
+  enabled: ${profiling.enabled}
+  configMap:
+    values:
+      resources:
+        - apiVersion: v1
+          kind: ConfigMap
+          metadata:
+            name: opentelemetry-collector-nccl-profiles-agent
+          data:
+            relay: |
+              receivers:
+                filelog/nccl_metrics:
+                  include:
+                    - ${jsonencode("/mnt/jail${profiling.dump_dir}/*/*/*.log")}
+                  poll_interval: 30s
+                  retry_on_failure:
+                    enabled: true
+                    max_elapsed_time: 0
+                  include_file_path: true
+                  start_at: beginning
+%{ if delete_after_read ~}
+                  delete_after_read: true
+                  delete_after_read_min_age: 10m
+%{ endif ~}
+                  storage: file_storage
+
+                  operators:
+                    - id: parse_nccl_profile_path
+                      type: regex_parser
+                      parse_from: attributes["log.file.path"]
+                      regex: ^.*/(?P<job_id>[^/]+)/(?P<step_id>[^/]+)/(?P<worker_name>.+)-pid(?P<hostname_pid>[^/]+)\.log$
+
+                    - if: attributes["job_id"] != nil
+                      type: copy
+                      from: attributes.job_id
+                      to: resource["slurm_job_id"]
+
+                    - if: attributes["step_id"] != nil
+                      type: copy
+                      from: attributes.step_id
+                      to: resource["slurm_step_id"]
+
+                    - if: attributes["hostname_pid"] != nil
+                      type: copy
+                      from: attributes.hostname_pid
+                      to: resource["hostname_pid"]
+
+              exporters:
+                otlp_http/victoriametrics:
+                  compression: gzip
+                  encoding: proto
+                  metrics_endpoint: http://vmsingle-metrics-victoria-metrics-k8s-stack:8428/opentelemetry/v1/metrics
+                  timeout: 15s
+                  retry_on_failure:
+                    enabled: true
+                    initial_interval: 1s
+                    max_interval: 10s
+                    max_elapsed_time: 0
+                  sending_queue:
+                    ${indent(20, chomp(yamlencode(merge(queue, { storage = "file_storage" }))))}
+
+              connectors:
+                ncclmetrics:
+
+              extensions:
+                file_storage:
+                  directory: /var/lib/otelcol-nccl-profiles
+
+                health_check:
+                  endpoint: 0.0.0.0:13133
+
+              service:
+                telemetry:
+                  metrics:
+                    readers:
+                      - pull:
+                          exporter:
+                            prometheus:
+                              host: 0.0.0.0
+                              port: 8889
+
+                extensions:
+                  - health_check
+                  - file_storage
+
+                pipelines:
+                  logs/nccl_metrics:
+                    receivers:
+                      - filelog/nccl_metrics
+                    exporters:
+                      - ncclmetrics
+
+                  metrics/nccl_metrics:
+                    receivers:
+                      - ncclmetrics
+                    exporters:
+                      - otlp_http/victoriametrics
+  collector:
+    values:
+      podMonitor:
+        enabled: ${pod_monitor}
+      resources:
+        requests:
+          memory: ${resources.memory}
+          cpu: ${resources.cpu}
+        limits:
+          memory: ${resources.memory}
+      extraEnvs:
+        - name: GOMAXPROCS
+          value: ${jsonencode(tostring(gomaxprocs))}
+      command:
+        extraArgs:
+          - "--feature-gates=-telemetry.UseLocalHostAsDefaultMetricsAddress${delete_after_read ? ",filelog.allowFileDeletion" : ""}"
+      extraVolumeMounts:
+        - name: jail
+          mountPath: /mnt/jail
+          readOnly: ${!delete_after_read}
+        - name: varlibotelcol
+          mountPath: /var/lib/otelcol-nccl-profiles
+      initContainers:
+        - name: wait-jail-populated
+          image: cr.nebius.cloud/soperator-proxy-docker-io/library/busybox@sha256:fd7dc98638c8e305f4dc34e979f1c0fdfdcaeb0fbf8fcff77ae834b6da3d7e6e
+          volumeMounts:
+            - name: jail
+              mountPath: /mnt/jail
+              readOnly: true
+          securityContext:
+            runAsGroup: 0
+            runAsUser: 0
+          command:
+            - sh
+            - "-c"
+            - |
+              set -eu
+              until [ -f /mnt/jail/etc/soperator-jail-populated ]; do
+                echo "Waiting for /mnt/jail to be populated"
+                sleep 5
+              done
+        - name: init-nccl-profiles-dump-dir
+          env:
+            - name: DUMP_DIR
+              value: ${jsonencode("/mnt/jail${profiling.dump_dir}")}
+          image: cr.nebius.cloud/soperator-proxy-docker-io/library/busybox@sha256:fd7dc98638c8e305f4dc34e979f1c0fdfdcaeb0fbf8fcff77ae834b6da3d7e6e
+          volumeMounts:
+            - name: jail
+              mountPath: /mnt/jail
+          securityContext:
+            runAsGroup: 0
+            runAsUser: 0
+          command:
+            - sh
+            - "-c"
+            - |
+              set -eu
+              case "$DUMP_DIR" in
+                /mnt/jail/*) ;;
+                *)
+                  echo "NCCL profile dump directory must be under /mnt/jail"
+                  exit 1
+                  ;;
+              esac
+              install -d -m 0777 "$DUMP_DIR"
+        - name: init-fs
+          image: cr.nebius.cloud/soperator-proxy-docker-io/library/busybox@sha256:fd7dc98638c8e305f4dc34e979f1c0fdfdcaeb0fbf8fcff77ae834b6da3d7e6e
+          volumeMounts:
+            - name: varlibotelcol
+              mountPath: /var/lib/otelcol-nccl-profiles
+          securityContext:
+            runAsGroup: 0
+            runAsUser: 0
+          command:
+            - sh
+            - "-c"
+            - 'chown -R 10001: /var/lib/otelcol-nccl-profiles'

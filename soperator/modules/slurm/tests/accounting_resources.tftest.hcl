@@ -5,7 +5,7 @@ mock_provider "local" {}
 variables {
   name                       = "accounting-resources-test"
   cluster_name               = "accounting-resources-test"
-  operator_version           = "5.0.0"
+  operator_version           = "5.1.0"
   iam_tenant_id              = "tenant-test"
   iam_project_id             = "project-test"
   k8s_cluster_context        = "test-context"
@@ -42,12 +42,20 @@ run "accounting_leaves_room_for_sssd_and_rebooter" {
   }
 
   assert {
-    condition = yamldecode(yamldecode(helm_release.soperator_fluxcd_cm.values[0]).resources[0].data["values.yaml"]).slurmCluster.overrideValues.slurmNodes.accounting.slurmdbd.resources == {
+    condition = yamldecode(yamldecode(helm_release.soperator_fluxcd_cm.values[0]).resources[0].data["values.yaml"]).slurmCluster.values.slurmNodes.accounting.slurmdbd.resources == {
       cpu              = "4200m"
       memory           = "12.75Gi"
       ephemeralStorage = "34Gi"
     }
     error_message = "The 8-vCPU accounting fixture must leave room for MariaDB, munge, SSSD, and the rebooter without consuming the platform reserve."
+  }
+
+  assert {
+    condition = yamldecode(yamldecode(helm_release.soperator_fluxcd_cm.values[0]).resources[0].data["values.yaml"]).soperator.values.controllerManager.manager.env == {
+      isMariadbCrdInstalled    = var.accounting_enabled
+      isPrometheusCrdInstalled = var.telemetry_enabled && var.prometheus_crds_enabled
+    }
+    error_message = "Operator discovery flags must match the CRDs installed by this Pro profile."
   }
 }
 
@@ -63,7 +71,7 @@ run "disabled_sssd_releases_only_its_own_reservation" {
   }
 
   assert {
-    condition = yamldecode(yamldecode(helm_release.soperator_fluxcd_cm.values[0]).resources[0].data["values.yaml"]).slurmCluster.overrideValues.slurmNodes.accounting.slurmdbd.resources == {
+    condition = yamldecode(yamldecode(helm_release.soperator_fluxcd_cm.values[0]).resources[0].data["values.yaml"]).slurmCluster.values.slurmNodes.accounting.slurmdbd.resources == {
       cpu              = "4400m"
       memory           = "13.25Gi"
       ephemeralStorage = "39Gi"
@@ -90,7 +98,7 @@ run "effective_overrides_are_reserved" {
   }
 
   assert {
-    condition = yamldecode(yamldecode(helm_release.soperator_fluxcd_cm.values[0]).resources[0].data["values.yaml"]).slurmCluster.overrideValues.slurmNodes.accounting.slurmdbd.resources == {
+    condition = yamldecode(yamldecode(helm_release.soperator_fluxcd_cm.values[0]).resources[0].data["values.yaml"]).slurmCluster.values.slurmNodes.accounting.slurmdbd.resources == {
       cpu              = "2700m"
       memory           = "16.25Gi"
       ephemeralStorage = "42Gi"
@@ -111,7 +119,7 @@ run "legacy_node_configurator_flag_keeps_rebooter_reservation" {
   }
 
   assert {
-    condition     = yamldecode(yamldecode(helm_release.soperator_fluxcd_cm.values[0]).resources[0].data["values.yaml"]).slurmCluster.overrideValues.slurmNodes.accounting.slurmdbd.resources.cpu == "4200m"
+    condition     = yamldecode(yamldecode(helm_release.soperator_fluxcd_cm.values[0]).resources[0].data["values.yaml"]).slurmCluster.values.slurmNodes.accounting.slurmdbd.resources.cpu == "4200m"
     error_message = "The generated values always enable the rebooter, independently of enable_node_configurator."
   }
 }
@@ -134,8 +142,16 @@ run "disabled_accounting_needs_no_accounting_node" {
   }
 
   assert {
-    condition     = !yamldecode(yamldecode(helm_release.soperator_fluxcd_cm.values[0]).resources[0].data["values.yaml"]).slurmCluster.overrideValues.slurmNodes.accounting.enabled
+    condition     = !yamldecode(yamldecode(helm_release.soperator_fluxcd_cm.values[0]).resources[0].data["values.yaml"]).slurmCluster.values.slurmNodes.accounting.enabled
     error_message = "Disabled accounting must not require an accounting node capacity."
+  }
+
+  assert {
+    condition = yamldecode(yamldecode(helm_release.soperator_fluxcd_cm.values[0]).resources[0].data["values.yaml"]).soperator.values.controllerManager.manager.env == {
+      isMariadbCrdInstalled    = var.accounting_enabled
+      isPrometheusCrdInstalled = var.telemetry_enabled && var.prometheus_crds_enabled
+    }
+    error_message = "Operator discovery flags must match the CRDs installed by this Pro profile."
   }
 }
 
@@ -185,4 +201,88 @@ run "reject_exhausted_storage_after_overrides" {
   }
 
   expect_failures = [helm_release.soperator_fluxcd_cm]
+}
+
+run "telemetry_and_notifier_use_native_values" {
+  command = plan
+
+  variables {
+    telemetry_enabled = true
+    soperator_notifier = {
+      enabled           = true
+      slack_webhook_url = "https://example.invalid/pro-notifier"
+    }
+  }
+
+  plan_options {
+    target = [helm_release.soperator_fluxcd_cm]
+  }
+
+  assert {
+    condition = yamldecode(yamldecode(helm_release.soperator_fluxcd_cm.values[0]).resources[0].data["values.yaml"]).soperator.values.controllerManager.manager.env == {
+      isMariadbCrdInstalled    = var.accounting_enabled
+      isPrometheusCrdInstalled = var.telemetry_enabled && var.prometheus_crds_enabled
+    }
+    error_message = "Operator discovery flags must match the CRDs installed by this Pro profile."
+  }
+
+  assert {
+    condition = (
+      !strcontains(yamldecode(helm_release.soperator_fluxcd_cm.values[0]).resources[0].data["values.yaml"], var.soperator_notifier.slack_webhook_url) &&
+      yamldecode(yamldecode(helm_release.soperator_fluxcd_cm.values[0]).resources[0].data["values.yaml"]).notifier.valuesFrom[0].kind == "Secret" &&
+      yamldecode(yamldecode(helm_release.soperator_fluxcd_cm.values[0]).resources[0].data["values.yaml"]).notifier.valuesFrom[0].name == yamldecode(helm_release.soperator_fluxcd_cm.values[0]).resources[1].metadata.name &&
+      yamldecode(base64decode(yamldecode(helm_release.soperator_fluxcd_cm.values[0]).resources[1].data["values.yaml"])).slack.webhookUrl == var.soperator_notifier.slack_webhook_url &&
+      yamldecode(yamldecode(helm_release.soperator_fluxcd_cm.values[0]).resources[0].data["values.yaml"]).notifier.valuesFrom[2].name == "soperator-notifier"
+    )
+    error_message = "Use the notifier Secret before the existing external override sources."
+  }
+}
+
+run "telemetry_without_accounting" {
+  command = plan
+
+  variables {
+    telemetry_enabled  = true
+    accounting_enabled = false
+  }
+
+  plan_options {
+    target = [helm_release.soperator_fluxcd_cm]
+  }
+
+  assert {
+    condition = yamldecode(yamldecode(helm_release.soperator_fluxcd_cm.values[0]).resources[0].data["values.yaml"]).soperator.values.controllerManager.manager.env == {
+      isMariadbCrdInstalled    = var.accounting_enabled
+      isPrometheusCrdInstalled = var.telemetry_enabled && var.prometheus_crds_enabled
+    }
+    error_message = "Operator discovery flags must match the CRDs installed by this Pro profile."
+  }
+}
+
+run "reject_legacy_4_1_chart" {
+  command = plan
+
+  variables {
+    operator_version = "4.1.18"
+  }
+
+  plan_options {
+    target = [helm_release.soperator_fluxcd_cm]
+  }
+
+  expect_failures = [var.operator_version]
+}
+
+run "reject_legacy_5_0_chart" {
+  command = plan
+
+  variables {
+    operator_version = "5.0.12"
+  }
+
+  plan_options {
+    target = [helm_release.soperator_fluxcd_cm]
+  }
+
+  expect_failures = [var.operator_version]
 }

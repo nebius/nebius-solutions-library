@@ -19,7 +19,7 @@ resources:
             url: ${kruise_helm_repo}
             type: oci
         customConfigmaps:
-          overrideValues:
+          values:
             %{~ if enroot_direct_squashfs_enabled ~}
             enroot:
               useDedicatedImageStorage: false
@@ -73,84 +73,21 @@ resources:
 
         observability:
           enabled: ${telemetry_enabled}
-          clusterName: ${cluster_name}
           publicEndpointEnabled: ${public_o11y_enabled}
           publicEndpointTokenKind: secret
-          region: ${region}
           tsaToken:
             secretName: o11y-writer-sa-token
             secretKey: accessToken
             writer:
               enabled: true
-              source: imds
+              source: ${tsa_token_writer_source}
               namespaces:
                 - monitoring-system
           opentelemetry:
-            enabled: ${telemetry_enabled}
-
-            %{~ if opentelemetry_batch_enabled ~}
-            batch:
-              %{~ if opentelemetry_batch.timeout != null ~}
-              timeout: ${opentelemetry_batch.timeout}
-              %{~ endif ~}
-              %{~ if opentelemetry_batch.send_batch_size != null ~}
-              sendBatchSize: ${opentelemetry_batch.send_batch_size}
-              %{~ endif ~}
-              %{~ if opentelemetry_batch.send_batch_max_size != null ~}
-              sendBatchMaxSize: ${opentelemetry_batch.send_batch_max_size}
-              %{~ endif ~}
-            %{~ endif ~}
-
-            %{~ if opentelemetry_sending_queue_enabled ~}
-            sendingQueue:
-              %{~ if opentelemetry_sending_queue.size != null ~}
-              queueSize: ${opentelemetry_sending_queue.size}
-              %{~ endif ~}
-              %{~ if opentelemetry_sending_queue.num_consumers != null ~}
-              numConsumers: ${opentelemetry_sending_queue.num_consumers}
-              %{~ endif ~}
-            %{~ endif ~}
-
-            logs:
-              %{~ if opentelemetry_collector_version != "" ~}
-              version: ${opentelemetry_collector_version}
-              %{~ endif ~}
-              values:
-                resources:
-                  requests:
-                    memory: ${resources.logs_collector.memory}
-                    cpu: ${resources.logs_collector.cpu}
-                  limits:
-                    memory: ${resources.logs_collector.memory}
-
-                jailLogs:
-                  enabled: true
-                  deleteAfterRead:
-                    enabled: ${ opentelemetry_delete_jail_logs_after_read }
-                    minAge: ${ opentelemetry_delete_jail_logs_min_age }
-                  resources:
-                    requests:
-                      memory: ${resources.jail_logs_collector.memory}
-                      cpu: ${resources.jail_logs_collector.cpu}
-                    limits:
-                      memory: ${resources.jail_logs_collector.memory}
-
-            events:
-              %{~ if opentelemetry_collector_version != "" ~}
-              version: ${opentelemetry_collector_version}
-              %{~ endif ~}
-              interval: 5m
-              timeout: 5m
-              values:
-                resources:
-                  requests:
-                    memory: ${resources.events_collector.memory}
-                    cpu: ${resources.events_collector.cpu}
-                  limits:
-                    memory: ${resources.events_collector.memory}
+            ${indent(12, trimspace(otel_collectors_yaml))}
 
           prometheusOperator:
-            enabled: ${telemetry_enabled}
+            enabled: ${prometheus_crds_enabled}
             interval: 5m
             timeout: 5m
             %{~ if prometheus_crds_version != "" ~}
@@ -169,13 +106,45 @@ resources:
             %{~ if vmstack_version != "" ~}
             version: ${vmstack_version}
             %{~ endif ~}
-            tsaToken:
-              writer:
-                source: ${tsa_token_writer_source}
+            %{~ if !create_pvcs ~}
+            valuesFrom:
+              - kind: ConfigMap
+                name: terraform-vmsingle-ephemeral-storage
+              - kind: ConfigMap
+                name: terraform-victoria-metrics-operator
+                optional: true
+              - kind: ConfigMap
+                name: victoria-metrics-operator
+                optional: true
+            %{~ endif ~}
+            %{~ if public_o11y_enabled ~}
+            dependsOn:
+              - name: '{{ include "soperator-fluxcd.fullname" . }}-ns'
+              - name: '{{ if and .Values.observability.publicEndpointEnabled (eq .Values.observability.publicEndpointTokenKind "secret") (include "soperator-fluxcd.o11yTsaTokenWriterEnabled" .) }}{{ include "soperator-fluxcd.o11yTsaTokenWriterName" . }}{{ end }}'
+              - name: '{{ if .Values.certManager.enabled }}{{ include "soperator-fluxcd.fullname" . }}-cert-manager{{ end }}'
+              - name: '{{ include "soperator-fluxcd.fullname" . }}-victoria-metrics-operator-crds'
+            %{~ endif ~}
             values:
-              kubeStateMetrics:
+              kube-state-metrics:
                 %{~ if kube_state_metrics_max_scrape_size != null ~}
-                maxScrapeSize: "${kube_state_metrics_max_scrape_size}"
+                vmScrape:
+                  spec:
+                    endpoints:
+                      - port: http
+                        honorLabels: true
+                        max_scrape_size: "${kube_state_metrics_max_scrape_size}"
+                        metricRelabelConfigs:
+                          - action: drop
+                            if:
+                              - 'kube_node_spec_taint{key!="node.kubernetes.io/unschedulable"}'
+                              - 'kube_node_spec_taint{effect!="NoSchedule"}'
+                          - action: labeldrop
+                            regex: (uid|container_id|image_id)
+                      - port: metrics
+                        honorLabels: true
+                        metricRelabelConfigs:
+                          - action: labeldrop
+                            regex: (uid|container_id|image_id)
                 %{~ endif ~}
                 resources:
                   requests:
@@ -188,8 +157,11 @@ resources:
                 spec:
                   extraArgs:
                     # Default cap for scrape jobs without their own max_scrape_size.
-                    # kube-state-metrics can override it per-job via kubeStateMetrics.maxScrapeSize.
                     promscrape.maxScrapeSize: "134217728"
+                    %{~ if public_o11y_enabled ~}
+                    remoteWrite.flushInterval: 2s
+                    remoteWrite.maxRowsPerBlock: "12000"
+                    %{~ endif ~}
                   externalLabels:
                     iam_tenant_id: ${iam_tenant_id}
                     iam_project_id: ${iam_project_id}
@@ -201,8 +173,28 @@ resources:
                     limits:
                       memory: ${resources.vm_agent.memory}
                   %{~ if public_o11y_enabled ~}
+                  extraEnvs:
+                    - name: CLUSTER_NAME
+                      value: ${jsonencode(cluster_name)}
                   remoteWriteSettings:
                     queues: ${vm_agent_queue_count}
+                    label:
+                      cluster: "%%{CLUSTER_NAME}"
+                      container_id: ${iam_project_id}
+                      iam_tenant_id: ${iam_tenant_id}
+                      iam_project_id: ${iam_project_id}
+                      mk8s_cluster_id: ${k8s_cluster_id}
+                  remoteWrite:
+                    - url: https://write.monitoring.${region}.nebius.cloud/projects/${iam_project_id}/buckets/soperator/prometheus
+                      bearerTokenSecret:
+                        name: o11y-writer-sa-token
+                        key: accessToken
+                      inlineUrlRelabelConfig:
+                        - action: labeldrop
+                          regex: feature_node_kubernetes_io_.*|kubernetes_io_.*|nvidia_com_gpu.*
+                        - action: labeldrop
+                          regex: UUID|DCGM_FI_PROCESS_NAME|pci_bus_id|prometheus|DCGM_FI_DEV_SERIAL|DCGM_FI_DEV_NAME|job
+                    - url: http://vmsingle-metrics-victoria-metrics-k8s-stack.monitoring-system.svc.cluster.local.:8428/api/v1/write
                   %{~ endif ~}
 
               vmsingle:
@@ -232,7 +224,7 @@ resources:
                     limits:
                       memory: ${resources.vm_single.memory}
 
-              prometheusNodeExporter:
+              prometheus-node-exporter:
                 enabled: true
                 %{~ if slurm_cluster.use_preinstalled_gpu_drivers ~}
                 extraArgs:
@@ -248,73 +240,37 @@ resources:
             version: ${vmlogs_version}
             %{~ endif ~}
             values:
-              persistentVolume:
-              %{~ if create_pvcs ~}
-                enabled: true
-                size: ${resources.vm_logs.size}
-                accessMode: ReadWriteOnce
-              %{~ else ~}
-                enabled: false
-              %{~ endif ~}
-              resources:
-                requests:
-                  memory: ${resources.vm_logs.memory}
-                  cpu: ${resources.vm_logs.cpu}
-                limits:
-                  memory: ${resources.vm_logs.memory}
+              server:
+                persistentVolume:
+                %{~ if create_pvcs ~}
+                  enabled: true
+                  size: ${resources.vm_logs.size}
+                  accessModes: [ReadWriteOnce]
+                %{~ else ~}
+                  enabled: false
+                %{~ endif ~}
+                resources:
+                  requests:
+                    memory: ${resources.vm_logs.memory}
+                    cpu: ${resources.vm_logs.cpu}
+                  limits:
+                    memory: ${resources.vm_logs.memory}
 
           dcgmExporter:
             enabled: ${dcgm_exporter_enabled}
             version: ${operator_version}
             values:
-              # waits for nvidia toolkit when not running on preinstalled gpu drivers, so opposite of use_preinstalled_gpu_drivers
-              validateToolkit: ${slurm_cluster.use_preinstalled_gpu_drivers ? "false" : "true"}
-              resources:
-                requests:
-                  memory: ${resources.dcgm_exporter.memory}Gi
-                  cpu: ${resources.dcgm_exporter.cpu * 1000}m
-                limits:
-                  memory: ${resources.dcgm_exporter.memory}Gi
+              validateToolkit: ${!slurm_cluster.use_preinstalled_gpu_drivers}
+              daemonSet:
+                nvidiaDcgmExporter:
+                  resources:
+                    requests:
+                      memory: ${resources.dcgm_exporter.memory}Gi
+                      cpu: ${resources.dcgm_exporter.cpu * 1000}m
+                    limits:
+                      memory: ${resources.dcgm_exporter.memory}Gi
 
-          ncclProfiles:
-            enabled: ${nccl_inspector_profiling.enabled}
-            values:
-              mode: shared
-              dumpDir: /mnt/jail${nccl_inspector_profiling.dump_dir}
-
-              %{~ if opentelemetry_batch_enabled ~}
-              batch:
-                %{~ if opentelemetry_batch.timeout != null ~}
-                timeout: ${opentelemetry_batch.timeout}
-                %{~ endif ~}
-                %{~ if opentelemetry_batch.send_batch_size != null ~}
-                sendBatchSize: ${opentelemetry_batch.send_batch_size}
-                %{~ endif ~}
-                %{~ if opentelemetry_batch.send_batch_max_size != null ~}
-                sendBatchMaxSize: ${opentelemetry_batch.send_batch_max_size}
-                %{~ endif ~}
-              %{~ endif ~}
-
-              %{~ if opentelemetry_sending_queue_enabled ~}
-              sendingQueue:
-                %{~ if opentelemetry_sending_queue.size != null ~}
-                queueSize: ${opentelemetry_sending_queue.size}
-                %{~ endif ~}
-                %{~ if opentelemetry_sending_queue.num_consumers != null ~}
-                numConsumers: ${opentelemetry_sending_queue.num_consumers}
-                %{~ endif ~}
-              %{~ endif ~}
-
-              deleteAfterRead:
-                enabled: ${ opentelemetry_delete_jail_logs_after_read }
-                minAge: 10m
-
-              resources:
-                requests:
-                  memory: ${resources.nccl_profiles_collector.memory}
-                  cpu: ${resources.nccl_profiles_collector.cpu}
-                limits:
-                  memory: ${resources.nccl_profiles_collector.memory}
+          ${indent(10, chomp(nccl_profiles))}
 
         slurmCluster:
           enabled: true
@@ -323,7 +279,7 @@ resources:
           version: ${operator_version}
           namespace: soperator
           releaseName: soperator
-          overrideValues:
+          values:
             clusterName: ${name}
             podNamePrefix: disabled
             cudaVersion: ${slurm_cluster.cuda_version}
@@ -858,7 +814,7 @@ resources:
           slurmClusterStorage:
             enabled: true
             interval: 5m
-            overrideValues:
+            values:
               volume:
                 controllerSpool:
                   enabled: ${slurm_cluster_storage.volume.controller_spool.enabled}
@@ -932,7 +888,7 @@ resources:
           version: ${operator_version}
           releaseName: soperator-activechecks
           namespace: soperator
-          overrideValues:
+          values:
             slurmClusterRefName: ${name}
 %{ if soperator_active_checks_gpus_per_node != null ~}
             slurmJob:
@@ -980,20 +936,24 @@ resources:
           timeout: 5m
           version: ${operator_version}
           values:
-            manager:
-              env:
-                enableMultiTopology: "true"
-              resources:
-                requests:
-                  memory: ${resources.soperator_main_controller.requests.memory}Gi
-                  cpu: ${resources.soperator_main_controller.requests.cpu * 1000}m
-                limits:
-                  memory: ${resources.soperator_main_controller.limits.memory}Gi
+            serviceMonitor:
+              enabled: ${prometheus_crds_enabled}
+            controllerManager:
+              manager:
+                env:
+                  isMariadbCrdInstalled: ${accounting_enabled}
+                  isPrometheusCrdInstalled: ${prometheus_crds_enabled}
+                resources:
+                  requests:
+                    memory: ${resources.soperator_main_controller.requests.memory}Gi
+                    cpu: ${resources.soperator_main_controller.requests.cpu * 1000}m
+                  limits:
+                    memory: ${resources.soperator_main_controller.limits.memory}Gi
           kruise:
             enabled: true
             interval: 5m
             timeout: 5m
-            overrideValues:
+            values:
               manager:
                 # Scales with the sizing tier; the kruise manager OOM-ed on big
                 # clusters with the chart-default 1 cpu / 2Gi.
@@ -1034,17 +994,26 @@ resources:
 
         notifier:
           enabled: ${notifier.enabled}
-          %{~ if notifier.enabled ~}
-          values:
-            slack:
-              webhookUrl: "${notifier.slack_webhook_url}"
+          %{~ if notifier.enabled && notifier.slack_webhook_url != null ~}
+          valuesFrom:
+            - kind: Secret
+              name: terraform-notifier-credentials
+              valuesKey: values.yaml
+            - kind: ConfigMap
+              name: terraform-soperator-notifier
+              optional: true
+              valuesKey: values.yaml
+            - kind: ConfigMap
+              name: soperator-notifier
+              optional: true
+              valuesKey: values.yaml
           %{~ endif ~}
 
         nfsServer:
           enabled: ${slurm_cluster.nfs_in_k8s.enabled}
           %{~ if slurm_cluster.nfs_in_k8s.enabled ~}
           # The chart version and the image tag come from the soperator-fluxcd release.
-          overrideValues:
+          values:
             image:
               repository: ${soperator_image_repo}/nfs-server
             nameOverride: nfs-server
@@ -1076,7 +1045,7 @@ resources:
             monitoring:
               enabled: true
               serviceMonitor:
-                enabled: true
+                enabled: ${prometheus_crds_enabled}
             %{~ endif ~}
           %{~ endif ~}
         tailscale:
@@ -1086,3 +1055,28 @@ resources:
         ${ indent(8, release) }
 
         %{~ endfor ~}
+%{ if notifier.enabled && notifier.slack_webhook_url != null ~}
+  - apiVersion: v1
+    kind: Secret
+    metadata:
+      name: terraform-notifier-credentials
+      labels:
+        reconcile.fluxcd.io/watch: Enabled
+    type: Opaque
+    data:
+      values.yaml: ${base64encode(yamlencode({ slack = { webhookUrl = notifier.slack_webhook_url } }))}
+%{ endif ~}
+%{ if !create_pvcs ~}
+  # Pass null directly to the child chart so Helm removes its default VMSingle PVC.
+  - apiVersion: v1
+    kind: ConfigMap
+    metadata:
+      name: terraform-vmsingle-ephemeral-storage
+      labels:
+        reconcile.fluxcd.io/watch: Enabled
+    data:
+      values.yaml: |
+        vmsingle:
+          spec:
+            storage: null
+%{ endif ~}
