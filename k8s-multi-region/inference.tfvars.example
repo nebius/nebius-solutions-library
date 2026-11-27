@@ -1,0 +1,70 @@
+# Terragrunt expands this arbitrary cluster map into independent Terraform units.
+# Export TF_VAR_iam_token separately. Reservation IDs identify existing capacity.
+defaults = {
+  tenant_id                  = "tenant-REPLACE"
+  k8s_version                = "1.35"
+  ssh_public_key             = { path = "/secure/id_ed25519.pub" }
+  cpu_nodes_platform         = "cpu-d3"
+  cpu_nodes_preset           = "8vcpu-32gb"
+  cpu_nodes_fixed_count      = 3
+  cpu_disk_size              = 512
+  cpu_nodes_public_ips       = false
+  gpu_nodes_public_ips       = false
+  gpu_nodes_driverfull_image = true
+  gpu_disk_size              = 512
+  infiniband_fabric          = ""
+  loki                       = { enabled = false }
+  enable_dynamo              = true
+}
+
+clusters = {
+  north-inference = {
+    parent_id       = "project-REPLACE-eu-north1"
+    subnet_id       = "vpcsubnet-REPLACE-eu-north1"
+    region          = "eu-north1"
+    cluster_name    = "inference-north"
+    gpu_node_groups = 4
+    gpu_node_group_overrides = [
+      {
+        platform           = "gpu-h100-sxm", preset = "8gpu-128vcpu-1600gb"
+        fixed_count        = 1, autoscaling = { enabled = false }
+        reservation_policy = { policy = "STRICT", reservation_ids = ["REPLACE_WITH_EXISTING_H100_RESERVATION_ID"] }
+        labels             = { "runai.nebius/pool" = "h100-reserved-full" }
+      },
+      {
+        platform    = "gpu-h100-sxm", preset = "8gpu-128vcpu-1600gb"
+        preemptible = true
+        autoscaling = { enabled = true, min_size = 0, max_size = 2 }
+        labels      = { "runai.nebius/pool" = "h100-spot-full" }
+      },
+      {
+        platform    = "gpu-h100-sxm", preset = "1gpu-16vcpu-200gb"
+        preemptible = true
+        autoscaling = { enabled = true, min_size = 0, max_size = 8 }
+        disk_size   = 1024
+        labels      = { "runai.nebius/pool" = "h100-spot-single" }
+      },
+      {
+        platform           = "gpu-l40s-a", preset = "1gpu-24vcpu-96gb"
+        reservation_policy = { policy = "FORBID" }
+        autoscaling        = { enabled = true, min_size = 0, max_size = 4 }
+        labels             = { "runai.nebius/pool" = "l40s" }
+      },
+    ]
+  }
+  north2-inference = {
+    parent_id             = "project-REPLACE-eu-north2", subnet_id = "vpcsubnet-REPLACE-eu-north2"
+    region                = "eu-north2", cluster_name = "inference-north2"
+    gpu_nodes_platform    = "gpu-h200-sxm", gpu_nodes_preset = "1gpu-16vcpu-200gb"
+    gpu_nodes_autoscaling = { enabled = true, min_size = 0, max_size = 4 }
+  }
+  west-inference = {
+    parent_id             = "project-REPLACE-eu-west1", subnet_id = "vpcsubnet-REPLACE-eu-west1"
+    region                = "eu-west1", cluster_name = "inference-west"
+    gpu_nodes_platform    = "gpu-h200-sxm", gpu_nodes_preset = "8gpu-128vcpu-1600gb"
+    gpu_nodes_autoscaling = { enabled = true, min_size = 0, max_size = 2 }
+  }
+}
+
+# Use this file as K8S_FLEET_CONFIG; Terragrunt selects every configured cluster.
+# Node bounds count VMs: max_size=2 on an 8-GPU preset permits up to 16 GPUs.

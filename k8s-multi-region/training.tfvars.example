@@ -1,0 +1,53 @@
+# Terragrunt expands this cluster map into separate regional Terraform states.
+# Export TF_VAR_iam_token separately; keep credentials out of these examples.
+defaults = {
+  loki                            = { enabled = false }
+  tenant_id                       = "tenant-REPLACE"
+  k8s_version                     = "1.35"
+  ssh_public_key                  = { path = "/secure/id_ed25519.pub" }
+  cpu_nodes_platform              = "cpu-d3"
+  cpu_nodes_preset                = "4vcpu-16gb"
+  cpu_nodes_fixed_count           = 3
+  cpu_disk_size                   = 512
+  cpu_nodes_public_ips            = false
+  gpu_nodes_public_ips            = false
+  infiniband_fabric               = ""
+  gpu_nodes_fixed_count_per_group = 1
+  gpu_nodes_driverfull_image      = true
+  enable_filestore                = true
+  existing_filestore              = ""
+  filestore_disk_size_gibibytes   = 100
+}
+
+
+clusters = {
+  eu-north1 = {
+    parent_id          = "project-REPLACE-eu"
+    subnet_id          = "vpcsubnet-REPLACE-eu"
+    region             = "eu-north1"
+    cluster_name       = "training-eu"
+    gpu_nodes_platform = "gpu-h100-sxm"
+    gpu_nodes_preset   = "1gpu-16vcpu-200gb"
+  }
+
+  eu-north2 = {
+    parent_id          = "project-REPLACE-eu2"
+    subnet_id          = "vpcsubnet-REPLACE-eu2"
+    region             = "eu-north2"
+    cluster_name       = "training-eu2"
+    gpu_nodes_platform = "gpu-h200-sxm"
+    gpu_nodes_preset   = "1gpu-16vcpu-200gb"
+  }
+
+  eu-west1 = {
+    parent_id          = "project-REPLACE-eu-west1"
+    subnet_id          = "vpcsubnet-REPLACE-eu-west1"
+    region             = "eu-west1"
+    cluster_name       = "training-west"
+    gpu_nodes_platform = "gpu-h200-sxm"
+    gpu_nodes_preset   = "8gpu-128vcpu-1600gb"
+  }
+}
+
+
+# Use this file as K8S_FLEET_CONFIG; Terragrunt selects every configured cluster.
