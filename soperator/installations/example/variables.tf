@@ -1128,6 +1128,11 @@ variable "slurm_nodeset_workers" {
     # GB300 nodesets always belong to the aggregate named after them.
     aggregate_slurm_nodesets = optional(list(string), [])
     auto_resume              = optional(bool)
+    # Idle seconds after which Slurm powers the nodes down; renders SuspendTime on the NodeSet's NodeName line,
+    # overriding the partition-level and global SuspendTime. 0 suspends idle nodes immediately.
+    # null omits the setting, so the partition-level, then the global SuspendTime applies.
+    # Requires ephemeral_nodes = true: Slurm never suspends nodes of other nodesets.
+    auto_suspend_seconds = optional(number)
     # Deprecated: Partition settings matter a lot, and it doesn't make sense to create partitions with default settings.
     create_partition               = optional(bool)
     ephemeral_nodes                = optional(bool, false)
@@ -1185,6 +1190,25 @@ variable "slurm_nodeset_workers" {
       contains(["rollingUpdate", "slurmAwareRollingUpdate"], worker.rolling_update_strategy)
     ])
     error_message = "slurm_nodeset_workers.rolling_update_strategy must be one of: rollingUpdate, slurmAwareRollingUpdate."
+  }
+
+  validation {
+    condition = alltrue([
+      for worker in var.slurm_nodeset_workers :
+      worker.auto_suspend_seconds == null || (
+        worker.auto_suspend_seconds >= 0 &&
+        floor(worker.auto_suspend_seconds) == worker.auto_suspend_seconds
+      )
+    ])
+    error_message = "slurm_nodeset_workers.auto_suspend_seconds must be null or a non-negative whole number."
+  }
+
+  validation {
+    condition = alltrue([
+      for worker in var.slurm_nodeset_workers :
+      worker.auto_suspend_seconds == null || worker.ephemeral_nodes
+    ])
+    error_message = "slurm_nodeset_workers.auto_suspend_seconds requires ephemeral_nodes = true: Slurm never suspends nodes of other nodesets."
   }
 
   validation {

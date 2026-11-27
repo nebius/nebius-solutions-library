@@ -52,6 +52,9 @@ nodesets:
 
         nodeConfig:
           autoResume: ${nodeset.auto_resume}
+          %{~ if nodeset.auto_suspend_seconds != null ~}
+          autoSuspendSeconds: ${nodeset.auto_suspend_seconds}
+          %{~ endif ~}
           %{~ if length(nodeset.features) > 0 ~}
           features:
             %{~ for feature in nodeset.features ~}
