@@ -2,6 +2,8 @@
 
 import os
 
+from tls_trust import configure_trust
+
 LITELLM_URL = os.environ.get("LITELLM_URL", "http://litellm.litellm.svc:4000")
 LITELLM_MASTER_KEY = os.environ.get("LITELLM_MASTER_KEY", "")
 # The per-fleet router key (Secret api/router-key, control cluster; services/api/keys.py `ensure_router`): the
@@ -60,7 +62,7 @@ S3_ENV_SECRET = os.environ.get("S3_ENV_SECRET", "s3")  # AWS_* env for the runne
 EXECUTOR_SA = os.environ.get("EXECUTOR_SA", "job-runner")  # job ServiceAccount in the tenant namespace (charts/tenant)
 # the runner image (services/jobs) through the fleet's logical registry host, pullable on every node of every
 # region (terraform.tfvars `images`, docs/IMAGES.md); the same holds for every catalog image
-RUNNER_IMAGE = os.environ.get("RUNNER_IMAGE", "registry.serverless2.local/nebius/serverless2/jobs:0.1.15")
+RUNNER_IMAGE = os.environ.get("RUNNER_IMAGE", "registry.serverless2.local/nebius/serverless2/jobs:0.1.16")
 # External domain of this cluster's own endpoints (single-cluster mode; the GPU regions are in ENDPOINT_DOMAINS): async
 # endpoint calls from tenant Jobs and sync calls for another region go through the region's gateway (TLS, key check,
 # rate limit) as https://<model>-predictor.<ns>.<domain>, never to the predictor Service (no call may skip the key check).
@@ -119,51 +121,9 @@ LABEL = "serverless2.nebius"
 REGION_OIDC_ISSUERS = dict(kv.split("=", 1) for kv in os.environ.get("REGION_OIDC_ISSUERS", "").split(",") if "=" in kv)
 
 
-_trust_state: dict = {"stamp": None}
-
-
-def _trust_file(refresh: bool = False) -> None:
-    """HTTPS clients (httpx) trust the system roots plus every CA the platform mounts under /etc/ssl/msp (the Nebius
-    MSP CA for the managed database, the fleet CA of the regional gateways, a private bundle): one file, set as
-    SSL_CERT_FILE before any client is built. Public roots stay, so public endpoints (Let's Encrypt hostnames of
-    the control cluster, the Nebius APIs) keep working. `refresh=True` rebuilds the file when the mounted CAs
-    changed (a ConfigMap update reaches the pod without a restart; httpx reads the file per client)."""
-    import glob
-
-    extra = sorted(glob.glob("/etc/ssl/msp/*.pem"))
-    if not extra:
-        return
-    stamp = tuple((f, os.path.getmtime(f), os.path.getsize(f)) for f in extra)
-    if refresh:
-        if stamp == _trust_state["stamp"]:
-            return
-    elif os.environ.get("SSL_CERT_FILE"):
-        return
-    _trust_state["stamp"] = stamp
-    try:
-        import certifi
-
-        roots = [certifi.where(), "/etc/ssl/certs/ca-certificates.crt"]
-    except ImportError:
-        roots = ["/etc/ssl/certs/ca-certificates.crt"]
-    parts = []
-    for f in roots + extra:
-        try:
-            parts.append(open(f).read().strip())
-        except OSError:
-            continue
-    path = "/tmp/trust.pem"
-    with open(path, "w") as out:
-        out.write("\n".join(parts) + "\n")
-    os.environ["SSL_CERT_FILE"] = path
-
-
 def refresh_trust() -> None:
-    """Called before an outbound HTTPS call to another cluster: picks up a rotated CA without a restart."""
-    try:
-        _trust_file(refresh=True)
-    except OSError:
-        pass
+    """Refresh all mounted and public roots; fail closed if a replacement is unsafe."""
+    configure_trust(refresh=True)
 
 
-_trust_file()
+configure_trust()

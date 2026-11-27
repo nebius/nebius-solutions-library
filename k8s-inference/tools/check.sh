@@ -30,7 +30,7 @@ render() { # a Terraform expression over terraform.tfvars.example (or TFVARS_EXA
 
 check_lint() {
   step "Python lint and format (Ruff)"
-  (cd "$ROOT" && "$PYTHON" -m ruff check services stack && "$PYTHON" -m ruff format --check services stack)
+  (cd "$ROOT" && "$PYTHON" -m ruff check services stack tools && "$PYTHON" -m ruff format --check services stack tools)
   step "ShellCheck: fleet scripts and container entry points"
   shellcheck "$ROOT"/stack.sh "$ROOT"/stack/{scripts,bootstrap}/*.sh "$ROOT"/tools/*.sh "$ROOT"/services/{jobs,ops}/bin/*.sh
   step "terraform fmt"

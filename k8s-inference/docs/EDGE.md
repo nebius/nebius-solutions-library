@@ -34,8 +34,8 @@ The control cluster's public hostnames (`api`, `grafana`, `litellm`) get Let's E
 through ACME HTTP-01 on its gateway. The GPU regions' gateways (`grafana.<region>`, the model endpoints; there
 is no `api.<region>`, the API is the control cluster's) get theirs from the **fleet CA** by default (`edge.regional_certificates = "fleet-ca"`): the cloud
 stage generates a CA key pair, the platform stage installs it as cert-manager's `fleet-ca` ClusterIssuer on
-every GPU region and puts the CA certificate into the `trust` ConfigMap, the API merges it with the system
-roots (`services/api/config.py`) and LiteLLM reads the bundle through `SSL_CERT_FILE`. Nothing in the fleet
+every GPU region and puts the CA certificate into the `trust` ConfigMap, the API adds it to one public trust store
+(`services/api/tls_trust.py`) and LiteLLM reads the bundle through `SSL_CERT_FILE`. Nothing in the fleet
 then depends on a regional gateway being reachable from the public internet, which an ACME challenge needs: a
 regional gateway may answer on port 80 only from inside Nebius, so Let's Encrypt times out and the control
 plane cannot forward to it over HTTPS. A browser on a regional
@@ -44,6 +44,9 @@ only. `edge.regional_certificates = "acme"` restores per-region Let's Encrypt wh
 
 Rotation: when the fleet CA changes (a new fleet, or the cloud state rewritten from another checkout), the
 platform stage re-issues every region's leaf certificates (`terraform_data.reissue_on_ca_change`), LiteLLM
-restarts on the changed bundle, and the API rebuilds its trust file before each cross-cluster call. Apply the
+restarts on the changed bundle, and the API checks all source files before each cross-cluster call, rebuilding its trust file when any changes.
+An explicit `SSL_CERT_FILE` or `trust_bundle_pem` supplies the authoritative public store; otherwise the API uses
+the system roots, falling back to certifi only when the system bundle is absent. Known compromised certificates
+in any selected source stop the request. See [CA remediation](../../docs/security/emudhra-ca-remediation.md). Apply the
 control cluster first, then the regions. One rule for operators: every `./stack.sh apply` of one fleet must run
 from the same checkout at the same commit; an older copy of the stack silently drops resources it does not know.
